@@ -64,6 +64,7 @@ jobs:
           python -m zipfile -l dist/*.whl > files.txt
           grep -q "vpstream/tests/conftest.py" files.txt
           grep -q "vpstream/assets/hls.min.js" files.txt
+          grep -q "vpstream/assets/hls.js.version" files.txt
           grep -q "vpstream/assets/caps.js" files.txt
       - name: Install the wheel and run selftest
         run: |

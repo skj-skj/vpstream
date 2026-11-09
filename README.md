@@ -66,7 +66,10 @@ git config core.hooksPath .githooks
 Pull requests need a Conventional Commit title (`feat: ...`, `fix: ...`). Releases are made
 from `main` by python-semantic-release.
 
-hls.js (Apache-2.0) is bundled in `src/vpstream/assets`.
+hls.js (Apache-2.0) is bundled in `src/vpstream/assets`, with its version in `hls.js.version`.
+`python scripts/update-hlsjs.py` updates it from npm (checked against npm's sha512 integrity;
+`--version X` for a given release, `--check` to only compare). A weekly workflow runs the same
+script and opens a pull request when a new release is out.
 
 ## License
 
