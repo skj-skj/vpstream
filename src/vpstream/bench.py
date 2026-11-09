@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import resource
 import shutil
 import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +23,14 @@ from vpstream.ffargs import (
     Window,
     burn_hls,
     copy_hls,
-    parse_ffmpeg_list,
+    escape_filter_path,
     transcode_hls,
 )
 from vpstream.probe import MediaInfo, SubtitleTrack, probe
-from vpstream.tools import Runner, low_priority_prefix, require
+from vpstream.tools import Runner, ffmpeg_names, low_priority_prefix, require
+
+# Builds a step's ffmpeg command for the folder it should write into.
+ArgsBuilder = Callable[[Path], list[str]]
 
 
 @dataclass
@@ -69,7 +74,9 @@ class BenchReport:
             raw["speed"] = round(step.speed, 3)
             raw["output_mbps"] = round(step.output_mbps, 3)
             raw["estimated_full_seconds"] = (
-                round(self.duration / step.speed, 1) if step.speed > 0 else None
+                round(self.duration / step.speed, 1)
+                if step.speed > 0 and self.duration > 0
+                else None
             )
         return data
 
@@ -97,13 +104,34 @@ def pick_burn_track(info: MediaInfo, number: int | None) -> SubtitleTrack | None
     return None
 
 
+# libass: "fontselect: (Arial, 400, 0) -> /usr/share/fonts/DejaVuSans.ttf, 0, DejaVuSans"
+_FONTSELECT = re.compile(r"fontselect: \((?P<asked>[^,]*),.*?\) -> (?P<got>.*)$")
+_FONT_PROBLEMS = ("glyph", "font not found", "no font", "fallback")
+
+
+def _font_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def font_replaced(line: str) -> bool:
+    """True for a libass fontselect line that picked a font other than the one asked for."""
+    m = _FONTSELECT.search(line)
+    if not m:
+        return False
+    asked = _font_key(m["asked"])
+    got = m["got"].split(",")
+    candidates = [Path(got[0].strip()).stem, got[-1]]
+    return not any(_font_key(c).startswith(asked) for c in candidates if c.strip())
+
+
 def font_warnings(stderr: str) -> list[str]:
-    """libass lines that suggest a font was missing or replaced."""
-    keys = ("fontselect", "glyph", "font not found", "no font", "fallback")
+    """libass lines that say a font was missing or replaced by another one."""
     out = []
     for line in stderr.splitlines():
         low = line.lower()
-        if any(k in low for k in keys):
+        if font_replaced(line) or (
+            "fontselect" not in low and any(k in low for k in _FONT_PROBLEMS)
+        ):
             out.append(line.strip())
     return out[:50]
 
@@ -144,10 +172,14 @@ def _children_cpu() -> float:
     return r.ru_utime + r.ru_stime
 
 
+def skipped_step(name: str, media_seconds: float, note: str) -> StepResult:
+    return StepResult(name=name, ok=False, media_seconds=media_seconds, skipped=True, note=note)
+
+
 def run_step(
     runner: Runner,
     name: str,
-    args: list[str],
+    build: ArgsBuilder,
     work: Path,
     media_seconds: float,
     prefix: list[str],
@@ -156,11 +188,9 @@ def run_step(
 ) -> StepResult:
     out = work / name.replace(" ", "_")
     out.mkdir(parents=True, exist_ok=True)
-    # Builders write into a placeholder folder; point them at this step's own folder.
-    args = [a.replace("__OUT__", str(out)) for a in args]
     cpu0 = _children_cpu()
     t0 = time.monotonic()
-    res = runner.run([*prefix, *args])
+    res = runner.run([*prefix, *build(out)])
     wall = time.monotonic() - t0
     step = StepResult(
         name=name,
@@ -177,6 +207,19 @@ def run_step(
         step.font_warnings = font_warnings(res.stderr)
     shutil.rmtree(out, ignore_errors=True)
     return step
+
+
+def filter_source(work: Path, path: Path) -> Path:
+    """Link the source to a plain name, because the subtitles filter reads it by name.
+
+    Raises ValueError or OSError when the temporary folder cannot be used for this.
+    """
+    link = work / ("source" + path.suffix.lower())
+    if not re.fullmatch(r"\.[a-z0-9]+", link.suffix):
+        link = work / "source"
+    escape_filter_path(link)
+    os.symlink(path.resolve(), link)
+    return link
 
 
 def benchmark(
@@ -197,107 +240,86 @@ def benchmark(
     v = info.video[0]
     window = plan_window(info.duration, sample)
     media_seconds = window.length if window.length is not None else info.duration
-    enc = runner.run(["ffmpeg", "-hide_banner", "-encoders"], timeout=30)
-    flt = runner.run(["ffmpeg", "-hide_banner", "-filters"], timeout=30)
-    encoders = parse_ffmpeg_list(enc.stdout)
-    filters = parse_ffmpeg_list(flt.stdout)
+    encoders = ffmpeg_names(runner, "encoders")
+    filters = ffmpeg_names(runner, "filters")
     if "libx264" not in encoders:
         raise ValueError("this ffmpeg has no libx264 encoder")
     tonemap = {"zscale", "tonemap"} <= filters
     prefix = low_priority_prefix(runner) if nice else []
     burn = pick_burn_track(info, sub)
+    src = str(path)
     steps: list[StepResult] = []
+
+    def step(name: str, build: ArgsBuilder, note: str = "", check_fonts: bool = False) -> None:
+        steps.append(run_step(runner, name, build, work, media_seconds, prefix, note, check_fonts))
+
     with tempfile.TemporaryDirectory(prefix="vpstream-bench-", dir=tmp_dir) as tmp:
         work = Path(tmp)
-        src = str(path)
 
         progress("copy to HLS")
         note = "" if v.codec in BROWSER_COPY_CODECS else f"{v.codec} copy is unlikely to play"
-        steps.append(
-            run_step(
-                runner,
-                "copy",
-                copy_hls(src, "__OUT__", video_codec=v.codec, window=window),
-                work,
-                media_seconds,
-                prefix,
-                note,
-            )
-        )
+        step("copy", lambda out: copy_hls(src, out, video_codec=v.codec, window=window), note)
 
         hdr_note = ""
         if v.hdr:
             hdr_note = "HDR tone mapped" if tonemap else "HDR, no zscale: not tone mapped"
         for preset in presets:
             progress(f"transcode to H.264 ({preset})")
-            s = EncodeSettings(preset=preset)
-            steps.append(
-                run_step(
-                    runner,
-                    f"transcode {preset}",
-                    transcode_hls(
-                        src, "__OUT__", hdr=v.hdr, tonemap=tonemap, window=window, settings=s
-                    ),
-                    work,
-                    media_seconds,
-                    prefix,
-                    hdr_note,
-                )
+            build = partial(
+                transcode_hls,
+                src,
+                hdr=v.hdr,
+                tonemap=tonemap,
+                window=window,
+                settings=EncodeSettings(preset=preset),
             )
+            step(f"transcode {preset}", build, hdr_note)
 
+        preset = presets[0]
         if burn is None:
             steps.append(
-                StepResult(
-                    name="burn-in",
-                    ok=False,
-                    media_seconds=media_seconds,
-                    skipped=True,
-                    note="skipped: no image, ASS or SSA subtitle track",
+                skipped_step(
+                    "burn-in", media_seconds, "skipped: no image, ASS or SSA subtitle track"
+                )
+            )
+        elif burn.kind != "image" and "subtitles" not in filters:
+            steps.append(
+                skipped_step(
+                    "burn-in", media_seconds, "skipped: this ffmpeg has no subtitles filter"
                 )
             )
         else:
             image = burn.kind == "image"
-            if not image and "subtitles" not in filters:
+            try:
+                link = filter_source(work, path)
+            except (OSError, ValueError) as exc:
                 steps.append(
-                    StepResult(
-                        name="burn-in",
-                        ok=False,
-                        media_seconds=media_seconds,
-                        skipped=True,
-                        note="skipped: this ffmpeg has no subtitles filter",
+                    skipped_step(
+                        f"burn-in {preset}",
+                        media_seconds,
+                        f"skipped: the temporary folder cannot be used ({exc}); "
+                        "pass --tmp with a plain path on a disk that allows links",
                     )
                 )
             else:
-                # The subtitles filter reads the file by name; link it to a safe name.
-                link = work / ("source" + path.suffix.lower())
-                if not link.suffix[1:].isalnum():
-                    link = work / "source"
-                os.symlink(path.resolve(), link)
-                preset = presets[0]
                 progress(f"burn in subtitle {burn.number} ({burn.codec}, {preset})")
-                steps.append(
-                    run_step(
-                        runner,
-                        f"burn-in {preset}",
-                        burn_hls(
-                            src,
-                            "__OUT__",
-                            sub_number=burn.number,
-                            image=image,
-                            filter_src=link,
-                            hdr=v.hdr,
-                            tonemap=tonemap,
-                            window=window,
-                            settings=EncodeSettings(preset=preset),
-                            loglevel="error" if image else "info",
-                        ),
-                        work,
-                        media_seconds,
-                        prefix,
-                        f"subtitle {burn.number} {burn.codec} {burn.language}"
-                        + (f", {info.attachments} embedded fonts" if not image else ""),
-                        check_fonts=not image,
-                    )
+                fonts = "" if image else f", {info.attachments} embedded fonts"
+                step(
+                    f"burn-in {preset}",
+                    lambda out: burn_hls(
+                        src,
+                        out,
+                        sub_number=burn.number,
+                        image=image,
+                        filter_src=link,
+                        hdr=v.hdr,
+                        tonemap=tonemap,
+                        window=window,
+                        settings=EncodeSettings(preset=preset),
+                        loglevel="error" if image else "info",
+                    ),
+                    f"subtitle {burn.number} {burn.codec} {burn.language}{fonts}",
+                    check_fonts=not image,
                 )
 
     return BenchReport(

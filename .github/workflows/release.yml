@@ -72,8 +72,9 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
 
+  # PyPI only after the same files were accepted by TestPyPI, so TestPyPI is a real dry run.
   pypi:
-    needs: release
+    needs: [release, testpypi]
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
     environment:

@@ -7,6 +7,7 @@ used by `vpstream prepare` in a later milestone, which keeps `bench` numbers hon
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,36 +62,41 @@ def input_args(src: str, window: Window, *, copyts: bool = False) -> list[str]:
     return [*args, "-i", src]
 
 
+def aac_args(bitrate: str) -> list[str]:
+    return ["-c:a", "aac", "-b:a", bitrate]
+
+
 def audio_args(s: EncodeSettings) -> list[str]:
-    return [
-        "-map",
-        "0:a?",
-        "-c:a",
-        "aac",
-        "-b:a",
-        s.audio_bitrate,
-        "-ac",
-        str(s.audio_channels),
-    ]
+    return ["-map", "0:a?", *aac_args(s.audio_bitrate), "-ac", str(s.audio_channels)]
 
 
-def hls_output_args(out_dir: str | Path, *, fmp4: bool = True) -> list[str]:
+def hls_output_args(
+    out_dir: str | Path,
+    *,
+    fmp4: bool = True,
+    seconds: int = HLS_SEGMENT_SECONDS,
+    segment: str = "seg_%05d",
+    playlist: str = "index.m3u8",
+    extra: Sequence[str] = (),
+) -> list[str]:
+    """VOD HLS output into `out_dir`. `extra` goes before the file names, for variant maps."""
     out = Path(out_dir)
     ext = "m4s" if fmp4 else "ts"
     return [
         "-f",
         "hls",
         "-hls_time",
-        str(HLS_SEGMENT_SECONDS),
+        str(seconds),
         "-hls_playlist_type",
         "vod",
         "-hls_flags",
         "independent_segments",
         "-hls_segment_type",
         "fmp4" if fmp4 else "mpegts",
+        *extra,
         "-hls_segment_filename",
-        str(out / f"seg_%05d.{ext}"),
-        str(out / "index.m3u8"),
+        str(out / f"{segment}.{ext}"),
+        str(out / playlist),
     ]
 
 
@@ -192,9 +198,13 @@ def burn_filter(
     pre = f"{TONEMAP_CHAIN}," if hdr and tonemap else ""
     tail = "setpts=PTS-STARTPTS,format=yuv420p[v]"
     if image:
-        base = f"[0:v:0]{pre}null[base];" if pre else ""
-        src_label = "[base]" if pre else "[0:v:0]"
-        return f"{base}{src_label}[0:s:{si}]overlay=eof_action=pass,{tail}"
+        # Image subtitles are drawn for their own canvas (often 1080p over a 4K video), so
+        # they are scaled to the video's size before the overlay.
+        return (
+            f"[0:v:0]{pre}null[base];"
+            f"[0:s:{si}][base]scale2ref=w=rw:h=rh[sub][ref];"
+            f"[ref][sub]overlay=eof_action=pass,{tail}"
+        )
     path = escape_filter_path(filter_src)
     return f"[0:v:0]{pre}subtitles=filename={path}:si={si},{tail}"
 

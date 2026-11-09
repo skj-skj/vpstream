@@ -57,11 +57,22 @@ def test_burn_ass_uses_subtitles_filter_with_zero_based_index() -> None:
     )
 
 
-def test_burn_image_uses_overlay() -> None:
+def test_burn_image_is_scaled_to_the_video_then_overlaid() -> None:
     graph = ffargs.burn_filter(sub_number=1, image=True, filter_src="", hdr=False, tonemap=True)
-    assert graph.startswith("[0:v:0][0:s:0]overlay")
+    assert graph.startswith("[0:v:0]null[base];[0:s:0][base]scale2ref=w=rw:h=rh[sub][ref];")
+    assert "[ref][sub]overlay=eof_action=pass" in graph and graph.endswith("[v]")
     hdr = ffargs.burn_filter(sub_number=3, image=True, filter_src="", hdr=True, tonemap=True)
-    assert hdr.startswith("[0:v:0]zscale") and "[base][0:s:2]overlay" in hdr
+    assert hdr.startswith("[0:v:0]zscale") and "[0:s:2][base]scale2ref" in hdr
+
+
+def test_hls_output_args_options() -> None:
+    args = ffargs.hls_output_args(
+        "/o", fmp4=False, seconds=2, segment="s_%v", playlist="v_%v.m3u8", extra=("-x", "y")
+    )
+    assert _after(args, "-hls_time") == "2"
+    assert _after(args, "-hls_segment_type") == "mpegts"
+    assert args[-3:] == ["-hls_segment_filename", "/o/s_%v.ts", "/o/v_%v.m3u8"]
+    assert args.index("-x") < args.index("-hls_segment_filename")
 
 
 def test_burn_args_keep_timestamps_and_drop_audio() -> None:

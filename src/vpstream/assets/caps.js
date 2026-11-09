@@ -3,6 +3,7 @@
   "use strict";
 
   var PLAY_TIMEOUT = 12000;
+  var AUDIO_START_LIMIT = 30000;
   var MEDIA = "/caps/media/";
   var S = {
     session: String(Date.now()) + "-" + String(Math.random()).slice(2, 8),
@@ -18,8 +19,18 @@
   var manifest = null;
   var busy = false;
 
+  var HLS_TYPE = "application/vnd.apple.mpegurl";
+
   function $(id) { return document.getElementById(id); }
   function setStage(t) { $("stage").textContent = t; }
+
+  function mediaSource() {
+    return window.MediaSource || window.ManagedMediaSource || window.WebKitMediaSource;
+  }
+  function hlsJsOk() { return !!(window.Hls && Hls.isSupported()); }
+  function nativeHls(v) { return (v || document.createElement("video")).canPlayType(HLS_TYPE); }
+  function stop(v) { try { v.pause(); } catch (e) { } }
+  function clear(id) { $(id).innerHTML = ""; }
 
   function send(stage) {
     S.stage = stage;
@@ -50,6 +61,8 @@
     $(table).getElementsByTagName("tbody")[0].appendChild(tr);
   }
 
+  function clearTable(table) { $(table).getElementsByTagName("tbody")[0].innerHTML = ""; }
+
   function record(name, result, detail) {
     S.playback.push({ name: name, result: result, detail: detail || "" });
     addRow("results", name, result, detail);
@@ -77,10 +90,13 @@
     return (e.key || "?") + "/" + (e.keyCode || e.which || 0);
   }
 
-  document.addEventListener("keydown", function (e) {
-    var k = keyName(e);
+  function noteKey(k) {
     if (S.keys.indexOf(k) < 0) S.keys.push(k);
     $("keys").textContent = "Remote keys seen: " + S.keys.join("  ");
+  }
+
+  document.addEventListener("keydown", function (e) {
+    noteKey(keyName(e));
     var code = e.keyCode;
     if (code === 37 || code === 38) { moveFocus(-1); e.preventDefault(); }
     if (code === 39 || code === 40) { moveFocus(1); e.preventDefault(); }
@@ -90,8 +106,7 @@
   if (window.history && history.pushState) {
     history.pushState({ caps: 1 }, "");
     window.addEventListener("popstate", function () {
-      if (S.keys.indexOf("Back(popstate)") < 0) S.keys.push("Back(popstate)");
-      $("keys").textContent = "Remote keys seen: " + S.keys.join("  ");
+      noteKey("Back(popstate)");
       history.pushState({ caps: 1 }, "");
     });
   }
@@ -100,7 +115,6 @@
 
   function envInfo() {
     var v = document.createElement("video");
-    var MS = window.MediaSource || window.ManagedMediaSource || window.WebKitMediaSource;
     var env = {
       userAgent: navigator.userAgent,
       screen: screen.width + "x" + screen.height + " @" + (window.devicePixelRatio || 1),
@@ -109,9 +123,9 @@
       hdrDisplay: !!(window.matchMedia && matchMedia("(dynamic-range: high)").matches),
       mediaSource: !!window.MediaSource,
       managedMediaSource: !!window.ManagedMediaSource,
-      hlsJsSupported: !!(window.Hls && Hls.isSupported()),
+      hlsJsSupported: hlsJsOk(),
       hlsJsVersion: window.Hls ? Hls.version : "",
-      nativeHls: v.canPlayType("application/vnd.apple.mpegurl") || "no",
+      nativeHls: nativeHls(v) || "no",
       audioTracksApi: "audioTracks" in v,
       textTracksApi: "textTracks" in v,
       playbackQualityApi: typeof v.getVideoPlaybackQuality === "function",
@@ -125,11 +139,11 @@
     for (var k in env) {
       if (Object.prototype.hasOwnProperty.call(env, k)) addRow("env", k, "", String(env[k]));
     }
-    return MS;
   }
 
-  function supportInfo(MS) {
+  function supportInfo() {
     var v = document.createElement("video");
+    var MS = mediaSource();
     var types = [
       ["H.264 High 8-bit", 'video/mp4; codecs="avc1.640028"'],
       ["H.264 High10 10-bit", 'video/mp4; codecs="avc1.6e0028"'],
@@ -163,7 +177,8 @@
     var box = $("player");
     var old = box.getElementsByTagName("video");
     while (old.length) {
-      try { old[0].pause(); old[0].removeAttribute("src"); old[0].load(); } catch (e) { }
+      stop(old[0]);
+      try { old[0].removeAttribute("src"); old[0].load(); } catch (e) { }
       box.removeChild(old[0]);
     }
     var v = document.createElement("video");
@@ -198,7 +213,7 @@
       finished = true;
       clearTimeout(timer); clearInterval(poll);
       try { if (cleanup) cleanup(); } catch (e) { }
-      try { v.pause(); } catch (e) { }
+      stop(v);
       record(name, result, detail);
       setTimeout(done, 300);
     }
@@ -240,20 +255,20 @@
 
   function playbackQueue() {
     var q = [];
-    var hlsOk = !!(window.Hls && Hls.isSupported());
-    var nativeHls = !!document.createElement("video").canPlayType("application/vnd.apple.mpegurl");
+    var hlsOk = hlsJsOk();
+    var native = !!nativeHls();
     var clips = manifest.clips || [];
     for (var i = 0; i < clips.length; i++) {
       var c = clips[i];
       if (!c.mp4) { q.push({ skip: c.label, why: c.error || "not generated" }); continue; }
       q.push({ name: c.label + " MP4", setup: srcSetup(MEDIA + c.mp4) });
       if (c.hls && hlsOk) q.push({ name: c.label + " HLS hls.js", setup: hlsSetup(MEDIA + c.hls) });
-      if (c.hls && nativeHls) q.push({ name: c.label + " HLS native", setup: srcSetup(MEDIA + c.hls) });
+      if (c.hls && native) q.push({ name: c.label + " HLS native", setup: srcSetup(MEDIA + c.hls) });
     }
     var ts = manifest.extras && manifest.extras.ts;
     if (ts && hlsOk) q.push({ name: "H.264 HLS (TS) hls.js", setup: hlsSetup(MEDIA + ts) });
-    if (ts && nativeHls) q.push({ name: "H.264 HLS (TS) native", setup: srcSetup(MEDIA + ts) });
-    if (!hlsOk && !nativeHls) q.push({ skip: "HLS", why: "no MSE for hls.js and no native HLS" });
+    if (ts && native) q.push({ name: "H.264 HLS (TS) native", setup: srcSetup(MEDIA + ts) });
+    if (!hlsOk && !native) q.push({ skip: "HLS", why: "no MSE for hls.js and no native HLS" });
     return q;
   }
 
@@ -285,11 +300,12 @@
     if (first) first.focus();
   }
 
-  function addButton(label, onclick) {
+  /* Buttons that must outlive the questions, which replace everything in #ask. */
+  function addControl(label, onclick) {
     var b = document.createElement("button");
     b.textContent = label;
     b.onclick = onclick;
-    $("ask").appendChild(b);
+    $("controls").appendChild(b);
     return b;
   }
 
@@ -337,7 +353,7 @@
         for (var i = 0; i < cues.length; i++) {
           if (t >= cues[i].start && t < cues[i].end) { txt = cues[i].text; break; }
         }
-        ov.innerHTML = "";
+        clear("overlay");
         if (txt) {
           var s = document.createElement("span"); s.textContent = txt; ov.appendChild(s);
           if (res.overlaySeen.indexOf(txt) < 0) res.overlaySeen.push(txt);
@@ -352,8 +368,8 @@
           res.overlayVisible = a;
           ask("Do you see 'Subtitle line N' at the bottom (the browser's own subtitles)?", ["Yes", "No"], function (b) {
             res.nativeVisible = b;
-            clearInterval(timer); ov.innerHTML = "";
-            try { v.pause(); } catch (e) { }
+            clearInterval(timer); clear("overlay");
+            stop(v);
             res.result = res.overlayVisible === "Yes" ? "pass" : "fail";
             S.subtitles = res;
             record("Subtitles overlay", res.result, "cues seen: " + res.overlaySeen.length);
@@ -399,7 +415,7 @@
         for (var j = 0; j < v.audioTracks.length; j++) v.audioTracks[j].enabled = (j === i);
       }
     }
-    if (window.Hls && Hls.isSupported()) {
+    if (hlsJsOk()) {
       res.method = "hls.js";
       hls = new Hls();
       hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, function (ev, d) {
@@ -409,37 +425,49 @@
       hls.on(Hls.Events.ERROR, function (ev, d) { if (d && d.fatal) res.events.push("fatal " + d.details); });
       hls.loadSource(url);
       hls.attachMedia(v);
-    } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    } else if (nativeHls(v)) {
       res.method = "native";
       v.src = url;
     } else {
       S.audio = { result: "skip", why: "no way to play HLS" };
       done(); return;
     }
-    setStage("Audio: you should hear a low tone (440 Hz, English)");
+    function finish(a) {
+      clear("controls");
+      res.heardSwitch = a;
+      if (hls) hls.destroy();
+      stop(v);
+      res.result = a === "Yes" ? "pass" : "fail";
+      S.audio = res;
+      record("Audio track switch (" + res.method + ")", res.result,
+        "tracks: " + res.tracks.length + ", event: " + res.switched + ", heard: " + a);
+      done();
+    }
+    // The switch is timed from when sound starts, so a refused play() can still pass.
+    var started = false;
+    function begin() {
+      if (started) return;
+      started = true;
+      clear("controls");
+      setStage("Audio: you should hear a low tone (440 Hz, English)");
+      setTimeout(function () {
+        res.tracks = names();
+        setStage("Audio: switching to track 2 (higher tone, Japanese). Tracks: " + res.tracks.join(", "));
+        select(1);
+        setTimeout(function () {
+          ask("Did the tone get higher? (Switch audio flips between the tracks.)",
+            ["Yes", "No", "No sound at all"], finish);
+          addControl("Switch audio", function () { select(current === 0 ? 1 : 0); });
+        }, 3000);
+      }, 4000);
+    }
+    v.addEventListener("playing", begin);
+    setTimeout(begin, AUDIO_START_LIMIT); // never started: ask anyway
     tryPlay(v, function (e) {
       res.events.push("play() refused: " + (e && e.name));
       setStage("Audio: press Play to start the sound");
-      addButton("Play", function () { tryPlay(v); });
+      addControl("Play", function () { tryPlay(v); }).focus();
     });
-    setTimeout(function () {
-      res.tracks = names();
-      setStage("Audio: switching to track 2 (higher tone, Japanese). Tracks: " + res.tracks.join(", "));
-      select(1);
-      setTimeout(function () {
-        ask("Did the tone get higher? (Switch audio flips between the tracks.)", ["Yes", "No", "No sound at all"], function (a) {
-          res.heardSwitch = a;
-          if (hls) hls.destroy();
-          try { v.pause(); } catch (e) { }
-          res.result = a === "Yes" ? "pass" : "fail";
-          S.audio = res;
-          record("Audio track switch (" + res.method + ")", res.result,
-            "tracks: " + res.tracks.length + ", event: " + res.switched + ", heard: " + a);
-          done();
-        });
-        addButton("Switch audio", function () { select(current === 0 ? 1 : 0); });
-      }, 3000);
-    }, 4000);
   }
 
   /* ---------- download speed ---------- */
@@ -489,8 +517,9 @@
   function runAll() {
     if (busy || !manifest) return;
     lock(true);
-    S.playback = []; S.support = [];
-    supportInfo(window.MediaSource || window.ManagedMediaSource || window.WebKitMediaSource);
+    S.playback = []; S.support = []; S.subtitles = null; S.audio = null; S.speed = null;
+    clearTable("results");
+    supportInfo();
     send("support");
     runQueue(playbackQueue(), function () {
       send("playback");

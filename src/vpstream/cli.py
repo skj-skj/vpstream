@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -15,6 +16,40 @@ def _progress(msg: str) -> None:
     print(f"... {msg}", file=sys.stderr, flush=True)
 
 
+def _error(msg: str, code: int = 1) -> int:
+    print(f"error: {msg}", file=sys.stderr)
+    return code
+
+
+def _port(text: str) -> int:
+    try:
+        port = int(text)
+    except ValueError:
+        port = -1
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"not a port number from 1 to 65535: {text!r}")
+    return port
+
+
+def _url_host(host: str) -> str:
+    """The host as it goes in a URL; a wildcard address becomes a placeholder."""
+    if host in ("", "0.0.0.0", "::"):
+        return "<server-ip>"
+    return f"[{host}]" if ":" in host else host
+
+
+def _writable_file(path: Path) -> str | None:
+    """Why `path` cannot be written as an output file, or None when it can."""
+    parent = path.parent if str(path.parent) else Path(".")
+    if path.is_dir():
+        return f"{path} is a folder"
+    if not parent.is_dir():
+        return f"the folder {parent} does not exist"
+    if not os.access(parent, os.W_OK):
+        return f"the folder {parent} is not writable"
+    return None
+
+
 def cmd_selftest(args: argparse.Namespace) -> int:
     from vpstream import selftest
 
@@ -23,7 +58,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
 def cmd_bench(args: argparse.Namespace) -> int:
     from vpstream import bench
-    from vpstream.tools import SystemRunner, ToolMissing
+    from vpstream.tools import SystemRunner
 
     path = Path(args.file)
     if not path.is_file():
@@ -33,6 +68,12 @@ def cmd_bench(args: argparse.Namespace) -> int:
     if not presets:
         print("--presets needs at least one x264 preset", file=sys.stderr)
         return 2
+    if args.tmp and not Path(args.tmp).is_dir():
+        return _error(f"--tmp folder does not exist: {args.tmp}", 2)
+    # Checked first, so a long benchmark is not lost to a bad path at the end.
+    problem = _writable_file(Path(args.json)) if args.json else None
+    if problem:
+        return _error(f"cannot write --json: {problem}", 2)
     try:
         report = bench.benchmark(
             SystemRunner(),
@@ -44,36 +85,40 @@ def cmd_bench(args: argparse.Namespace) -> int:
             nice=not args.no_nice,
             progress=_progress,
         )
-    except (ToolMissing, ValueError, RuntimeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    except (ValueError, RuntimeError, OSError) as exc:  # ToolMissing is a RuntimeError
+        return _error(str(exc))
     print(bench.format_report(report))
     if args.json:
-        bench.write_json(report, Path(args.json))
+        try:
+            bench.write_json(report, Path(args.json))
+        except OSError as exc:
+            return _error(f"cannot write {args.json}: {exc}")
         print(f"\nSaved {args.json}")
     return 0 if all(s.ok or s.skipped for s in report.steps) else 1
 
 
 def cmd_caps(args: argparse.Namespace) -> int:
     from vpstream.caps import clips, server
-    from vpstream.tools import SystemRunner, ToolMissing
+    from vpstream.tools import SystemRunner
 
+    out = Path(args.out or time.strftime("caps-results-%Y%m%d-%H%M%S.json"))
+    problem = _writable_file(out)
+    if problem:
+        return _error(f"cannot write the results to {out}: {problem}", 2)
     clip_dir = Path(args.clips) if args.clips else clips.default_cache_dir()
     try:
         manifest = clips.generate(SystemRunner(), clip_dir, regen=args.regen, progress=_progress)
-    except ToolMissing as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    except (ValueError, RuntimeError, OSError) as exc:  # ClipDirError, ToolMissing, disk
+        return _error(str(exc))
     clip_list = manifest.get("clips")
     for c in clip_list if isinstance(clip_list, list) else []:
         if isinstance(c, dict) and c.get("error"):
             print(f"note: {c.get('label')} not available: {c['error']}", file=sys.stderr)
-    out = Path(args.out or time.strftime("caps-results-%Y%m%d-%H%M%S.json"))
     state = server.CapsState(
         clip_dir=clip_dir, results_path=out, log=lambda m: print(m, flush=True)
     )
     ttl = args.ttl * 60 if args.ttl > 0 else None
-    shown = "<server-ip>" if args.host in ("0.0.0.0", "::") else args.host
+    shown = _url_host(args.host)
     print(f"Serving the capability page on {args.host}:{args.port}")
     print(f"Open on the TV:  http://{shown}:{args.port}/caps")
     print(f"Results go to {out.resolve()}")
@@ -84,8 +129,7 @@ def cmd_caps(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\nstopped")
     except OSError as exc:
-        print(f"error: cannot listen on {args.host}:{args.port}: {exc}", file=sys.stderr)
-        return 1
+        return _error(f"cannot listen on {args.host}:{args.port}: {exc}")
     return 0
 
 
@@ -135,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("caps", help="serve a capability test page to a TV browser")
     c.add_argument("--host", default="0.0.0.0", help="address to listen on (default 0.0.0.0)")
-    c.add_argument("--port", type=int, default=1337, help="port to listen on (default 1337)")
+    c.add_argument("--port", type=_port, default=1337, help="port to listen on (default 1337)")
     c.add_argument(
         "--ttl",
         type=float,

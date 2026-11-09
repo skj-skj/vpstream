@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from vpstream.ffargs import parse_ffmpeg_list
+
 
 @dataclass(frozen=True)
 class Result:
@@ -29,16 +31,38 @@ class SystemRunner:
         return shutil.which(name)
 
     def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result:
-        proc = subprocess.run(
-            list(args),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+        """Run a program. A timeout is returned as a failed Result, never raised."""
+        try:
+            proc = subprocess.run(
+                list(args),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return Result(TIMEOUT_RETURNCODE, _text(exc.stdout), timed_out(timeout))
         return Result(proc.returncode, proc.stdout, proc.stderr)
+
+
+TIMEOUT_RETURNCODE = 124  # the same code as coreutils `timeout`
+
+
+def timed_out(seconds: float | None) -> str:
+    return f"stopped: no result after {seconds:g} seconds"
+
+
+def _text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def tail(res: Result, chars: int = 300, default: str = "failed") -> str:
+    """The end of a failed program's error output, for short messages."""
+    return res.stderr.strip()[-chars:] or default
 
 
 def low_priority_prefix(runner: Runner) -> list[str]:
@@ -68,3 +92,9 @@ def require(runner: Runner, name: str) -> str:
     if not path:
         raise ToolMissing(name)
     return path
+
+
+def ffmpeg_names(runner: Runner, what: str) -> set[str]:
+    """Names this ffmpeg lists for `what`: "encoders" or "filters"."""
+    res = runner.run(["ffmpeg", "-hide_banner", f"-{what}"], timeout=30)
+    return parse_ffmpeg_list(res.stdout)

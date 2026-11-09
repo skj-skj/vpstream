@@ -48,6 +48,10 @@ HLS playback (hls.js and native), a subtitle overlay, audio track switching, dow
 and records which remote keys reach the page. Results are sent back and saved to
 `caps-results-*.json`. The server stops after 60 minutes (`--ttl`).
 
+Clips are cached under `~/.cache/vpstream`. `--clips DIR` must be a new or empty folder, or one
+that `vpstream caps` made before; any other folder is refused, never cleared. `--regen` makes
+the clips again.
+
 The port must be reachable: open it in your firewall for the test and close it afterwards.
 
 ## Development

@@ -10,12 +10,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from vpstream import __version__
-from vpstream.ffargs import parse_ffmpeg_list
-from vpstream.tools import Runner, require
+from vpstream.ffargs import aac_args, base_args, hls_output_args
+from vpstream.tools import Result, Runner, ffmpeg_names, low_priority_prefix, require, tail
 
 CODEC_SECONDS = 4
 LONG_SECONDS = 20
 SUB_CUE_SECONDS = 2
+CLIP_SEGMENT_SECONDS = 2
+AUDIO_BITRATE = "128k"
+ENCODE_TIMEOUT = 600
+REMUX_TIMEOUT = 120
+# Marks a folder as made by vpstream, so it is the only kind that is ever deleted.
+MARKER = ".vpstream-caps"
 
 
 @dataclass(frozen=True)
@@ -91,31 +97,37 @@ def _lavfi_inputs(seconds: int, size: str, freqs: tuple[int, ...]) -> list[str]:
     return args
 
 
-def codec_clip_args(spec: ClipSpec, encoder: str, out: Path) -> list[str]:
+def _map_inputs(audio_tracks: int) -> list[str]:
+    args = ["-map", "0:v"]
+    for n in range(1, audio_tracks + 1):
+        args += ["-map", f"{n}:a"]
+    return args
+
+
+def test_clip_args(
+    out: Path,
+    *,
+    encoder: str,
+    pix_fmt: str,
+    seconds: int,
+    size: str,
+    gop: int,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    """A test pattern with a 440 Hz tone, encoded into a fast-start MP4."""
     return [
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        *_lavfi_inputs(CODEC_SECONDS, "640x360", (440,)),
-        "-map",
-        "0:v",
-        "-map",
-        "1:a",
+        *base_args(),
+        *_lavfi_inputs(seconds, size, (440,)),
+        *_map_inputs(1),
         "-c:v",
         encoder,
         *ENCODER_SPEED.get(encoder, ()),
         "-pix_fmt",
-        spec.pix_fmt,
-        *spec.extra,
+        pix_fmt,
+        *extra,
         "-g",
-        "30",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
+        str(gop),
+        *aac_args(AUDIO_BITRATE),
         "-shortest",
         "-movflags",
         "+faststart",
@@ -123,64 +135,34 @@ def codec_clip_args(spec: ClipSpec, encoder: str, out: Path) -> list[str]:
     ]
 
 
-def to_hls_args(src: Path, out_dir: Path, *, fmp4: bool = True, seconds: int = 2) -> list[str]:
-    ext = "m4s" if fmp4 else "ts"
+def codec_clip_args(spec: ClipSpec, encoder: str, out: Path) -> list[str]:
+    return test_clip_args(
+        out,
+        encoder=encoder,
+        pix_fmt=spec.pix_fmt,
+        seconds=CODEC_SECONDS,
+        size="640x360",
+        gop=30,
+        extra=spec.extra,
+    )
+
+
+def long_clip_args(out: Path) -> list[str]:
+    return test_clip_args(
+        out, encoder="libx264", pix_fmt="yuv420p", seconds=LONG_SECONDS, size="1280x720", gop=60
+    )
+
+
+def to_hls_args(src: Path, out_dir: Path, *, fmp4: bool = True) -> list[str]:
     return [
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
+        *base_args(),
         "-i",
         str(src),
         "-map",
         "0",
         "-c",
         "copy",
-        "-f",
-        "hls",
-        "-hls_time",
-        str(seconds),
-        "-hls_playlist_type",
-        "vod",
-        "-hls_segment_type",
-        "fmp4" if fmp4 else "mpegts",
-        "-hls_segment_filename",
-        str(out_dir / f"seg_%03d.{ext}"),
-        str(out_dir / "index.m3u8"),
-    ]
-
-
-def long_clip_args(out: Path) -> list[str]:
-    return [
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        *_lavfi_inputs(LONG_SECONDS, "1280x720", (440,)),
-        "-map",
-        "0:v",
-        "-map",
-        "1:a",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "60",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-shortest",
-        "-movflags",
-        "+faststart",
-        str(out),
+        *hls_output_args(out_dir, fmp4=fmp4, seconds=CLIP_SEGMENT_SECONDS, segment="seg_%03d"),
     ]
 
 
@@ -192,46 +174,24 @@ def multi_audio_args(out_dir: Path) -> list[str]:
         "a:1,agroup:aud,language:jpn,name:Japanese"
     )
     return [
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
+        *base_args(),
         *_lavfi_inputs(LONG_SECONDS, "1280x720", (440, 880)),
-        "-map",
-        "0:v",
-        "-map",
-        "1:a",
-        "-map",
-        "2:a",
+        *_map_inputs(2),
         "-c:v",
         "libx264",
-        "-preset",
-        "veryfast",
+        *ENCODER_SPEED["libx264"],
         "-pix_fmt",
         "yuv420p",
         "-g",
         "60",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-f",
-        "hls",
-        "-hls_time",
-        "2",
-        "-hls_playlist_type",
-        "vod",
-        "-hls_segment_type",
-        "fmp4",
-        "-master_pl_name",
-        "master.m3u8",
-        "-var_stream_map",
-        stream_map,
-        "-hls_segment_filename",
-        str(out_dir / "s_%v_%03d.m4s"),
-        str(out_dir / "v_%v.m3u8"),
+        *aac_args(AUDIO_BITRATE),
+        *hls_output_args(
+            out_dir,
+            seconds=CLIP_SEGMENT_SECONDS,
+            segment="s_%v_%03d",
+            playlist="v_%v.m3u8",
+            extra=("-master_pl_name", "master.m3u8", "-var_stream_map", stream_map),
+        ),
     ]
 
 
@@ -243,23 +203,66 @@ def webvtt_text(seconds: int = LONG_SECONDS, step: int = SUB_CUE_SECONDS) -> str
     return "\n".join(lines)
 
 
+class ClipDirError(ValueError):
+    pass
+
+
+def _read_manifest(path: Path) -> dict[str, object] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def made_by_vpstream(out: Path) -> bool:
+    """The marker file, or a clip manifest from a build that predates the marker."""
+    if (out / MARKER).is_file():
+        return True
+    manifest = _read_manifest(out / "clips.json")
+    return manifest is not None and {"version", "clips", "extras"} <= manifest.keys()
+
+
+def prepare_dir(out: Path) -> None:
+    """Make `out` empty, deleting it first only when vpstream made it."""
+    if out.exists():
+        if not out.is_dir():
+            raise ClipDirError(f"{out} is not a folder")
+        if made_by_vpstream(out):
+            shutil.rmtree(out)
+        elif any(out.iterdir()):
+            raise ClipDirError(
+                f"{out} is not empty and was not made by vpstream; "
+                "choose an empty or new folder for --clips"
+            )
+    out.mkdir(parents=True, exist_ok=True)
+    (out / MARKER).write_text("Test clips made by vpstream caps. Safe to delete.\n")
+
+
 def generate(
     runner: Runner,
     out: Path,
     *,
     regen: bool = False,
+    nice: bool = True,
     progress: Callable[[str], None] = lambda _m: None,
 ) -> dict[str, object]:
-    """Make every clip in `out` (reused when already there) and return the manifest."""
+    """Make every clip in `out` (reused when already there) and return the manifest.
+
+    Raises ClipDirError instead of deleting a folder that vpstream did not make.
+    """
     manifest_path = out / "clips.json"
-    if manifest_path.exists() and not regen:
-        data: dict[str, object] = json.loads(manifest_path.read_text())
-        return data
+    if not regen and made_by_vpstream(out):
+        cached = _read_manifest(manifest_path)
+        if cached is not None:
+            return cached
     require(runner, "ffmpeg")
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-    encoders = parse_ffmpeg_list(runner.run(["ffmpeg", "-hide_banner", "-encoders"]).stdout)
+    prepare_dir(out)
+    encoders = ffmpeg_names(runner, "encoders")
+    prefix = low_priority_prefix(runner) if nice else []
+
+    def ffmpeg(args: list[str], timeout: float) -> Result:
+        return runner.run([*prefix, *args], timeout=timeout)
 
     clips: list[ClipInfo] = []
     for spec in CODEC_CLIPS:
@@ -272,47 +275,44 @@ def generate(
         info.encoder = enc
         progress(f"clip {spec.label} ({enc})")
         mp4 = out / f"{spec.id}.mp4"
-        res = runner.run(codec_clip_args(spec, enc, mp4), timeout=600)
+        res = ffmpeg(codec_clip_args(spec, enc, mp4), ENCODE_TIMEOUT)
         if res.returncode != 0:
-            info.error = res.stderr.strip()[-300:] or "ffmpeg failed"
+            info.error = tail(res, default="ffmpeg failed")
             continue
         info.mp4 = mp4.name
         hls_dir = out / spec.id
         hls_dir.mkdir()
-        res = runner.run(to_hls_args(mp4, hls_dir), timeout=120)
+        res = ffmpeg(to_hls_args(mp4, hls_dir), REMUX_TIMEOUT)
         if res.returncode == 0:
             info.hls = f"{spec.id}/index.m3u8"
         else:
-            info.error = "HLS: " + (res.stderr.strip()[-300:] or "ffmpeg failed")
+            info.error = "HLS: " + tail(res, default="ffmpeg failed")
 
     extras: dict[str, str | None] = {"ts": None, "long": None, "multi_audio": None}
     errors: dict[str, str] = {}
+
+    def extra(key: str, args: list[str], result: Path, timeout: float) -> None:
+        """Make one extra clip; record its path relative to `out`, or the error."""
+        res = ffmpeg(args, timeout)
+        if res.returncode == 0 and result.is_file():
+            extras[key] = result.relative_to(out).as_posix()
+        else:
+            errors[key] = tail(res, default=f"ffmpeg made no {result.name}")
 
     h264 = out / "h264-8.mp4"
     if h264.exists():
         ts_dir = out / "h264-8-ts"
         ts_dir.mkdir()
-        res = runner.run(to_hls_args(h264, ts_dir, fmp4=False), timeout=120)
-        if res.returncode == 0:
-            extras["ts"] = "h264-8-ts/index.m3u8"
-        else:
-            errors["ts"] = res.stderr.strip()[-300:]
+        extra("ts", to_hls_args(h264, ts_dir, fmp4=False), ts_dir / "index.m3u8", REMUX_TIMEOUT)
 
     if "libx264" in encoders:
         progress("clip for subtitles (20 s)")
-        res = runner.run(long_clip_args(out / "long.mp4"), timeout=600)
-        if res.returncode == 0:
-            extras["long"] = "long.mp4"
-        else:
-            errors["long"] = res.stderr.strip()[-300:]
+        long = out / "long.mp4"
+        extra("long", long_clip_args(long), long, ENCODE_TIMEOUT)
         progress("clip with two audio tracks (20 s)")
         ma = out / "multi-audio"
         ma.mkdir()
-        res = runner.run(multi_audio_args(ma), timeout=600)
-        if res.returncode == 0 and (ma / "master.m3u8").exists():
-            extras["multi_audio"] = "multi-audio/master.m3u8"
-        else:
-            errors["multi_audio"] = res.stderr.strip()[-300:] or "no master playlist"
+        extra("multi_audio", multi_audio_args(ma), ma / "master.m3u8", ENCODE_TIMEOUT)
 
     (out / "subs.vtt").write_text(webvtt_text())
     manifest: dict[str, object] = {
@@ -323,5 +323,8 @@ def generate(
         "vtt_cue_seconds": SUB_CUE_SECONDS,
         "errors": errors,
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    # Written last and atomically, so a folder with a manifest always has every clip.
+    tmp = manifest_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(manifest, indent=2))
+    tmp.replace(manifest_path)
     return manifest

@@ -223,6 +223,5 @@ __marimo__/
 notes/
 # Machine-specific instructions
 *.local.md
-# Output of `vpstream caps` and `vpstream bench --out`
+# Default results file of `vpstream caps`
 caps-results-*.json
-bench-results-*.json

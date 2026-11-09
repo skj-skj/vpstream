@@ -32,11 +32,19 @@ def test_pick_burn_track_prefers_first_burned_track() -> None:
         bench.pick_burn_track(info, 9)
 
 
-def test_font_warnings() -> None:
-    err = "frame=1\n[Parsed_subtitles_0] fontselect: (Arial, 400, 0) -> DejaVuSans\nfps=3\n"
-    assert bench.font_warnings(err) == [
-        "[Parsed_subtitles_0] fontselect: (Arial, 400, 0) -> DejaVuSans"
-    ]
+def test_font_warnings_list_only_replaced_or_missing_fonts() -> None:
+    replaced = "[sub] fontselect: (Arial, 400, 0) -> /f/DejaVuSans.ttf, 0, DejaVuSans"
+    found = "[sub] fontselect: (DejaVu Sans, 400, 0) -> /f/DejaVuSans.ttf, 0, DejaVuSans"
+    bold = "[sub] fontselect: (Arial, 700, 0) -> /f/arialbd.ttf, 0, Arial-BoldMT"
+    glyph = "[sub] Glyph 0x4E00 not found, selecting one more font for (Arial, 400, 0)"
+    err = "\n".join(["frame=1", replaced, found, bold, glyph, "fps=3"])
+    assert bench.font_warnings(err) == [replaced, glyph]
+
+
+def test_estimate_is_empty_without_a_duration() -> None:
+    step = bench.StepResult("copy", True, media_seconds=10, wall_seconds=5)
+    report = bench.BenchReport("f", 0.0, 0, "v", 0.0, 10, {}, [step])
+    assert report.to_json()["steps"][0]["estimated_full_seconds"] is None
 
 
 def test_step_speed_and_bitrate() -> None:
@@ -104,3 +112,39 @@ def test_fmt_duration() -> None:
     assert bench.fmt_duration(7380) == "2h 03m"
     assert bench.fmt_duration(95) == "1m 35s"
     assert bench.fmt_duration(7) == "7s"
+
+
+def test_burn_in_is_skipped_when_the_tmp_folder_is_unusable(tmp_path: Path) -> None:
+    tmp = tmp_path / "my disk"
+    tmp.mkdir()
+    src = tmp / "movie.mkv"
+    src.write_bytes(b"x")
+    report = bench.benchmark(_runner(), src, presets=("veryfast",), tmp_dir=str(tmp))
+    # The finished steps are kept; burn-in explains what to change.
+    assert [s.ok for s in report.steps[:2]] == [True, True]
+    burn = report.steps[-1]
+    assert burn.skipped and "--tmp" in burn.note
+
+
+def test_burn_in_is_skipped_when_links_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "movie.mkv"
+    src.write_bytes(b"x")
+
+    def no_links(*_a: object) -> None:
+        raise PermissionError("links not allowed")
+
+    monkeypatch.setattr(bench.os, "symlink", no_links)
+    report = bench.benchmark(_runner(), src, presets=("veryfast",), tmp_dir=str(tmp_path))
+    assert report.steps[-1].skipped and "links not allowed" in report.steps[-1].note
+
+
+def test_filter_source_keeps_only_plain_suffixes(tmp_path: Path) -> None:
+    for name, linked in (("a.MKV", "source.mkv"), ("a.mkvé", "source"), ("noext", "source")):
+        src = tmp_path / name
+        src.write_bytes(b"x")
+        work = tmp_path / f"work-{linked}-{len(name)}"
+        work.mkdir()
+        link = bench.filter_source(work, src)
+        assert link.name == linked and link.is_symlink() and link.resolve() == src.resolve()
