@@ -1,4 +1,4 @@
-# vstream
+# vpstream
 
 On-demand video streaming from a VPS. The public port opens only while a stream runs, and
 everything is controlled over SSH or a private dashboard.
@@ -7,9 +7,9 @@ Status: early development. This release contains only the measuring tools:
 
 | Command | What it does |
 | --- | --- |
-| `vstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles for a file |
-| `vstream caps` | Serves a test page that checks what a TV browser can play |
-| `vstream selftest` | Runs the tests shipped with the package (`--integration` uses the real ffmpeg) |
+| `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles for a file |
+| `vpstream caps` | Serves a test page that checks what a TV browser can play |
+| `vpstream selftest` | Runs the tests shipped with the package (`--integration` uses the real ffmpeg) |
 
 ## Requirements
 
@@ -20,12 +20,12 @@ Status: early development. This release contains only the measuring tools:
 ## Install
 
 ```text
-pipx install "vstream[dev]"     # the dev extra adds pytest for `vstream selftest`
-vstream --version
-vstream selftest --integration
+pipx install "vpstream[dev]"     # the dev extra adds pytest for `vpstream selftest`
+vpstream --version
+vpstream selftest --integration
 ```
 
-## `vstream bench FILE`
+## `vpstream bench FILE`
 
 Encodes a sample of the file (120 seconds from about 10% in, `--sample` to change) at low CPU
 and I/O priority, and reports the speed of each step as a multiple of real time, with the
@@ -39,7 +39,7 @@ estimated time for the whole file:
 
 `--json PATH` saves the results.
 
-## `vstream caps`
+## `vpstream caps`
 
 Generates short test clips (H.264, HEVC and AV1 in 8 and 10 bit, two audio tracks, WebVTT),
 then serves a page on port 1337 (`--port`) that a TV browser opens at
@@ -62,7 +62,7 @@ git config core.hooksPath .githooks
 Pull requests need a Conventional Commit title (`feat: ...`, `fix: ...`). Releases are made
 from `main` by python-semantic-release.
 
-hls.js (Apache-2.0) is bundled in `src/vstream/assets`.
+hls.js (Apache-2.0) is bundled in `src/vpstream/assets`.
 
 ## License
 

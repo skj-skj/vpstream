@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from vstream.probe import ProbeError, parse_probe, probe
-from vstream.tests.fakes import FakeRunner
+from vpstream.probe import ProbeError, parse_probe, probe
+from vpstream.tests.fakes import FakeRunner
 
 SAMPLE: dict[str, Any] = {
     "format": {

@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from vstream import bench
-from vstream.ffargs import Window
-from vstream.probe import parse_probe
-from vstream.tests.fakes import FakeRunner
-from vstream.tests.test_probe import SAMPLE
+from vpstream import bench
+from vpstream.ffargs import Window
+from vpstream.probe import parse_probe
+from vpstream.tests.fakes import FakeRunner
+from vpstream.tests.test_probe import SAMPLE
 
 ENCODERS = " V....D libx264  H.264\n A....D aac  AAC\n"
 FILTERS = " .. subtitles V->V x\n TS overlay VV->V x\n .S zscale V->V x\n .S tonemap V->V x\n"

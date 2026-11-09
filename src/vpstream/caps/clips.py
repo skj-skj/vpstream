@@ -9,9 +9,9 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from vstream import __version__
-from vstream.ffargs import parse_ffmpeg_list
-from vstream.tools import Runner, require
+from vpstream import __version__
+from vpstream.ffargs import parse_ffmpeg_list
+from vpstream.tools import Runner, require
 
 CODEC_SECONDS = 4
 LONG_SECONDS = 20
@@ -81,7 +81,7 @@ class ClipInfo:
 
 def default_cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "vstream" / "caps" / __version__
+    return Path(base) / "vpstream" / "caps" / __version__
 
 
 def _lavfi_inputs(seconds: int, size: str, freqs: tuple[int, ...]) -> list[str]:

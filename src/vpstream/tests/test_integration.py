@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from vstream import bench
-from vstream.caps import clips
-from vstream.probe import probe
-from vstream.tools import SystemRunner
+from vpstream import bench
+from vpstream.caps import clips
+from vpstream.probe import probe
+from vpstream.tools import SystemRunner
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("need_ffmpeg")]
 

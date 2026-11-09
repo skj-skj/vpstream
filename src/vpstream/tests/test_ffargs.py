@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from vstream import ffargs
-from vstream.ffargs import EncodeSettings, Window
+from vpstream import ffargs
+from vpstream.ffargs import EncodeSettings, Window
 
 
 def _after(args: list[str], flag: str) -> str:

@@ -1,4 +1,4 @@
-/* vstream capability test. Plain ES5 so older TV browsers can run it. */
+/* vpstream capability test. Plain ES5 so older TV browsers can run it. */
 (function () {
   "use strict";
 

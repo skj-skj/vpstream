@@ -1,4 +1,4 @@
-"""`vstream selftest`: run the tests that ship inside the package."""
+"""`vpstream selftest`: run the tests that ship inside the package."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def run(integration: bool = False, extra: list[str] | None = None) -> int:
     except ImportError:
         print(
             "pytest is not installed. Install the dev extra:\n"
-            '  pipx install --force "vstream[dev]"',
+            '  pipx install --force "vpstream[dev]"',
             file=sys.stderr,
         )
         return 2

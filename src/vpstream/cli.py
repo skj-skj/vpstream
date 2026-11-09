@@ -8,7 +8,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from vstream import __version__
+from vpstream import __version__
 
 
 def _progress(msg: str) -> None:
@@ -16,14 +16,14 @@ def _progress(msg: str) -> None:
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
-    from vstream import selftest
+    from vpstream import selftest
 
     return selftest.run(integration=args.integration, extra=args.pytest_args)
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
-    from vstream import bench
-    from vstream.tools import SystemRunner, ToolMissing
+    from vpstream import bench
+    from vpstream.tools import SystemRunner, ToolMissing
 
     path = Path(args.file)
     if not path.is_file():
@@ -55,8 +55,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
 
 def cmd_caps(args: argparse.Namespace) -> int:
-    from vstream.caps import clips, server
-    from vstream.tools import SystemRunner, ToolMissing
+    from vpstream.caps import clips, server
+    from vpstream.tools import SystemRunner, ToolMissing
 
     clip_dir = Path(args.clips) if args.clips else clips.default_cache_dir()
     try:
@@ -90,8 +90,10 @@ def cmd_caps(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="vstream", description="On-demand video streaming from a VPS.")
-    p.add_argument("--version", action="version", version=f"vstream {__version__}")
+    p = argparse.ArgumentParser(
+        prog="vpstream", description="On-demand video streaming from a VPS."
+    )
+    p.add_argument("--version", action="version", version=f"vpstream {__version__}")
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
 
     st = sub.add_parser("selftest", help="run the tests shipped with the package")

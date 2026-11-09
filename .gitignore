@@ -219,10 +219,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# vstream: private planning notes, validation logs and the deny list
+# vpstream: private planning notes, validation logs and the deny list
 notes/
 # Machine-specific instructions
 *.local.md
-# Output of `vstream caps` and `vstream bench --out`
+# Output of `vpstream caps` and `vpstream bench --out`
 caps-results-*.json
 bench-results-*.json

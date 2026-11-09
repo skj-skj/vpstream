@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vstream import __version__, cli, selftest
+from vpstream import __version__, cli, selftest
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:

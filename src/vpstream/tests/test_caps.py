@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from vstream.caps import clips, server
+from vpstream.caps import clips, server
 
 
 @pytest.mark.parametrize(

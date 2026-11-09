@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from vstream.tools import Result
+from vpstream.tools import Result
 
 
 class FakeRunner:

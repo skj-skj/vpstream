@@ -47,7 +47,7 @@ jobs:
       - name: Unit and ffmpeg integration tests
         run: python -m pytest --integration
       - name: selftest from the installed command
-        run: vstream selftest
+        run: vpstream selftest
 
   build:
     runs-on: ubuntu-latest
@@ -62,14 +62,14 @@ jobs:
       - name: Wheel contains the tests and assets
         run: |
           python -m zipfile -l dist/*.whl > files.txt
-          grep -q "vstream/tests/conftest.py" files.txt
-          grep -q "vstream/assets/hls.min.js" files.txt
-          grep -q "vstream/assets/caps.js" files.txt
+          grep -q "vpstream/tests/conftest.py" files.txt
+          grep -q "vpstream/assets/hls.min.js" files.txt
+          grep -q "vpstream/assets/caps.js" files.txt
       - name: Install the wheel and run selftest
         run: |
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install "$(ls dist/*.whl)[dev]"
-          cd /tmp && /tmp/venv/bin/vstream --version && /tmp/venv/bin/vstream selftest
+          cd /tmp && /tmp/venv/bin/vpstream --version && /tmp/venv/bin/vpstream selftest
 
   pr-title:
     if: github.event_name == 'pull_request'

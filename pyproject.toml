@@ -3,12 +3,12 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vstream"
+name = "vpstream"
 version = "0.0.0"
 description = "On-demand video streaming from a VPS, controlled over SSH or a private dashboard"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE", "src/vstream/assets/hls.js.LICENSE"]
+license-files = ["LICENSE", "src/vpstream/assets/hls.js.LICENSE"]
 requires-python = ">=3.12"
 dependencies = []
 classifiers = [
@@ -25,16 +25,16 @@ classifiers = [
 dev = ["pytest>=8"]
 
 [project.scripts]
-vstream = "vstream.cli:main"
+vpstream = "vpstream.cli:main"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/vstream", "README.md", "LICENSE", "CHANGELOG.md"]
+include = ["src/vpstream", "README.md", "LICENSE", "CHANGELOG.md"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/vstream"]
+packages = ["src/vpstream"]
 
 [tool.pytest.ini_options]
-testpaths = ["src/vstream/tests"]
+testpaths = ["src/vpstream/tests"]
 addopts = "-p no:cacheprovider"
 
 [tool.ruff]
@@ -48,8 +48,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src/vstream"]
-exclude = ["src/vstream/tests/"]
+files = ["src/vpstream"]
+exclude = ["src/vpstream/tests/"]
 
 [tool.semantic_release]
 commit_parser = "conventional"

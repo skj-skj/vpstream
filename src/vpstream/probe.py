@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vstream.tools import Runner, require
+from vpstream.tools import Runner, require
 
 # Subtitle codecs that can be converted to WebVTT and drawn by the player.
 SOFT_TEXT_CODECS = frozenset({"subrip", "srt", "mov_text", "webvtt", "text"})

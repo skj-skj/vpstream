@@ -1,4 +1,4 @@
-"""`vstream bench FILE`: measure how fast this host prepares a file."""
+"""`vpstream bench FILE`: measure how fast this host prepares a file."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vstream import __version__
-from vstream.ffargs import (
+from vpstream import __version__
+from vpstream.ffargs import (
     BROWSER_COPY_CODECS,
     EncodeSettings,
     Window,
@@ -24,8 +24,8 @@ from vstream.ffargs import (
     parse_ffmpeg_list,
     transcode_hls,
 )
-from vstream.probe import MediaInfo, SubtitleTrack, probe
-from vstream.tools import Runner, low_priority_prefix, require
+from vpstream.probe import MediaInfo, SubtitleTrack, probe
+from vpstream.tools import Runner, low_priority_prefix, require
 
 
 @dataclass
@@ -127,7 +127,7 @@ def host_info(runner: Runner) -> dict[str, Any]:
         pass
     ff = runner.run(["ffmpeg", "-hide_banner", "-version"], timeout=30)
     return {
-        "vstream": __version__,
+        "vpstream": __version__,
         "python": platform.python_version(),
         "cpus": os.cpu_count(),
         "cpu_model": model,
@@ -207,7 +207,7 @@ def benchmark(
     prefix = low_priority_prefix(runner) if nice else []
     burn = pick_burn_track(info, sub)
     steps: list[StepResult] = []
-    with tempfile.TemporaryDirectory(prefix="vstream-bench-", dir=tmp_dir) as tmp:
+    with tempfile.TemporaryDirectory(prefix="vpstream-bench-", dir=tmp_dir) as tmp:
         work = Path(tmp)
         src = str(path)
 

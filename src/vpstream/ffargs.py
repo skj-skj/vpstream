@@ -1,7 +1,7 @@
 """Pure builders for ffmpeg command lines.
 
 Nothing here runs a program, so every builder is unit tested. The same settings will be
-used by `vstream prepare` in a later milestone, which keeps `bench` numbers honest.
+used by `vpstream prepare` in a later milestone, which keeps `bench` numbers honest.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HLS_SEGMENT_SECONDS = 6
-# Codecs a browser may play without a transcode (subject to `vstream caps` on the TV).
+# Codecs a browser may play without a transcode (subject to `vpstream caps` on the TV).
 BROWSER_COPY_CODECS = frozenset({"h264", "hevc", "av1"})
 
 _SAFE_FILTER_PATH = re.compile(r"^[A-Za-z0-9_./+-]+$")

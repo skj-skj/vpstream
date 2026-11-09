@@ -123,7 +123,7 @@ def make_handler(state: CapsState) -> type[BaseHTTPRequestHandler]:
         state.block = os.urandom(CHUNK)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "vstream-caps"
+        server_version = "vpstream-caps"
         sys_version = ""
         protocol_version = "HTTP/1.1"
 
@@ -160,7 +160,7 @@ def make_handler(state: CapsState) -> type[BaseHTTPRequestHandler]:
                 return
             if path in ASSETS:
                 name, ctype = ASSETS[path]
-                body = resources.files("vstream.assets").joinpath(name).read_bytes()
+                body = resources.files("vpstream.assets").joinpath(name).read_bytes()
                 self._send_bytes(200, body, ctype)
                 return
             if path == "/caps/clips.json":
