@@ -89,10 +89,12 @@ PACKAGES = {"ffprobe": "ffmpeg", "mkvextract": "mkvtoolnix", "mkvmerge": "mkvtoo
 class ToolMissing(RuntimeError):
     def __init__(self, name: str, needed_for: str = "") -> None:
         why = f" It is needed for {needed_for}." if needed_for else ""
-        super().__init__(
-            f"{name} was not found on PATH.{why} Install it first, for example: "
-            f"sudo apt install {PACKAGES.get(name, name)}"
+        how = (
+            "vpstream install ffmpeg"
+            if name in ("ffmpeg", "ffprobe")
+            else f"sudo apt install {PACKAGES.get(name, name)}"
         )
+        super().__init__(f"{name} was not found on PATH.{why} Install it first, for example: {how}")
         self.name = name
 
 

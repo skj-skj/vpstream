@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tarfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -133,6 +134,48 @@ def cmd_caps(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ask(question: str) -> bool:
+    try:
+        answer = input(f"{question} [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    from vpstream import ffmpeg_install
+    from vpstream.tools import SystemRunner
+
+    if args.tmp and not Path(args.tmp).is_dir():
+        return _error(f"--tmp folder does not exist: {args.tmp}", 2)
+    if args.yes:
+        confirm = lambda question: True  # noqa: E731
+    elif sys.stdin.isatty():
+        confirm = _ask
+    else:
+
+        def confirm(question: str) -> bool:
+            print(question, file=sys.stderr)
+            print("No terminal to answer on; pass --yes to proceed.", file=sys.stderr)
+            return False
+
+    setup = ffmpeg_install.Setup(
+        runner=SystemRunner(),
+        http=ffmpeg_install.UrlHttp(),
+        confirm=confirm,
+        progress=_progress,
+        tmp_dir=args.tmp,
+    )
+    try:
+        print(setup.run(update=args.command == "update"))
+    except ffmpeg_install.Cancelled:
+        print("Cancelled; nothing was changed.")
+        return 1
+    except (ffmpeg_install.SetupError, OSError, tarfile.TarError) as exc:
+        return _error(str(exc))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vpstream", description="On-demand video streaming from a VPS."
@@ -190,6 +233,18 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--clips", metavar="DIR", help="folder for the generated test clips")
     c.add_argument("--regen", action="store_true", help="make the test clips again")
     c.set_defaults(func=cmd_caps)
+
+    for name, text in (
+        ("install", "install a program vpstream needs (ffmpeg: the newest stable static build)"),
+        ("update", "update a program installed by `vpstream install`"),
+    ):
+        i = sub.add_parser(name, help=text)
+        i.add_argument("program", choices=["ffmpeg"], help="what to install (ffmpeg)")
+        i.add_argument(
+            "--yes", action="store_true", help="do not ask before replacing an existing ffmpeg"
+        )
+        i.add_argument("--tmp", metavar="DIR", help="folder for the download (default: system)")
+        i.set_defaults(func=cmd_install)
     return p
 
 
