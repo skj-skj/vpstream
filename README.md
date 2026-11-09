@@ -10,12 +10,14 @@ Status: early development. This release contains only the measuring tools:
 | `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles for a file |
 | `vpstream caps` | Serves a test page that checks what a TV browser can play |
 | `vpstream selftest` | Runs the tests shipped with the package (`--integration` uses the real ffmpeg) |
+| `vpstream install ffmpeg` | Installs the newest stable ffmpeg build; `vpstream update ffmpeg` updates it |
 
 ## Requirements
 
 - Linux, Python 3.12 or newer
 - ffmpeg and ffprobe on `PATH` (not bundled), with libx264; libx265 and an AV1 encoder
-  (libsvtav1 or libaom-av1) for the full `caps` test set
+  (libsvtav1 or libaom-av1) for the full `caps` test set. `vpstream install ffmpeg` installs a
+  build with all of them.
 - Optional: mkvtoolnix (`sudo apt install mkvtoolnix`), only for WebVTT subtitle tracks written
   by mkvmerge, which ffmpeg cannot read; vpstream says when a file needs it
 
@@ -26,6 +28,28 @@ pipx install "vpstream[dev]"     # the dev extra adds pytest for `vpstream selft
 vpstream --version
 vpstream selftest --integration
 ```
+
+## `vpstream install ffmpeg` and `vpstream update ffmpeg`
+
+Distribution packages of ffmpeg are often several versions old. `vpstream install ffmpeg`
+installs the newest stable build from [FFmpeg-Builds](https://github.com/FFmpeg-Builds/FFmpeg-Builds),
+the Linux build that ffmpeg.org links to: the highest release branch (9.0 now, 10.0 once it
+exists), never the development snapshot. `vpstream update ffmpeg` replaces it with a newer
+build when there is one, including a new major version.
+
+- **Where:** ffmpeg and ffprobe go to `/opt/vpstream-ffmpeg`, linked from `/usr/local/bin`,
+  which comes before `/usr/bin` on `PATH`. System changes run through `sudo`.
+- **Checked first:** the download is checked against its published SHA-256, and the new ffmpeg
+  is run and must have libx264, libx265, an AV1 encoder and the zscale, tonemap, subtitles,
+  overlay and scale2ref filters. If anything fails, nothing on the system is changed.
+- **Libraries:** the builds need glibc 2.28 or newer (Ubuntu 20.04 and later) on x86-64 or
+  ARM64. On apt systems, the packages they use (`libgcc-s1`, `fontconfig`, `fonts-dejavu-core`)
+  are installed when missing.
+- **An existing ffmpeg:** you are asked first, `This will uninstall the existing ffmpeg (...).
+  Do you want to proceed? [y/N]`; the question lists every package apt would remove with it.
+  An apt or snap ffmpeg is removed after the new one is in place. An ffmpeg from elsewhere is
+  never removed: vpstream asks you to remove it yourself. `--yes` skips the question.
+- **Uninstall:** `sudo rm -r /opt/vpstream-ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe`.
 
 ## `vpstream bench FILE`
 

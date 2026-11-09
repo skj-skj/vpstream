@@ -48,6 +48,11 @@ jobs:
         run: python -m pytest --integration
       - name: selftest from the installed command
         run: vpstream selftest
+      - name: install the real ffmpeg build (into a temporary folder, through sudo)
+        if: matrix.python-version == '3.12'
+        env:
+          VPSTREAM_TEST_FFMPEG_DOWNLOAD: "1"
+        run: python -m pytest --integration -k real_ffmpeg_install -v
 
   build:
     runs-on: ubuntu-latest
