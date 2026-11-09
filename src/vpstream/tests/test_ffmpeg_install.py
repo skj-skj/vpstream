@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
 import tarfile
 from collections.abc import Callable, Sequence
@@ -493,3 +494,45 @@ def test_cli_without_a_terminal_needs_yes(
     assert cli.main(["install", "ffmpeg"]) == 1
     assert "pass --yes" in capsys.readouterr().err
     assert cli.main(["install", "ffmpeg", "--yes"]) == 0
+
+
+# --- the real build, on a real host (CI sets VPSTREAM_TEST_FFMPEG_DOWNLOAD=1)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not os.environ.get("VPSTREAM_TEST_FFMPEG_DOWNLOAD"),
+    reason="downloads 150 MB; set VPSTREAM_TEST_FFMPEG_DOWNLOAD=1",
+)
+def test_real_ffmpeg_install(tmp_path: Path) -> None:
+    """Download, check and install the real newest build into tmp_path, through sudo.
+
+    The host's own ffmpeg is hidden, so it is neither seen nor removed.
+    """
+
+    class Host(SystemRunner):
+        def which(self, name: str) -> str | None:
+            if name in fi.PROGRAMS:
+                link = tmp_path / "bin" / name
+                return str(link) if link.exists() else None
+            return super().which(name)
+
+    layout = fi.Layout(install_dir=tmp_path / "opt" / "vpstream-ffmpeg", bin_dir=tmp_path / "bin")
+    notes: list[str] = []
+    setup = fi.Setup(
+        runner=Host(),
+        http=fi.UrlHttp(),
+        confirm=lambda question: pytest.fail(f"asked: {question}"),
+        progress=notes.append,
+        layout=layout,
+        tmp_dir=str(tmp_path),
+    )
+    msg = setup.run(update=False)
+    assert "Installed ffmpeg n" in msg, (msg, notes)
+    res = SystemRunner().run([str(layout.bin_dir / "ffmpeg"), "-hide_banner", "-encoders"])
+    assert res.returncode == 0 and "libx264" in res.stdout
+    version = json.loads((layout.install_dir / fi.MARKER).read_text())["version"]
+    assert SystemRunner().run([str(layout.bin_dir / "ffprobe"), "-version"]).returncode == 0
+    assert setup.run(update=True) == f"ffmpeg {version} is already the newest stable build"
+    # Installed as root: a normal user cannot change it.
+    assert (layout.install_dir / "bin" / "ffmpeg").stat().st_uid == 0
