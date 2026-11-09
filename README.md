@@ -16,6 +16,8 @@ Status: early development. This release contains only the measuring tools:
 - Linux, Python 3.12 or newer
 - ffmpeg and ffprobe on `PATH` (not bundled), with libx264; libx265 and an AV1 encoder
   (libsvtav1 or libaom-av1) for the full `caps` test set
+- Optional: mkvtoolnix (`sudo apt install mkvtoolnix`), only for WebVTT subtitle tracks written
+  by mkvmerge, which ffmpeg cannot read; vpstream says when a file needs it
 
 ## Install
 

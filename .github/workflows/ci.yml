@@ -41,8 +41,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install ffmpeg and mkvtoolnix
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg mkvtoolnix
       - run: python -m pip install -e ".[dev]"
       - name: Unit and ffmpeg integration tests
         run: python -m pytest --integration

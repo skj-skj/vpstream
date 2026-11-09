@@ -78,19 +78,24 @@ def low_priority_prefix(runner: Runner) -> list[str]:
     return prefix
 
 
+# The Ubuntu package that provides each program, where it differs from the program's name.
+PACKAGES = {"ffprobe": "ffmpeg", "mkvextract": "mkvtoolnix"}
+
+
 class ToolMissing(RuntimeError):
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, needed_for: str = "") -> None:
+        why = f" It is needed for {needed_for}." if needed_for else ""
         super().__init__(
-            f"{name} was not found on PATH. Install it first, for example: "
-            f"sudo apt install {'ffmpeg' if name.startswith('ff') else name}"
+            f"{name} was not found on PATH.{why} Install it first, for example: "
+            f"sudo apt install {PACKAGES.get(name, name)}"
         )
         self.name = name
 
 
-def require(runner: Runner, name: str) -> str:
+def require(runner: Runner, name: str, needed_for: str = "") -> str:
     path = runner.which(name)
     if not path:
-        raise ToolMissing(name)
+        raise ToolMissing(name, needed_for)
     return path
 
 
