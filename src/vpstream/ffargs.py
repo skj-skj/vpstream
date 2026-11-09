@@ -74,15 +74,13 @@ def aac_args(bitrate: str) -> list[str]:
 def subtitle_input_args(src: str, window: Window) -> list[str]:
     """A second input of `src` for image subtitles, starting SUBTITLE_PREROLL_SECONDS early.
 
-    -fix_sub_duration gives every cue its end time; without it, cues from an input whose
-    video is not decoded reach the overlay late or not at all. It holds each cue until the
-    next subtitle event is read, so this input has no -t: a length would cut off the event
-    that ends the last cue. ffmpeg stops reading it once the output is finished.
+    No -fix_sub_duration: it holds each cue back until the next subtitle event, which drops
+    the first cue this input reads (often the one already on screen) and, for VobSub, the
+    last cue before the end of the window. No -t either: this input is read far ahead of
+    the video, and once it ends the overlay (eof_action=pass) drops cues it has not drawn
+    yet. ffmpeg stops reading it when the output is finished.
     """
-    return [
-        "-fix_sub_duration",
-        *input_args(src, Window(max(0.0, window.start - SUBTITLE_PREROLL_SECONDS))),
-    ]
+    return input_args(src, Window(max(0.0, window.start - SUBTITLE_PREROLL_SECONDS)))
 
 
 def audio_args(s: EncodeSettings) -> list[str]:

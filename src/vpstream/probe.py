@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -89,17 +90,8 @@ class MediaInfo:
     attachments: int = 0  # embedded fonts and other attachments
 
 
-def ffprobe_args(path: str) -> list[str]:
-    return [
-        "ffprobe",
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_format",
-        "-show_streams",
-        path,
-    ]
+def ffprobe_args(path: str, show: Sequence[str] = ("-show_format", "-show_streams")) -> list[str]:
+    return ["ffprobe", "-v", "error", "-print_format", "json", *show, path]
 
 
 def _int(value: Any) -> int | None:
@@ -293,8 +285,10 @@ def probe(runner: Runner, path: str | Path) -> MediaInfo:
 def identify_stream(runner: Runner, path: str, index: int) -> str:
     """Name one stream that ffmpeg could not, from its codec private data, or ""."""
     # Only this stream: -show_data would dump every attachment (fonts) too.
-    args = ["ffprobe", "-v", "error", "-select_streams", str(index), "-show_streams"]
-    res = runner.run([*args, "-show_data", "-print_format", "json", path], timeout=120)
+    show = ("-select_streams", str(index), "-show_streams", "-show_data")
+    res = runner.run(ffprobe_args(path, show), timeout=120)
+    if res.returncode != 0:
+        return ""
     try:
         streams = json.loads(res.stdout).get("streams") or [{}]
         return identify_codec(extradata_bytes(str(streams[0].get("extradata", ""))))

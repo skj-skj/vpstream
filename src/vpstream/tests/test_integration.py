@@ -9,10 +9,21 @@ import pytest
 
 from vpstream import bench
 from vpstream.caps import clips
-from vpstream.probe import probe
+from vpstream.ffargs import base_args
+from vpstream.probe import SubtitleTrack, probe
 from vpstream.tools import SystemRunner
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("need_ffmpeg")]
+
+DATA = Path(__file__).parent / "data"
+# The bundled fixture's three PGS cues (0-2.5, 3-5.5 and 6-8.5 s) are moved this far into
+# the sample, so a seek to a cue is past ffargs.SUBTITLE_PREROLL_SECONDS.
+CUES_AT = 30
+
+
+def _ffmpeg(*args: str | Path, timeout: float = 120) -> None:
+    res = SystemRunner().run([*base_args(), *map(str, args)], timeout=timeout)
+    assert res.returncode == 0, res.stderr
 
 
 @pytest.fixture(scope="module")
@@ -30,60 +41,49 @@ def sample(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "Dialogue: 0,0:00:01.00,0:00:11.00,Default,Styled line\n"
     )
     out = d / "sample.mkv"
-    runner = SystemRunner()
-    res = runner.run(
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=25:duration=12",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=12",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=880:duration=12",
-            "-i",
-            str(srt),
-            "-i",
-            str(ass),
-            "-map",
-            "0:v",
-            "-map",
-            "1:a",
-            "-map",
-            "2:a",
-            "-map",
-            "3:s",
-            "-map",
-            "4:s",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-c:a",
-            "aac",
-            "-c:s:0",
-            "srt",
-            "-c:s:1",
-            "ass",
-            "-metadata:s:a:0",
-            "language=eng",
-            "-metadata:s:a:1",
-            "language=jpn",
-            str(out),
-        ],
-        timeout=120,
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=25:duration=12",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=12",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=880:duration=12",
+        "-i",
+        str(srt),
+        "-i",
+        str(ass),
+        "-map",
+        "0:v",
+        "-map",
+        "1:a",
+        "-map",
+        "2:a",
+        "-map",
+        "3:s",
+        "-map",
+        "4:s",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-c:a",
+        "aac",
+        "-c:s:0",
+        "srt",
+        "-c:s:1",
+        "ass",
+        "-metadata:s:a:0",
+        "language=eng",
+        "-metadata:s:a:1",
+        "language=jpn",
+        out,
     )
-    assert res.returncode == 0, res.stderr
     return out
 
 
@@ -120,17 +120,12 @@ def test_caps_clips(tmp_path: Path) -> None:
     assert clips.generate(SystemRunner(), tmp_path / "c") == manifest
 
 
-DATA = Path(__file__).parent / "data"
-
-
 def _first_frame_peak(hls_dir: Path) -> int:
     """Brightest luma value in the first frame of an HLS output (black video: 16)."""
     key = "lavfi.signalstats.YMAX"
     res = SystemRunner().run(
         [
-            "ffmpeg",
-            "-v",
-            "info",
+            *base_args("info"),
             "-i",
             str(hls_dir / "index.m3u8"),
             "-frames:v",
@@ -149,55 +144,57 @@ def _first_frame_peak(hls_dir: Path) -> int:
     return peaks[0]
 
 
-@pytest.fixture(scope="module")
-def pgs_sample(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """10 s of black video with three PGS cues: 0-2.5, 3-5.5 and 6-8.5 s."""
-    out = tmp_path_factory.mktemp("pgs") / "pgs.mkv"
-    res = SystemRunner().run(
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=black:size=640x360:rate=25:duration=10",
-            "-i",
-            str(DATA / "three-cues.sup"),
-            "-map",
-            "0:v",
-            "-map",
-            "1:s",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-c:s",
-            "copy",
-            str(out),
-        ],
-        timeout=120,
+@pytest.fixture(scope="module", params=["pgs", "dvdsub", "dvbsub"])
+def image_sample(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """40 s of black video with three image cues: 30-32.5, 33-35.5 and 36-38.5 s."""
+    d = tmp_path_factory.mktemp(request.param)
+    sup = cues = DATA / "three-cues.sup"
+    if request.param != "pgs":
+        # -fix_sub_duration turns the PGS clear events into cue end times.
+        cues = d / "cues.mks"
+        _ffmpeg("-fix_sub_duration", "-i", sup, "-c:s", request.param, "-f", "matroska", cues)
+    out = d / "sample.mkv"
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=black:size=640x360:rate=25:duration=40",
+        "-itsoffset",
+        str(CUES_AT),
+        "-i",
+        cues,
+        "-map",
+        "0:v",
+        "-map",
+        "1:s",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-c:s",
+        "copy",
+        out,
     )
-    assert res.returncode == 0, res.stderr
     return out
 
 
 @pytest.mark.parametrize(
     ("start", "visible"),
     [
-        (4.0, True),  # inside cue 2, which started before the seek point
-        (5.7, False),  # between cues: nothing may be left on screen
+        (10.0, False),  # before any cue; the subtitle input starts at the file start
+        (31.0, True),  # inside cue 1, the first event the subtitle input reads
+        (34.0, True),  # inside cue 2, which started before the seek point
+        (35.7, False),  # between cues: nothing may be left on screen
+        (37.0, True),  # inside cue 3, which has no event after it
     ],
 )
 def test_image_subtitle_burn_after_a_seek(
-    pgs_sample: Path, tmp_path: Path, start: float, visible: bool
+    image_sample: Path, tmp_path: Path, start: float, visible: bool
 ) -> None:
     from vpstream.ffargs import Window, burn_hls
 
     args = burn_hls(
-        str(pgs_sample),
+        str(image_sample),
         tmp_path,
         sub_number=1,
         image=True,
@@ -212,49 +209,55 @@ def test_image_subtitle_burn_after_a_seek(
 
 @pytest.fixture(scope="module")
 def mkvmerge_webvtt(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A file whose WebVTT track mkvmerge stores as S_TEXT/WEBVTT, which ffmpeg cannot read."""
+    """Video, then a Spanish and a French WebVTT track, which mkvmerge stores as
+    S_TEXT/WEBVTT, a codec ID ffmpeg cannot read."""
     runner = SystemRunner()
     if not runner.which("mkvmerge"):
         pytest.skip("mkvmerge (mkvtoolnix) is not installed")
     d = tmp_path_factory.mktemp("vtt")
-    vtt = d / "s.vtt"
-    vtt.write_text("WEBVTT\n\n00:00:00.500 --> 00:00:02.000 line:85% align:center\nHola\n")
+    spa, fre = d / "spa.vtt", d / "fre.vtt"
+    spa.write_text("WEBVTT\n\n00:00:00.500 --> 00:00:02.000 line:85% align:center\nHola\n")
+    fre.write_text("WEBVTT\n\n00:00:00.500 --> 00:00:02.000\nBonjour\n")
     video = d / "v.mkv"
-    res = runner.run(
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=black:size=320x180:duration=3",
-            "-c:v",
-            "libx264",
-            str(video),
-        ],
-        timeout=60,
-    )
-    assert res.returncode == 0, res.stderr
+    _ffmpeg("-f", "lavfi", "-i", "color=black:size=320x180:duration=3", "-c:v", "libx264", video)
     out = d / "vtt.mkv"
-    res = runner.run(
-        ["mkvmerge", "-q", "-o", str(out), str(video), "--language", "0:spa", str(vtt)]
-    )
+    args = ["mkvmerge", "-q", "-o", out, video, "--language", "0:spa", spa]
+    res = runner.run([*map(str, args), "--language", "0:fre", str(fre)])
     assert res.returncode == 0, res.stdout + res.stderr
     return out
 
 
-def test_webvtt_from_mkvmerge_is_soft_and_extracted(mkvmerge_webvtt: Path, tmp_path: Path) -> None:
-    from vpstream.probe import MKVEXTRACT
+def _extract(src: Path, track: SubtitleTrack, out: Path) -> str:
     from vpstream.subtitles import extract_webvtt
 
-    runner = SystemRunner()
-    (track,) = probe(runner, mkvmerge_webvtt).subtitles
-    assert (track.codec, track.reader, track.treatment) == ("webvtt", MKVEXTRACT, "soft")
-    out = tmp_path / "s.vtt"
-    extract_webvtt(runner, str(mkvmerge_webvtt), track, out)
-    text = out.read_text(encoding="utf-8-sig")
+    extract_webvtt(SystemRunner(), str(src), track, out)
+    return out.read_text(encoding="utf-8-sig")
+
+
+def test_webvtt_from_mkvmerge_is_soft_and_extracted(mkvmerge_webvtt: Path, tmp_path: Path) -> None:
+    from vpstream.probe import MKVEXTRACT
+
+    spa, fre = probe(SystemRunner(), mkvmerge_webvtt).subtitles
+    for track in (spa, fre):
+        assert (track.codec, track.reader, track.treatment) == ("webvtt", MKVEXTRACT, "soft")
+    text = _extract(mkvmerge_webvtt, spa, tmp_path / "spa.vtt")
     assert text.startswith("WEBVTT")
     assert "00:00:00.500 --> 00:00:02.000 line:85% align:center\nHola" in text
+    assert "Bonjour" in _extract(mkvmerge_webvtt, fre, tmp_path / "fre.vtt")
+
+
+def test_webvtt_track_found_when_ffmpeg_skips_a_track(
+    mkvmerge_webvtt: Path, tmp_path: Path
+) -> None:
+    # Turn the Spanish track into a "buttons" track (TrackType 0x12), which ffmpeg skips and
+    # mkvextract still counts: the French track is then stream 1 but mkvextract track 2.
+    data = bytearray(mkvmerge_webvtt.read_bytes())
+    at = data.find(b"\x83\x81\x11")  # TrackType, 1 byte: subtitle
+    assert at > 0
+    data[at + 2] = 0x12
+    src = tmp_path / "skipped.mkv"
+    src.write_bytes(data)
+    (fre,) = probe(SystemRunner(), src).subtitles
+    assert (fre.index, fre.language) == (1, "fre")
+    text = _extract(src, fre, tmp_path / "fre.vtt")
+    assert "Bonjour" in text and "Hola" not in text

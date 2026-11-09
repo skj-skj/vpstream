@@ -108,9 +108,11 @@ def test_image_burn_after_a_seek_reads_subtitles_from_an_earlier_input() -> None
         "in.mkv", "/out", sub_number=2, image=True, filter_src="", window=Window(100, 60)
     )
     assert args.count("-i") == 2
-    second = args.index("-fix_sub_duration")
-    # No -t: the event that ends the last cue may come after the window.
-    assert args[second : second + 5] == ["-fix_sub_duration", "-ss", "70.000", "-i", "in.mkv"]
+    first = args.index("-i")
+    # No -t: once this input ends, the overlay drops cues it has not drawn yet. No
+    # -fix_sub_duration, which drops the first cue the input reads.
+    assert args[first + 2 : first + 6] == ["-ss", "70.000", "-i", "in.mkv"]
+    assert "-fix_sub_duration" not in args
     assert "[1:s:1][base]scale2ref" in _after(args, "-filter_complex")
 
 
@@ -118,8 +120,8 @@ def test_image_burn_preroll_stops_at_the_file_start() -> None:
     args = ffargs.burn_hls(
         "in.mkv", "/out", sub_number=1, image=True, filter_src="", window=Window(10, 60)
     )
-    second = args.index("-fix_sub_duration")
-    assert args[second + 1 : second + 3] == ["-i", "in.mkv"]
+    first = args.index("-i")
+    assert args[first + 2 : first + 4] == ["-i", "in.mkv"]
 
 
 def test_burn_from_the_start_or_with_text_uses_one_input() -> None:

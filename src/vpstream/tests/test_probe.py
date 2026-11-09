@@ -144,6 +144,9 @@ def test_extradata_bytes_and_identify_codec() -> None:
     assert identify_codec(b"[Script Info]") == ""
 
 
+REPROBE_2 = ("ffprobe", "-v", "error", "-print_format", "json", "-select_streams", "2")
+
+
 def _mkv_with_unnamed_subtitle() -> dict[str, Any]:
     return {
         "format": {"format_name": "matroska,webm", "duration": "30"},
@@ -158,14 +161,7 @@ def _mkv_with_unnamed_subtitle() -> dict[str, Any]:
 def test_unnamed_matroska_subtitle_is_identified_as_webvtt() -> None:
     r = FakeRunner()
     r.on("ffprobe", stdout=json.dumps(_mkv_with_unnamed_subtitle()))
-    r.on(
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "2",
-        stdout=json.dumps({"streams": [{"index": 2, "extradata": WEBVTT_DUMP}]}),
-    )
+    r.on(*REPROBE_2, stdout=json.dumps({"streams": [{"index": 2, "extradata": WEBVTT_DUMP}]}))
     info = probe(r, "/m/a.mkv")
     srt, vtt = info.subtitles
     assert (srt.codec, srt.reader, srt.treatment) == ("subrip", "ffmpeg", "soft")
@@ -179,6 +175,23 @@ def test_unidentified_subtitle_stays_unsupported() -> None:
     r.on("ffprobe", stdout=json.dumps(_mkv_with_unnamed_subtitle()))
     vtt = probe(r, "/m/a.mkv").subtitles[1]
     assert (vtt.codec, vtt.treatment) == ("", "unsupported")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (1, json.dumps({"streams": [{"extradata": WEBVTT_DUMP}]})),
+        (0, "not json"),
+        (0, json.dumps({"streams": []})),
+        (0, json.dumps(["not", "an", "object"])),
+    ],
+)
+def test_failed_reprobe_leaves_the_subtitle_unsupported(returncode: int, stdout: str) -> None:
+    r = FakeRunner()
+    r.on("ffprobe", stdout=json.dumps(_mkv_with_unnamed_subtitle()))
+    r.on(*REPROBE_2, returncode=returncode, stdout=stdout)
+    vtt = probe(r, "/m/a.mkv").subtitles[1]
+    assert (vtt.codec, vtt.reader, vtt.treatment) == ("", "ffmpeg", "unsupported")
 
 
 def test_other_containers_are_not_probed_again() -> None:

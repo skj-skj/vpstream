@@ -60,9 +60,13 @@ def _text(value: str | bytes | None) -> str:
     return value or ""
 
 
-def tail(res: Result, chars: int = 300, default: str = "failed") -> str:
-    """The end of a failed program's error output, for short messages."""
-    return res.stderr.strip()[-chars:] or default
+def tail(res: Result, chars: int = 300, default: str = "failed", *, stdout: bool = False) -> str:
+    """The end of a failed program's error output, for short messages.
+
+    `stdout` also reads standard output, for programs that print errors there (mkvtoolnix).
+    """
+    text = f"{res.stdout}\n{res.stderr}" if stdout else res.stderr
+    return text.strip()[-chars:] or default
 
 
 def low_priority_prefix(runner: Runner) -> list[str]:
@@ -79,7 +83,7 @@ def low_priority_prefix(runner: Runner) -> list[str]:
 
 
 # The Ubuntu package that provides each program, where it differs from the program's name.
-PACKAGES = {"ffprobe": "ffmpeg", "mkvextract": "mkvtoolnix"}
+PACKAGES = {"ffprobe": "ffmpeg", "mkvextract": "mkvtoolnix", "mkvmerge": "mkvtoolnix"}
 
 
 class ToolMissing(RuntimeError):
