@@ -223,18 +223,24 @@ def made_by_vpstream(out: Path) -> bool:
     return manifest is not None and {"version", "clips", "extras"} <= manifest.keys()
 
 
+def check_dir(out: Path) -> None:
+    """Raise ClipDirError unless `out` is new, empty or made by vpstream. Deletes nothing."""
+    if not out.exists():
+        return
+    if not out.is_dir():
+        raise ClipDirError(f"{out} is not a folder")
+    if not made_by_vpstream(out) and any(out.iterdir()):
+        raise ClipDirError(
+            f"{out} is not empty and was not made by vpstream; "
+            "choose an empty or new folder for --clips"
+        )
+
+
 def prepare_dir(out: Path) -> None:
     """Make `out` empty, deleting it first only when vpstream made it."""
-    if out.exists():
-        if not out.is_dir():
-            raise ClipDirError(f"{out} is not a folder")
-        if made_by_vpstream(out):
-            shutil.rmtree(out)
-        elif any(out.iterdir()):
-            raise ClipDirError(
-                f"{out} is not empty and was not made by vpstream; "
-                "choose an empty or new folder for --clips"
-            )
+    check_dir(out)
+    if out.exists() and made_by_vpstream(out):
+        shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / MARKER).write_text("Test clips made by vpstream caps. Safe to delete.\n")
 
@@ -256,6 +262,7 @@ def generate(
         cached = _read_manifest(manifest_path)
         if cached is not None:
             return cached
+    check_dir(out)  # refuse a user's folder before anything else
     require(runner, "ffmpeg")
     prepare_dir(out)
     encoders = ffmpeg_names(runner, "encoders")

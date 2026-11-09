@@ -264,6 +264,9 @@ def test_generate_refuses_a_folder_it_did_not_make(tmp_path: Path) -> None:
     for regen in (False, True):
         with pytest.raises(clips.ClipDirError):
             clips.generate(_clip_runner(), mine, regen=regen)
+    # Refused before ffmpeg is even looked for.
+    with pytest.raises(clips.ClipDirError):
+        clips.generate(FakeRunner(available=()), mine)
     assert (mine / "film.mkv").is_file()
 
 
