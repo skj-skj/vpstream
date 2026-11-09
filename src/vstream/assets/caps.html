@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vstream capability test</title>
+<style>
+  html, body { margin: 0; background: #111; color: #eee; font: 22px/1.4 sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 30px; margin: 8px 0 4px; }
+  p { margin: 6px 0; }
+  .muted { color: #aaa; }
+  button { font: inherit; font-size: 24px; padding: 14px 26px; margin: 6px 10px 6px 0;
+           background: #2a2a2a; color: #fff; border: 3px solid #555; border-radius: 10px; }
+  button:focus { outline: none; border-color: #ffd400; background: #3a3a10; }
+  button[disabled] { opacity: .4; }
+  #stage { font-size: 26px; margin: 12px 0; min-height: 1.4em; }
+  #player { position: relative; width: 640px; max-width: 100%; background: #000;
+            margin: 10px 0; height: 360px; }
+  #player video { width: 100%; height: 100%; display: block; }
+  #overlay { position: absolute; left: 0; right: 0; top: 6%; text-align: center;
+             pointer-events: none; }
+  #overlay span { background: rgba(0,0,0,.75); color: #ffd400; padding: 4px 12px;
+                  font-size: 26px; border-radius: 6px; }
+  #ask { margin: 10px 0; }
+  #ask p { font-size: 24px; }
+  table { border-collapse: collapse; width: 100%; font-size: 18px; margin: 8px 0 18px; }
+  td, th { border-bottom: 1px solid #333; padding: 4px 8px; text-align: left; }
+  .pass { color: #6f6; } .fail { color: #f66; } .skip { color: #aaa; }
+  #keys { font-family: monospace; font-size: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>vstream capability test</h1>
+  <p class="muted">Use the arrow keys to move and OK to press. Results are sent to the server as each part finishes.</p>
+  <div>
+    <button id="start">Start all tests</button>
+    <button id="speedonly">Speed test only</button>
+  </div>
+  <div id="stage">Loading…</div>
+  <div id="player"><div id="overlay"></div></div>
+  <div id="ask"></div>
+  <p id="keys">Remote keys: press every button on the remote (arrows, OK, Back, Play/Pause, colors). Last key: none</p>
+  <h2>Results</h2>
+  <table id="results"><thead><tr><th>Test</th><th>Result</th><th>Detail</th></tr></thead><tbody></tbody></table>
+  <h2>Browser</h2>
+  <table id="env"><tbody></tbody></table>
+</main>
+<script src="/caps/hls.min.js"></script>
+<script src="/caps/caps.js"></script>
+</body>
+</html>
