@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,11 @@ STYLED_TEXT_CODECS = frozenset({"ass", "ssa"})
 IMAGE_CODECS = frozenset({"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"})
 
 HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67"})
+
+# Who can read a track's packets. ffmpeg cannot read WebVTT stored the way mkvmerge stores it
+# (codec ID S_TEXT/WEBVTT, which ffmpeg reports without a codec name); mkvextract can.
+FFMPEG = "ffmpeg"
+MKVEXTRACT = "mkvextract"
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,7 @@ class SubtitleTrack:
     language: str
     title: str
     default: bool
+    reader: str = FFMPEG  # FFMPEG or MKVEXTRACT
 
     @property
     def kind(self) -> str:
@@ -83,17 +90,8 @@ class MediaInfo:
     attachments: int = 0  # embedded fonts and other attachments
 
 
-def ffprobe_args(path: str) -> list[str]:
-    return [
-        "ffprobe",
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_format",
-        "-show_streams",
-        path,
-    ]
+def ffprobe_args(path: str, show: Sequence[str] = ("-show_format", "-show_streams")) -> list[str]:
+    return ["ffprobe", "-v", "error", "-print_format", "json", *show, path]
 
 
 def _int(value: Any) -> int | None:
@@ -151,8 +149,43 @@ def _is_hdr(stream: dict[str, Any]) -> bool:
     return False
 
 
-def parse_probe(data: dict[str, Any], path: str = "") -> MediaInfo:
-    """Turn ffprobe's JSON into a MediaInfo. Pure, so it is unit tested."""
+def extradata_bytes(dump: str) -> bytes:
+    """Bytes from ffprobe's -show_data hex dump ("00000000: 5745 4256  WEBVTT")."""
+    out = bytearray()
+    for line in dump.splitlines():
+        _, sep, rest = line.partition(": ")
+        if sep:
+            # 8 groups of 4 hex digits, then the text column.
+            out += bytes.fromhex(rest[:40].replace(" ", ""))
+    return bytes(out)
+
+
+def identify_codec(extradata: bytes) -> str:
+    """Name a codec ffmpeg did not recognise, from its codec private data, or ""."""
+    if extradata.removeprefix(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
+        return "webvtt"
+    return ""
+
+
+def unnamed_subtitles(data: dict[str, Any]) -> list[int]:
+    """Indexes of Matroska subtitle streams that ffprobe gave no codec name."""
+    if "matroska" not in str((data.get("format") or {}).get("format_name", "")):
+        return []
+    return [
+        int(s.get("index", 0))
+        for s in data.get("streams") or []
+        if s.get("codec_type") == "subtitle" and not s.get("codec_name")
+    ]
+
+
+def parse_probe(
+    data: dict[str, Any], path: str = "", identified: dict[int, str] | None = None
+) -> MediaInfo:
+    """Turn ffprobe's JSON into a MediaInfo. Pure, so it is unit tested.
+
+    `identified` names subtitle streams that ffmpeg cannot read, by stream index.
+    """
+    identified = identified or {}
     fmt = data.get("format") or {}
     video: list[VideoTrack] = []
     audio: list[AudioTrack] = []
@@ -197,14 +230,20 @@ def parse_probe(data: dict[str, Any], path: str = "") -> MediaInfo:
                 )
             )
         elif kind == "subtitle":
+            index = int(s.get("index", 0))
+            codec = str(s.get("codec_name") or "")
+            reader = FFMPEG
+            if not codec and identified.get(index):
+                codec, reader = identified[index], MKVEXTRACT
             subs.append(
                 SubtitleTrack(
                     number=len(subs) + 1,
-                    index=int(s.get("index", 0)),
-                    codec=str(s.get("codec_name", "")),
+                    index=index,
+                    codec=codec,
                     language=lang,
                     title=title,
                     default=default,
+                    reader=reader,
                 )
             )
         elif kind == "attachment":
@@ -239,4 +278,19 @@ def probe(runner: Runner, path: str | Path) -> MediaInfo:
         data = json.loads(res.stdout)
     except json.JSONDecodeError as exc:
         raise ProbeError(f"ffprobe returned invalid JSON for {p}") from exc
-    return parse_probe(data, p)
+    identified = {i: identify_stream(runner, p, i) for i in unnamed_subtitles(data)}
+    return parse_probe(data, p, identified)
+
+
+def identify_stream(runner: Runner, path: str, index: int) -> str:
+    """Name one stream that ffmpeg could not, from its codec private data, or ""."""
+    # Only this stream: -show_data would dump every attachment (fonts) too.
+    show = ("-select_streams", str(index), "-show_streams", "-show_data")
+    res = runner.run(ffprobe_args(path, show), timeout=120)
+    if res.returncode != 0:
+        return ""
+    try:
+        streams = json.loads(res.stdout).get("streams") or [{}]
+        return identify_codec(extradata_bytes(str(streams[0].get("extradata", ""))))
+    except (ValueError, AttributeError):
+        return ""

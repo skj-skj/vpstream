@@ -15,6 +15,11 @@ HLS_SEGMENT_SECONDS = 6
 # Codecs a browser may play without a transcode (subject to `vpstream caps` on the TV).
 BROWSER_COPY_CODECS = frozenset({"h264", "hevc", "av1"})
 
+# ffmpeg drops subtitle packets from before an input's -ss point, so an image subtitle that
+# is already on screen there would be lost. Image subtitles are therefore read from a second
+# input that starts this much earlier; a cue shown for longer than this is still cut.
+SUBTITLE_PREROLL_SECONDS = 30.0
+
 _SAFE_FILTER_PATH = re.compile(r"^[A-Za-z0-9_./+-]+$")
 
 # Tone mapping from HDR (PQ or HLG) to standard-range BT.709, the usual zscale recipe.
@@ -64,6 +69,18 @@ def input_args(src: str, window: Window, *, copyts: bool = False) -> list[str]:
 
 def aac_args(bitrate: str) -> list[str]:
     return ["-c:a", "aac", "-b:a", bitrate]
+
+
+def subtitle_input_args(src: str, window: Window) -> list[str]:
+    """A second input of `src` for image subtitles, starting SUBTITLE_PREROLL_SECONDS early.
+
+    No -fix_sub_duration: it holds each cue back until the next subtitle event, which drops
+    the first cue this input reads (often the one already on screen) and, for VobSub, the
+    last cue before the end of the window. No -t either: this input is read far ahead of
+    the video, and once it ends the overlay (eof_action=pass) drops cues it has not drawn
+    yet. ffmpeg stops reading it when the output is finished.
+    """
+    return input_args(src, Window(max(0.0, window.start - SUBTITLE_PREROLL_SECONDS)))
 
 
 def audio_args(s: EncodeSettings) -> list[str]:
@@ -187,12 +204,18 @@ def escape_filter_path(path: str | Path) -> str:
 
 
 def burn_filter(
-    *, sub_number: int, image: bool, filter_src: str | Path, hdr: bool, tonemap: bool
+    *,
+    sub_number: int,
+    image: bool,
+    filter_src: str | Path,
+    hdr: bool,
+    tonemap: bool,
+    sub_input: int = 0,
 ) -> str:
     """Filter graph that burns subtitle track `sub_number` (1-based) into video 1.
 
-    Timestamps are kept from the source (-copyts) so the subtitles line up after a seek,
-    then reset to zero for the output.
+    Image subtitles come from input `sub_input`. Timestamps are kept from the source
+    (-copyts) so the subtitles line up after a seek, then reset to zero for the output.
     """
     si = sub_number - 1
     pre = f"{TONEMAP_CHAIN}," if hdr and tonemap else ""
@@ -202,7 +225,7 @@ def burn_filter(
         # they are scaled to the video's size before the overlay.
         return (
             f"[0:v:0]{pre}null[base];"
-            f"[0:s:{si}][base]scale2ref=w=rw:h=rh[sub][ref];"
+            f"[{sub_input}:s:{si}][base]scale2ref=w=rw:h=rh[sub][ref];"
             f"[ref][sub]overlay=eof_action=pass,{tail}"
         )
     path = escape_filter_path(filter_src)
@@ -223,12 +246,22 @@ def burn_hls(
     loglevel: str = "error",
 ) -> list[str]:
     """Burn one subtitle track into an H.264 transcode. Video only, audio is left out."""
+    inputs = input_args(src, window, copyts=True)
+    sub_input = 0
+    if image and window.start > 0:
+        inputs += subtitle_input_args(src, window)
+        sub_input = 1
     graph = burn_filter(
-        sub_number=sub_number, image=image, filter_src=filter_src, hdr=hdr, tonemap=tonemap
+        sub_number=sub_number,
+        image=image,
+        filter_src=filter_src,
+        hdr=hdr,
+        tonemap=tonemap,
+        sub_input=sub_input,
     )
     return [
         *base_args(loglevel),
-        *input_args(src, window, copyts=True),
+        *inputs,
         "-filter_complex",
         graph,
         "-map",
