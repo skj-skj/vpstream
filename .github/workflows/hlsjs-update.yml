@@ -1,0 +1,68 @@
+name: hls.js update
+
+# Weekly: if npm has a newer hls.js, open a pull request that bundles it.
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hlsjs-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Bundle the latest hls.js
+        id: update
+        run: python scripts/update-hlsjs.py
+
+      - name: Open a pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.update.outputs.version }}
+        run: |
+          branch="deps/hls.js-$VERSION"
+          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "A pull request for hls.js $VERSION is already open."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add src/vpstream/assets
+          git commit -m "fix: update hls.js to $VERSION"
+          git push --force origin "$branch"
+          title="fix: update hls.js to $VERSION"
+          if gh pr create --base main --head "$branch" --title "$title" --body "Bundles hls.js $VERSION from npm, checked against the sha512 integrity npm publishes.
+
+          Release notes: https://github.com/video-dev/hls.js/releases/tag/v$VERSION
+
+          Pull requests opened by this workflow do not start CI on their own (a GitHub rule for the
+          workflow token). Close and reopen this pull request to run the checks. After merging,
+          run \`vpstream caps\` on the TV again to confirm playback."; then
+            exit 0
+          fi
+          # Creating pull requests needs "Allow GitHub Actions to create and approve pull
+          # requests" in the repository settings. Without it, say so in an issue instead.
+          if [ -z "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then
+            gh issue create --title "$title" --body "hls.js $VERSION is out and is bundled on the branch \`$branch\`.
+
+          Open a pull request from that branch to main, or enable *Allow GitHub Actions to create
+          and approve pull requests* (Settings, Actions, General) so this workflow opens it."
+          fi

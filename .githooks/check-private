@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Reject staged changes or a commit message that contain a private string.
+
+The deny list is notes/deny-list.txt, one string per line, matched without regard to case.
+Blank lines and lines starting with # are ignored. The notes folder is never committed.
+
+  check-private            check lines added in the staged diff
+  check-private MSGFILE    check a commit message file (commit-msg hook)
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+deny_file = root / "notes" / "deny-list.txt"
+if not deny_file.is_file():
+    sys.exit(f"private-string check: {deny_file} is missing. Create it (one string per line).")
+deny = [
+    line.strip().lower()
+    for line in deny_file.read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+
+if len(sys.argv) > 1:
+    where = "commit message"
+    lines = [
+        (0, line)
+        for line in Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+        if not line.startswith("#")
+    ]
+else:
+    where = "staged changes"
+    diff = subprocess.check_output(
+        ["git", "diff", "--cached", "--no-color", "--unified=0", "--no-ext-diff"],
+        text=True,
+        errors="replace",
+    )
+    lines = []
+    current = ""
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else line[4:]
+        elif line.startswith("+") and not line.startswith("+++"):
+            lines.append((current, line[1:]))
+    # File names count too.
+    names = subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=AR"], text=True
+    ).splitlines()
+    lines += [(n, n) for n in names]
+
+hits = []
+for where_file, text in lines:
+    low = text.lower()
+    for word in deny:
+        if word in low:
+            hits.append((where_file, word))
+if hits:
+    print(f"private-string check: blocked, listed strings found in the {where}:", file=sys.stderr)
+    for f, word in sorted(set(hits)):
+        shown = word[:2] + "*" * max(0, len(word) - 2)
+        print(f"  {f or 'message'}: {shown}", file=sys.stderr)
+    sys.exit(1)

@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# vpstream: private planning notes, validation logs and the deny list
+notes/
+# Machine-specific instructions
+*.local.md
+# Default results file of `vpstream caps`
+caps-results-*.json

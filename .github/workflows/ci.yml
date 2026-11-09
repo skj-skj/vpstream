@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]" ruff mypy
+      - name: ruff
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: mypy
+        run: mypy
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: python -m pip install -e ".[dev]"
+      - name: Unit and ffmpeg integration tests
+        run: python -m pytest --integration
+      - name: selftest from the installed command
+        run: vpstream selftest
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: Wheel contains the tests and assets
+        run: |
+          python -m zipfile -l dist/*.whl > files.txt
+          grep -q "vpstream/tests/conftest.py" files.txt
+          grep -q "vpstream/assets/hls.min.js" files.txt
+          grep -q "vpstream/assets/hls.js.version" files.txt
+          grep -q "vpstream/assets/caps.js" files.txt
+      - name: Install the wheel and run selftest
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install "$(ls dist/*.whl)[dev]"
+          cd /tmp && /tmp/venv/bin/vpstream --version && /tmp/venv/bin/vpstream selftest
+
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

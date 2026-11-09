@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released || 'false' }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      # RELEASE_TOKEN is a fine-grained token for this repository that may bypass the
+      # pull request rule on main, so the version commit and tag can be pushed.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Release only the commit this run was started for
+        run: git reset --hard ${{ github.sha }}
+
+      - name: Semantic version release
+        id: release
+        uses: python-semantic-release/python-semantic-release@v10.7.0
+        with:
+          github_token: ${{ secrets.RELEASE_TOKEN }}
+          git_committer_name: github-actions
+          git_committer_email: actions@users.noreply.github.com
+
+      - name: Attach the build to the GitHub release
+        if: steps.release.outputs.released == 'true'
+        uses: python-semantic-release/publish-action@v10.7.0
+        with:
+          github_token: ${{ secrets.RELEASE_TOKEN }}
+          tag: ${{ steps.release.outputs.tag }}
+
+      - name: Keep the build for the publish jobs
+        if: steps.release.outputs.released == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist
+          if-no-files-found: error
+
+  testpypi:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/vpstream
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  # PyPI only after the same files were accepted by TestPyPI, so TestPyPI is a real dry run.
+  pypi:
+    needs: [release, testpypi]
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/vpstream
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
