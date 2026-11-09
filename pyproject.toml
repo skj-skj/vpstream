@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vpstream"
-version = "0.1.1"
+version = "0.2.0"
 description = "On-demand video streaming from a VPS, controlled over SSH or a private dashboard"
 readme = "README.md"
 license = "MIT"
