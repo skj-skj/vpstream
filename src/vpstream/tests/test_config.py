@@ -56,3 +56,26 @@ def test_paths_under_a_root(tmp_path: Path) -> None:
     assert paths.config_file == tmp_path / "etc/vpstream/config.toml"
     assert paths.socket == tmp_path / "run/vpstream/daemon.sock"
     assert config.Paths().socket == Path("/run/vpstream/daemon.sock")
+
+
+def test_stream_host() -> None:
+    assert config.parse('[stream]\nhost = "203.0.113.5"').stream_host == "203.0.113.5"
+    assert config.parse('[stream]\nhost = "tv.example.org"\nport = 2000').stream_port == 2000
+    assert config.parse("").stream_host == ""
+    for bad in ('"a b"', '"http://x/"', "5", '"x/y"'):
+        with pytest.raises(config.ConfigError, match=r"stream\.host must be"):
+            config.parse(f"[stream]\nhost = {bad}")
+    with pytest.raises(config.ConfigError, match=r"stream\.port must be a whole number"):
+        config.parse('[stream]\nport = "1337"')
+
+
+def test_the_default_text_still_parses_to_the_defaults() -> None:
+    assert config.parse(config.DEFAULT_TEXT) == config.Config()
+    uncommented = config.DEFAULT_TEXT.replace('# host = "', 'host = "')
+    assert config.parse(uncommented).stream_host == "203.0.113.5"
+
+
+def test_paths_for_caddy_live_under_the_root(tmp_path: Path) -> None:
+    paths = config.Paths.under(tmp_path)
+    assert paths.gate_socket == tmp_path / "run/vpstream/gate.sock"
+    assert paths.access_log == tmp_path / "var/lib/vpstream/caddy/access.log"

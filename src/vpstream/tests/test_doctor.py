@@ -21,6 +21,7 @@ def _host(tmp_path: Path, available: tuple[str, ...] = ALL_TOOLS) -> tuple[FakeR
     runner.on("tailscale", "status", "--json", stdout=json.dumps(STATUS))
     runner.on("tailscale", "serve", "status", "--json", stdout="{}")
     runner.on("fc-list", stdout=FAMILIES)
+    runner.on("systemctl", "is-active", "--quiet", "caddy", returncode=3)  # inactive
     marker = tmp_path / "systemd"
     marker.mkdir()
     ufw_conf = tmp_path / "ufw.conf"
@@ -308,3 +309,16 @@ def test_the_helper_and_its_folder_must_be_roots_alone(tmp_path: Path) -> None:
     package.mkdir(mode=0o755)
     if me != 0:  # the package folder itself is refused first: the test is not root
         assert doctor.check_install(package, helper=helper).status == "problem"
+
+
+def test_the_caddy_packages_own_service_is_a_warning(tmp_path: Path) -> None:
+    runner, kwargs = _host(tmp_path)
+    assert "caddy service" not in _by_name(doctor.run_checks(runner, **kwargs))
+    runner.on("systemctl", "is-active", "--quiet", "caddy", returncode=0)
+    check = _by_name(doctor.run_checks(runner, **kwargs))["caddy service"]
+    assert check.status == "warning" and check.fix == "sudo systemctl disable --now caddy"
+    without = tuple(t for t in ALL_TOOLS if t != "caddy")
+    (tmp_path / "other").mkdir()
+    runner, kwargs = _host(tmp_path / "other", without)
+    runner.on("systemctl", "is-active", "--quiet", "caddy", returncode=0)
+    assert "caddy service" not in _by_name(doctor.run_checks(runner, **kwargs))

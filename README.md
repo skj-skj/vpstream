@@ -3,14 +3,17 @@
 On-demand video streaming from a VPS. The public port opens only while a stream runs, and
 everything is controlled over SSH or a private dashboard.
 
-Status: early development. Streaming itself is not here yet. This release has the measuring
-tools and the service skeleton:
+Status: early development. This release streams a file or a folder as it is, for players such
+as VLC (direct mode). Playing in a TV browser comes next.
 
 | Command | What it does |
 | --- | --- |
 | `vpstream doctor` | Checks this host for everything vpstream needs |
 | `sudo vpstream init` / `uninstall` | Sets the service up on this host, and removes it again |
-| `vpstream status` | Shows what the running daemon is doing |
+| `vpstream start --file F` or `--dir D` | Starts a stream of one video, or of the videos in a folder |
+| `vpstream stop` / `status` | Stops the stream, or shows its addresses and what the daemon is doing |
+| `vpstream devices` | Lists the devices that asked for the stream; `enable`, `disable`, `lock`, `unlock` |
+| `vpstream alias NAME` | Changes the short name in the stream's address |
 | `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles for a file |
 | `vpstream caps` | Serves a test page that checks what a TV browser can play |
 | `vpstream selftest` | Runs the tests shipped with the package (`--integration` uses the real ffmpeg) |
@@ -82,7 +85,8 @@ A per-user `pipx install` is reported as a problem, with the system-wide install
 the fix (see Install); remove the per-user copy afterwards with `pipx uninstall vpstream`.
 
 Settings are read from `/etc/vpstream/config.toml` when it exists: `port` under `[stream]`
-(default 1337) and `port` under `[dashboard]` (default 1338).
+(default 1337), `host` under `[stream]` (the address in the URLs shown; by default the one
+this host uses to reach the internet) and `port` under `[dashboard]` (default 1338).
 
 ## `vpstream daemon` and `vpstream status`
 
@@ -97,6 +101,47 @@ start while another daemon is listening on the same socket.
   publishes it on your tailnet with `tailscale serve`, so the dashboard is
   `https://<this host's tailnet name>:1338/`, reachable only from your own devices.
   `vpstream status` shows that address, or says that the dashboard is not published.
+
+## Streaming: `vpstream start`, `stop`, `devices` and `alias`
+
+```text
+vpstream start --file /srv/media/film.mkv             # http://<ip>:1337/abc
+vpstream start --dir /srv/media/show --alias show     # http://<ip>:1337/show, /show/1, /show/2 ...
+vpstream devices                                      # who asked for it
+vpstream stop
+```
+
+One stream runs at a time. The service has its own user, which must be able to read the
+videos and enter the folders above them.
+
+- **Addresses:** `/ALIAS` plays the video of a `--file` stream. For a `--dir` stream it is the
+  episode list for a browser and an M3U playlist for a player, so VLC can open it directly;
+  `/ALIAS/1`, `/ALIAS/2` and so on are the videos, in natural order of their file names
+  (episode 2 before episode 10), and `/ALIAS/playlist.m3u` is always the playlist. Only the
+  top level of the folder is read. Numbers stay as they are while the stream runs.
+- **Alias:** three random letters, or `--alias NAME`. `vpstream alias NAME` changes it while
+  the stream runs, and the old address stops working at once.
+- **Time limit:** a stream stops by itself after `--ttl MINUTES` (default 180; 0 for none).
+- **Who gets in** (`--policy`, changed live from the dashboard or with `vpstream devices`):
+
+  | Policy | Who gets in |
+  | --- | --- |
+  | `open` (the default) | Everyone, except the devices you disable |
+  | `approval` | Only the devices you approve. The others get a 403 and wait in the list, marked WL |
+  | `locked` | Only the enabled devices. `devices lock` keeps the ones that get in at that moment; `devices unlock` goes back |
+
+  A device is an IP address. `vpstream devices enable ADDRESS` and `disable ADDRESS` let one
+  in or keep it out, under every policy. Decisions last until the stream stops.
+- **How it is served:** Caddy listens on the stream port only while a stream runs, as a child
+  of the daemon and as the same unprivileged user. It asks the daemon about every request, so
+  a change applies on the next one, and then sends the file itself, with range requests.
+  Requests for anything but the alias get a 404 and are not listed as devices.
+- **Dashboard:** the same controls, on the tailnet address `vpstream status` shows.
+- **Stop, crash and reboot:** `vpstream stop`, the time limit and stopping the service all
+  close the port. After a crash the service starts again and takes the stream up where it
+  was, with its devices. A stream is never carried over a reboot.
+- **Plain HTTP:** the stream is not encrypted, and anyone who knows the address can fetch it
+  under the `open` policy.
 
 ## The firewall helper, `vpstream-fw`
 
@@ -113,8 +158,8 @@ small helper does it as root: `vpstream-fw open` and `vpstream-fw close`, nothin
 - **Two ufw commands:** `ufw allow PORT/tcp` and `ufw delete allow PORT/tcp`. It never enables,
   disables, resets or reloads ufw and never touches another rule.
 - **After a crash or reboot:** a ufw rule stays on disk, so when the daemon starts it closes
-  the stream port unless a running stream is recorded. `vpstream status` shows the port's
-  state, and a warning when the helper could not be run.
+  the stream port unless it takes up a stream that was running when it crashed.
+  `vpstream status` shows the port's state, and a warning when the helper could not be run.
 
 ## `vpstream install ffmpeg` and `vpstream update ffmpeg`
 

@@ -11,7 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__
+from vpstream import __version__, gate, stream
+from vpstream.net import url_host
 
 
 def _progress(msg: str) -> None:
@@ -31,13 +32,6 @@ def _port(text: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError(f"not a port number from 1 to 65535: {text!r}")
     return port
-
-
-def _url_host(host: str) -> str:
-    """The host as it goes in a URL; a wildcard address becomes a placeholder."""
-    if host in ("", "0.0.0.0", "::"):
-        return "<server-ip>"
-    return f"[{host}]" if ":" in host else host
 
 
 def _writable_file(path: Path) -> str | None:
@@ -120,7 +114,7 @@ def cmd_caps(args: argparse.Namespace) -> int:
         clip_dir=clip_dir, results_path=out, log=lambda m: print(m, flush=True)
     )
     ttl = args.ttl * 60 if args.ttl > 0 else None
-    shown = _url_host(args.host)
+    shown = url_host(args.host)
     print(f"Serving the capability page on {args.host}:{args.port}")
     print(f"Open on the TV:  http://{shown}:{args.port}/caps")
     print(f"Results go to {out.resolve()}")
@@ -167,16 +161,86 @@ def _dashboard_line(dash: dict[str, Any]) -> str:
     return str(dash.get("problem"))
 
 
+def _size(count: float) -> str:
+    for unit in ("B", "kB", "MB", "GB"):
+        if count < 1000 or unit == "GB":
+            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
+        count /= 1000
+    raise AssertionError("unreachable")
+
+
+def device_state(device: dict[str, Any]) -> str:
+    """One word for where a device stands; WL marks one that hit the waiting list."""
+    allowed = device.get("allowed")
+    if allowed is None:
+        state = "allowed" if device.get("passes") else "waiting"
+    else:
+        state = "enabled" if allowed else "disabled"
+    return f"{state} WL" if device.get("wl") else state
+
+
+def format_devices(stream: dict[str, Any], now: float) -> str:
+    devices = stream.get("devices") or []
+    if not devices:
+        return "No device has asked for the stream yet."
+    rows = [("ADDRESS", "STATE", "REQUESTS", "BLOCKED", "SENT", "LAST SEEN", "PLAYER")]
+    for d in devices:
+        seen = d.get("last_seen") or 0
+        rows.append(
+            (
+                str(d.get("ip")),
+                device_state(d),
+                str(d.get("requests", 0)),
+                str(d.get("blocked", 0)),
+                _size(float(d.get("bytes") or 0)),
+                f"{_duration(max(0.0, now - seen))} ago" if seen else "never",
+                str(d.get("user_agent") or "-")[:60],
+            )
+        )
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
+    return "\n".join(
+        "  ".join(
+            [*(cell.ljust(w) for cell, w in zip(row, widths, strict=False)), row[-1]]
+        ).rstrip()
+        for row in rows
+    )
+
+
+def format_stream(stream: dict[str, Any]) -> str:
+    """The running stream: what it is and the address of every video."""
+    left = stream.get("seconds_left")
+    limit = "no time limit" if left is None else f"stops in {_duration(float(left))}"
+    lines = [
+        f"Stream:       /{stream.get('alias')} ({stream.get('mode')}, policy "
+        f"{stream.get('policy')}, {limit})",
+        f"Source:       {stream.get('source')}",
+    ]
+    videos = stream.get("videos") or []
+    if stream.get("kind") == "dir":
+        lines.append(
+            f"Address:      {stream.get('url')}  (index for browsers, playlist for players)"
+        )
+        width = len(str(len(videos)))
+        lines += [f"  {v['number']:>{width}}  {v['url']}  {v['name']}" for v in videos]
+    else:
+        lines.append(f"Address:      {stream.get('url')}")
+    return "\n".join(lines)
+
+
 def format_status(info: dict[str, Any], cli_version: str) -> str:
     """The daemon's status as text for `vpstream status`."""
     dash = info.get("dashboard") or {}
+    stream = info.get("stream")
     lines = [
         f"vpstream daemon {info.get('version')}, "
         f"up {_duration(float(info.get('uptime_seconds') or 0))} (pid {info.get('pid')})",
-        f"Stream:       {'running' if info.get('stream') else 'none'}",
+        format_stream(stream) if stream else "Stream:       none",
         f"Stream port:  {info.get('stream_port')} ({info.get('stream_port_state', 'unknown')})",
         "Dashboard:    " + _dashboard_line(dash),
     ]
+    if stream:
+        count = len(stream.get("devices") or [])
+        lines.append(f"Devices:      {count} (see: vpstream devices)")
     if info.get("firewall_problem"):
         lines.append(f"WARNING: {info['firewall_problem']}")
     if info.get("version") != cli_version:
@@ -187,17 +251,89 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     return "\n".join(lines)
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    import json
-
+def _daemon(route: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Ask the daemon (a change when there is a payload). On failure the reason is printed
+    and None is returned."""
     from vpstream import client, config
 
     try:
-        info = client.call(config.default_paths().socket, "GET", "status")
+        info: dict[str, Any] = client.call(
+            config.default_paths().socket, "GET" if payload is None else "POST", route, payload
+        )
     except (client.DaemonUnavailable, client.DaemonRefused) as exc:
-        return _error(str(exc))
+        _error(str(exc))
+        return None
+    return info
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    import json
+
+    info = _daemon("status")
+    if info is None:
+        return 1
     print(json.dumps(info, indent=2) if args.json else format_status(info, __version__))
     return 0
+
+
+def _show(info: dict[str, Any] | None, devices: bool = False) -> int:
+    """Print what a change left behind: the stream, or its devices."""
+    if info is None:
+        return 1
+    stream = info.get("stream")
+    if not stream:
+        print("No stream is running.")
+    elif devices:
+        print(f"Policy: {stream.get('policy')}")
+        print(format_devices(stream, float(info.get("now") or 0)))
+    else:
+        print(format_stream(stream))
+    if info.get("firewall_problem"):
+        print(f"WARNING: {info['firewall_problem']}", file=sys.stderr)
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    options: dict[str, Any] = {"mode": args.mode, "ttl": args.ttl}
+    # The daemon runs elsewhere, so it is told the whole path.
+    options["file" if args.file else "dir"] = os.path.abspath(args.file or args.dir)
+    for name in ("alias", "policy"):
+        if getattr(args, name):
+            options[name] = getattr(args, name)
+    info = _daemon("stream/start", options)
+    if info is not None and info.get("stream"):
+        dash = info.get("dashboard") or {}
+        print(format_stream(info["stream"]))
+        print("Dashboard:    " + _dashboard_line(dash))
+        print("Stop it with: vpstream stop")
+        return 0
+    return _show(info) or 1
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    info = _daemon("stream/stop", {})
+    if info is not None:
+        print(f"Stopped. Stream port {info.get('stream_port')}: {info.get('stream_port_state')}")
+    return _show(info) if info is None or info.get("firewall_problem") else 0
+
+
+def cmd_alias(args: argparse.Namespace) -> int:
+    return _show(_daemon("stream/alias", {"alias": args.name}))
+
+
+def cmd_devices(args: argparse.Namespace) -> int:
+    action = args.action or "list"
+    if action in ("enable", "disable"):
+        if not args.ip:
+            return _error(f"give the address to {action}: vpstream devices {action} ADDRESS", 2)
+        info = _daemon("devices", {"ip": args.ip, "allowed": action == "enable"})
+    elif action == "lock":
+        info = _daemon("stream/policy", {"policy": "locked"})
+    elif action == "unlock":
+        info = _daemon("stream/unlock", {})
+    else:
+        info = _daemon("status")
+    return _show(info, devices=True)
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -327,6 +463,37 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="show what the running daemon is doing")
     s.add_argument("--json", action="store_true", help="print the daemon's answer as JSON")
     s.set_defaults(func=cmd_status)
+
+    go = sub.add_parser("start", help="start a stream of one video or a folder of videos")
+    source = go.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file", metavar="PATH", help="the video to stream")
+    source.add_argument("--dir", metavar="PATH", help="a folder; its videos get numbers")
+    go.add_argument("--mode", choices=stream.MODES, default=stream.DIRECT, help="(default direct)")
+    go.add_argument("--alias", help="the short name in the address (default: 3 random letters)")
+    go.add_argument(
+        "--ttl",
+        type=float,
+        default=stream.DEFAULT_TTL_MINUTES,
+        metavar="MINUTES",
+        help="stop by itself after this many minutes (default 180; 0 = no limit)",
+    )
+    go.add_argument(
+        "--policy", choices=gate.POLICIES, help="who gets in (default for direct mode: open)"
+    )
+    go.set_defaults(func=cmd_start)
+    sub.add_parser("stop", help="stop the stream and close its port").set_defaults(func=cmd_stop)
+    al = sub.add_parser("alias", help="change the short name of the running stream")
+    al.add_argument("name")
+    al.set_defaults(func=cmd_alias)
+    dv = sub.add_parser("devices", help="list the devices of the stream, or let them in or out")
+    dv.add_argument(
+        "action",
+        nargs="?",
+        choices=["list", "enable", "disable", "lock", "unlock"],
+        help="(default list)",
+    )
+    dv.add_argument("ip", nargs="?", metavar="ADDRESS", help="for enable and disable")
+    dv.set_defaults(func=cmd_devices)
 
     dm = sub.add_parser("daemon", help="run the daemon in the foreground (the service does this)")
     dm.set_defaults(func=cmd_daemon)

@@ -6,34 +6,97 @@ The CLI and the dashboard call the same routes, so either can act on what the ot
 from __future__ import annotations
 
 from collections.abc import Callable
+from importlib import resources
 from typing import Any
 
-from flask import Flask, Response, jsonify
-from markupsafe import escape
+from flask import Flask, Response, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+from vpstream.control import Control, ControlError
+from vpstream.gate import GateError
+from vpstream.stream import StreamError
+
 API = "/api/v1"
+# Route -> (file in vpstream.assets, content type).
+ASSETS = {
+    "/": ("dashboard.html", "text/html; charset=utf-8"),
+    "/assets/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+}
 
 
-def create_app(status: Callable[[], dict[str, Any]]) -> Flask:
-    """Build the app. `status` returns the daemon's current state as plain data."""
+def _body() -> dict[str, Any]:
+    """The JSON object sent with a change.
+
+    Only JSON is taken: a page on another site cannot make a browser send that without
+    asking first, which the daemon never allows. That keeps such a page from starting a
+    stream through the browser of someone on the tailnet.
+    """
+    data = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(data, dict):
+        raise StreamError("send the request as a JSON object (Content-Type: application/json)")
+    return data
+
+
+def create_app(status: Callable[[], dict[str, Any]], control: Control | None = None) -> Flask:
+    """Build the app. `status` returns the daemon's current state as plain data; `control`
+    starts, stops and changes the stream."""
     app = Flask("vpstream", static_folder=None, template_folder=None)
+    files = resources.files("vpstream.assets")
 
     @app.get(f"{API}/status")
     def api_status() -> Response:
         return jsonify(status())
 
-    @app.get("/")
-    def index() -> str:
-        info = status()
-        stream = "a stream is running" if info.get("stream") else "no stream is running"
-        return (
-            "<!doctype html><meta charset=utf-8><title>vpstream</title>"
-            f"<h1>vpstream {escape(info.get('version', ''))}</h1><p>The daemon is up; {stream}.</p>"
-        )
+    def asset(name: str, ctype: str) -> Callable[[], Response]:
+        def send() -> Response:
+            response = Response(files.joinpath(name).read_bytes(), content_type=ctype)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
+
+        return send
+
+    for route, (name, ctype) in ASSETS.items():
+        app.add_url_rule(route, endpoint=name, view_func=asset(name, ctype))
+
+    if control is not None:
+        # Each change answers with the new status, so the caller shows it without asking again.
+        changes: dict[str, Callable[[dict[str, Any]], Any]] = {
+            "stream/start": control.start,
+            "stream/stop": lambda body: control.stop(),
+            "stream/alias": lambda body: control.set_alias(body.get("alias")),
+            "stream/policy": lambda body: control.set_policy(body.get("policy")),
+            "stream/unlock": lambda body: control.unlock(),
+            "devices": lambda body: control.set_device(body.get("ip"), body.get("allowed")),
+        }
+
+        def change(action: Callable[[dict[str, Any]], Any]) -> Callable[[], Response]:
+            def run() -> Response:
+                action(_body())
+                return jsonify(status())
+
+            return run
+
+        for route, action in changes.items():
+            app.add_url_rule(
+                f"{API}/{route}", endpoint=route, view_func=change(action), methods=["POST"]
+            )
+
+    @app.errorhandler(StreamError)
+    @app.errorhandler(GateError)
+    def refused(exc: ValueError) -> tuple[Response, int]:
+        return jsonify(error=str(exc)), 400
+
+    @app.errorhandler(ControlError)
+    def failed(exc: ControlError) -> tuple[Response, int]:
+        return jsonify(error=str(exc)), 503
 
     @app.errorhandler(HTTPException)
     def http_error(exc: HTTPException) -> tuple[Response, int]:
         return jsonify(error=exc.description or exc.name), exc.code or 500
+
+    @app.errorhandler(Exception)
+    def broke(exc: Exception) -> tuple[Response, int]:
+        app.logger.exception("a request to the daemon failed")
+        return jsonify(error=f"the daemon failed: {exc}"), 500
 
     return app
