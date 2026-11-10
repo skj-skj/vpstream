@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.7.0 (2026-11-10)
+
+### Features
+
+- Publish the dashboard with tailscale serve instead of a ufw rule
+  ([#9](https://github.com/skj-skj/vpstream/pull/9),
+  [`cff1037`](https://github.com/skj-skj/vpstream/commit/cff1037c07ad0680c542830f54970ff44a5812d0))
+
+
 ## v0.6.0 (2026-11-10)
 
 ### Features
