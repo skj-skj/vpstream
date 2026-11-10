@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-11-10)
+
+### Features
+
+- Add vpstream init and uninstall ([#8](https://github.com/skj-skj/vpstream/pull/8),
+  [`e33dab4`](https://github.com/skj-skj/vpstream/commit/e33dab4e3963ce01c28e7095918757a7b4beffe5))
+
+
 ## v0.5.0 (2026-11-10)
 
 ### Features
