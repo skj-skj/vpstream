@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -32,3 +35,11 @@ def need_ffmpeg() -> None:
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             pytest.fail(f"{tool} is required for integration tests")
+
+
+@pytest.fixture
+def short_tmp() -> Iterator[Path]:
+    """A temporary folder with a short path: a unix socket path may be at most 107 bytes."""
+    path = Path(tempfile.mkdtemp(prefix="vp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)

@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "src/vpstream/assets/hls.js.LICENSE"]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["flask>=3.0"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",

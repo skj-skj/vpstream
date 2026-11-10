@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,15 @@ class Paths:
             cache_dir=root / default.cache_dir.relative_to("/"),
             run_dir=root / default.run_dir.relative_to("/"),
         )
+
+
+ROOT_ENV = "VPSTREAM_ROOT"
+
+
+def default_paths() -> Paths:
+    """The real paths, or the same layout under $VPSTREAM_ROOT for trying things out."""
+    root = os.environ.get(ROOT_ENV)
+    return Paths.under(Path(root)) if root else Paths()
 
 
 @dataclass(frozen=True)

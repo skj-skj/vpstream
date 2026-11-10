@@ -49,6 +49,18 @@ pipx uninstall vpstream          # the per-user copy, if there is one
 Settings are read from `/etc/vpstream/config.toml` when it exists: `port` under `[stream]`
 (default 1337) and `port` under `[dashboard]` (default 1338).
 
+## `vpstream daemon` and `vpstream status`
+
+One daemon does the work, and the command line and the dashboard both talk to it.
+`vpstream daemon` runs it in the foreground; normally the service does that.
+
+- **Command line:** `vpstream status` asks the daemon over a unix socket,
+  `/run/vpstream/daemon.sock`, which only the service user and its group can use.
+  `--json` prints the raw answer.
+- **Dashboard port:** bound to this host's Tailscale address only (from `tailscale ip -4`),
+  never to every interface. While Tailscale has no address the daemon keeps running and tries
+  again every 10 seconds; `vpstream status` says why the dashboard is not available.
+
 ## `vpstream install ffmpeg` and `vpstream update ffmpeg`
 
 Distribution packages of ffmpeg are often several versions old. `vpstream install ffmpeg`
