@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.0 (2026-11-10)
+
+### Features
+
+- Add vpstream doctor and the configuration file ([#5](https://github.com/skj-skj/vpstream/pull/5),
+  [`364af62`](https://github.com/skj-skj/vpstream/commit/364af6266dbaee33c960a6cc0a856c28e33d40a8))
+
+
 ## v0.2.1 (2026-11-10)
 
 ### Bug Fixes
