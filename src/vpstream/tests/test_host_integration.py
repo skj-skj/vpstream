@@ -40,11 +40,17 @@ def test_tailscale_address_belongs_to_this_host(tailnet_ip: str) -> None:
         probe.bind((tailnet_ip, 0))  # only an address of this host can be bound
 
 
-def test_dashboard_is_reachable_on_the_tailscale_address_only(
+def test_tailscale_reports_a_name_and_a_readable_serve_configuration(tailnet_ip: str) -> None:
+    runner = SystemRunner()
+    assert tailscale.node(runner).name
+    assert isinstance(tailscale.serve_config(runner), dict)  # readable without root
+
+
+def test_dashboard_listens_on_loopback_and_not_on_the_tailscale_address(
     short_tmp: Path, tailnet_ip: str
 ) -> None:
     with socket.socket() as probe:
-        probe.bind((tailnet_ip, 0))
+        probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
     log: list[str] = []
     d = daemon.Daemon(
@@ -63,13 +69,14 @@ def test_dashboard_is_reachable_on_the_tailscale_address_only(
             if d.dashboard_address:
                 break
             stop.wait(0.1)
-        assert d.dashboard_address == f"{tailnet_ip}:{port}", log
-        with urllib.request.urlopen(f"http://{tailnet_ip}:{port}/api/v1/status", timeout=5) as r:
+        assert d.dashboard_address == f"127.0.0.1:{port}", log
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/status", timeout=5) as r:
             assert json.load(r)["version"] == __version__
         with socket.socket() as other, pytest.raises(OSError):
             other.settimeout(2)
-            other.connect(("127.0.0.1", port))
-        assert client.call(d.paths.socket, "GET", "status")["dashboard"]["address"]
+            other.connect((tailnet_ip, port))
+        dash = client.call(d.paths.socket, "GET", "status")["dashboard"]
+        assert dash["url"] is None and "not published" in dash["problem"]
     finally:
         stop.set()
         thread.join(10)
@@ -84,6 +91,11 @@ def test_the_installed_service_answers_and_keeps_the_stream_port_closed() -> Non
     assert info["stream"] is None
     assert info["firewall_problem"] is None
     assert info["stream_port_state"] == "closed"
-    if shutil.which("tailscale"):
-        expected = f"{tailscale.ipv4(SystemRunner())}:{info['dashboard']['port']}"
-        assert info["dashboard"]["address"] == expected
+    port = info["dashboard"]["port"]
+    assert info["dashboard"]["address"] == f"127.0.0.1:{port}"
+    name = tailscale.node(SystemRunner()).name
+    assert info["dashboard"]["url"] == f"https://{name}:{port}/", info["dashboard"]["problem"]
+    with urllib.request.urlopen(f"https://{name}:{port}/api/v1/status", timeout=20) as r:
+        assert (
+            json.load(r)["version"] == __version__
+        )  # through tailscale serve, with its certificate

@@ -159,6 +159,14 @@ def _duration(seconds: float) -> str:
     return f"{secs}s"
 
 
+def _dashboard_line(dash: dict[str, Any]) -> str:
+    if dash.get("url"):
+        return f"{dash['url']} (Tailscale only)"
+    if dash.get("address"):
+        return f"http://{dash['address']}/ on this host only; {dash.get('problem')}"
+    return str(dash.get("problem"))
+
+
 def format_status(info: dict[str, Any], cli_version: str) -> str:
     """The daemon's status as text for `vpstream status`."""
     dash = info.get("dashboard") or {}
@@ -167,8 +175,7 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
         f"up {_duration(float(info.get('uptime_seconds') or 0))} (pid {info.get('pid')})",
         f"Stream:       {'running' if info.get('stream') else 'none'}",
         f"Stream port:  {info.get('stream_port')} ({info.get('stream_port_state', 'unknown')})",
-        "Dashboard:    "
-        + (f"http://{dash['address']}/" if dash.get("address") else str(dash.get("problem"))),
+        "Dashboard:    " + _dashboard_line(dash),
     ]
     if info.get("firewall_problem"):
         lines.append(f"WARNING: {info['firewall_problem']}")

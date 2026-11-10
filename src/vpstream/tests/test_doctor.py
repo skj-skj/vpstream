@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from vpstream import cli, config, doctor, tailscale
 from vpstream.tests.fakes import FakeRunner
 
 ALL_TOOLS = (*(t.name for t in doctor.TOOLS), "fc-list")
+NAME = "host.example.ts.net"
+STATUS = {"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME]}
 FAMILIES = "Noto Sans CJK JP\nLiberation Sans\nDejaVu Sans\n"
 
 
@@ -16,6 +19,8 @@ def _host(tmp_path: Path, available: tuple[str, ...] = ALL_TOOLS) -> tuple[FakeR
     """A fake host where everything is fine."""
     runner = FakeRunner(available)
     runner.on("tailscale", "ip", "-4", stdout="100.64.0.7\n")
+    runner.on("tailscale", "status", "--json", stdout=json.dumps(STATUS))
+    runner.on("tailscale", "serve", "status", "--json", stdout="{}")
     runner.on("fc-list", stdout=FAMILIES)
     marker = tmp_path / "systemd"
     marker.mkdir()
@@ -47,7 +52,9 @@ def test_every_missing_tool_is_reported(tmp_path: Path) -> None:
     assert checks["ffprobe"].fix == "vpstream install ffmpeg"
     assert checks["mkvmerge"].fix == "sudo apt install mkvtoolnix"
     # Checks that need a missing tool are left out instead of failing a second time.
-    assert not {"systemd", "ufw enabled", "tailscale up"} & set(checks)
+    assert not {"systemd", "ufw enabled", "tailscale up", "tailnet https", "dashboard"} & set(
+        checks
+    )
     assert doctor.exit_code(list(checks.values())) == 1
 
 
@@ -221,3 +228,43 @@ def test_service_check(tmp_path: Path) -> None:
     runner.on("systemctl", "is-active", returncode=3, stdout="failed\n")
     failed = doctor.check_service(runner, unit)
     assert failed.status == "problem" and failed.detail == "failed" and "journalctl" in failed.fix
+
+
+def test_tailnet_https_is_needed_for_the_dashboard() -> None:
+    runner = FakeRunner(("tailscale",))
+    runner.on("tailscale", "status", "--json", stdout=json.dumps(STATUS))
+    assert doctor.check_tailnet_https(runner) == doctor.Check("tailnet https", "ok", NAME)
+    runner.on("tailscale", "status", "--json", stdout=json.dumps({**STATUS, "CertDomains": None}))
+    check = doctor.check_tailnet_https(runner)
+    assert check.status == "problem" and "admin console" in check.fix
+    runner.on("tailscale", "status", "--json", returncode=1, stderr="Tailscale is stopped.")
+    assert doctor.check_tailnet_https(runner).fix == "sudo tailscale up"
+
+
+def _serve(port: int, target: str) -> str:
+    web = {f"{NAME}:{port}": {"Handlers": {"/": {"Proxy": target}}}}
+    return json.dumps({"TCP": {str(port): {"HTTPS": True}}, "Web": web})
+
+
+def test_dashboard_check() -> None:
+    runner = FakeRunner(("tailscale",))
+    runner.on("tailscale", "serve", "status", "--json", stdout="{}")
+    missing = doctor.check_dashboard(runner, 1338)
+    assert missing.status == "warning" and missing.fix == "sudo vpstream init"
+    runner.on(
+        "tailscale", "serve", "status", "--json", stdout=_serve(1338, "http://127.0.0.1:1338")
+    )
+    assert doctor.check_dashboard(runner, 1338).status == "ok"
+    runner.on(
+        "tailscale", "serve", "status", "--json", stdout=_serve(1338, "http://127.0.0.1:3000")
+    )
+    taken = doctor.check_dashboard(runner, 1338)
+    assert taken.status == "problem" and "http://127.0.0.1:3000" in taken.detail
+
+
+def test_dashboard_is_checked_only_once_the_service_is_set_up(tmp_path: Path) -> None:
+    runner, kwargs = _host(tmp_path)
+    assert "dashboard" not in _by_name(doctor.run_checks(runner, **kwargs))
+    kwargs["unit_file"].write_text("[Unit]\n")
+    runner.on("systemctl", "is-active", stdout="active\n")
+    assert _by_name(doctor.run_checks(runner, **kwargs))["dashboard"].status == "warning"

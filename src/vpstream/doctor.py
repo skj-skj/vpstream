@@ -43,7 +43,7 @@ TOOLS = (
     Tool("ffprobe", "reading the tracks of a video", "vpstream install ffmpeg"),
     Tool("caddy", "serving streams", "sudo apt install caddy"),
     Tool("ufw", "opening the stream port only while a stream runs", "sudo apt install ufw"),
-    Tool("tailscale", "the private dashboard", "see https://tailscale.com/download/linux"),
+    Tool("tailscale", "publishing the dashboard", "see https://tailscale.com/download/linux"),
     Tool("systemctl", "running the service", "vpstream needs a host that runs systemd"),
     Tool("sudo", "the firewall helper", "as root: apt install sudo"),
     Tool("mkvextract", "WebVTT subtitles stored by mkvmerge", "", required=False),
@@ -107,6 +107,39 @@ def check_tailscale(runner: Runner) -> Check:
         return Check("tailscale up", "ok", tailscale.ipv4(runner))
     except tailscale.TailscaleDown as exc:
         return Check("tailscale up", "problem", str(exc), "sudo tailscale up")
+
+
+def check_tailnet_https(runner: Runner) -> Check:
+    """The dashboard is published with `tailscale serve`, which needs a certificate."""
+    try:
+        node = tailscale.node(runner)
+    except tailscale.TailscaleDown as exc:
+        return Check("tailnet https", "problem", str(exc), "sudo tailscale up")
+    if node.https:
+        return Check("tailnet https", "ok", node.name)
+    return Check(
+        "tailnet https",
+        "problem",
+        "this tailnet issues no HTTPS certificate for this host; the dashboard needs one",
+        "enable HTTPS certificates in the Tailscale admin console (DNS page)",
+    )
+
+
+def check_dashboard(runner: Runner, port: int) -> Check:
+    try:
+        proxy = tailscale.serve_proxy(tailscale.serve_config(runner), port)
+    except tailscale.TailscaleDown as exc:
+        return Check("dashboard", "problem", str(exc))
+    if proxy == tailscale.local_target(port):
+        return Check("dashboard", "ok", f"published by tailscale serve on port {port}")
+    if proxy is None:
+        return Check("dashboard", "warning", "not published on the tailnet", "sudo vpstream init")
+    return Check(
+        "dashboard",
+        "problem",
+        f"tailscale serve already uses port {port} for {proxy or 'another service'}",
+        "set another port under [dashboard] in the configuration, then: sudo vpstream init",
+    )
 
 
 def check_fonts(runner: Runner) -> list[Check]:
@@ -219,11 +252,19 @@ def run_checks(
         checks.append(check_ufw_enabled(ufw_conf))
     if "tailscale" in found:
         checks.append(check_tailscale(runner))
+        checks.append(check_tailnet_https(runner))
     checks += check_fonts(runner)
     checks.append(check_install(package_dir or Path(__file__).parent))
     checks.append(check_config(paths.config_file))
     if "systemctl" in found:
         checks.append(check_service(runner, unit_file))
+    if "tailscale" in found and unit_file.exists():
+        try:
+            port = config.load(paths.config_file).dashboard_port
+        except config.ConfigError:
+            port = None
+        if port is not None:
+            checks.append(check_dashboard(runner, port))
     return checks
 
 
