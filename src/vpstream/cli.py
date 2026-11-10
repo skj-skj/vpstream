@@ -134,6 +134,15 @@ def cmd_caps(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from vpstream import doctor
+    from vpstream.tools import SystemRunner
+
+    checks = doctor.run_checks(SystemRunner())
+    print(doctor.format_report(checks))
+    return doctor.exit_code(checks)
+
+
 def _ask(question: str) -> bool:
     try:
         answer = input(f"{question} [y/N] ")
@@ -193,6 +202,9 @@ def build_parser() -> argparse.ArgumentParser:
         "pytest_args", nargs=argparse.REMAINDER, help="extra pytest arguments, after --"
     )
     st.set_defaults(func=cmd_selftest)
+
+    d = sub.add_parser("doctor", help="check this host for the programs vpstream needs")
+    d.set_defaults(func=cmd_doctor)
 
     b = sub.add_parser("bench", help="measure how fast this host prepares a file")
     b.add_argument("file")
