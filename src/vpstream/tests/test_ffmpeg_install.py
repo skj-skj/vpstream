@@ -293,11 +293,24 @@ def test_missing_libraries_are_installed_with_apt(tmp_path: Path) -> None:
             "--no-install-recommends",
             "fontconfig",
             "fonts-dejavu-core",
+            "fonts-liberation",
+            "fonts-noto-cjk",
         ]
     ]
     # Every system change goes through sudo.
     changes = [c for c in env.runner.calls if c[0] in ("sudo", "cp", "mv", "rm", "ln", "chmod")]
     assert changes and all(c[0] == "sudo" for c in changes)
+
+
+def test_running_again_adds_packages_that_are_missing(env: Env) -> None:
+    env.run()
+    env.runner.tools |= {"apt-get", "dpkg-query"}
+    for pkg in fi.APT_PACKAGES[:-1]:
+        env.runner.on("dpkg-query", "-W", "-f=${Status}", pkg, stdout="install ok installed")
+    assert "already installed by vpstream" in env.run()
+    assert env.run(update=True).endswith("is already the newest stable build")
+    installs = [c for c in env.system_calls("apt-get") if "install" in c]
+    assert len(installs) == 2 and all(c[-1] == fi.APT_PACKAGES[-1] for c in installs)
 
 
 def test_without_sudo_a_normal_user_is_refused(env: Env) -> None:
@@ -417,7 +430,7 @@ def test_a_build_this_system_cannot_run_changes_nothing(env: Env) -> None:
 def test_a_failed_system_step_is_reported(env: Env) -> None:
     env.runner.tools |= {"apt-get", "dpkg-query"}
     env.runner.on("apt-get", "install", returncode=100, stdout="E: Unable to locate package")
-    with pytest.raises(fi.SetupError, match=r"libraries ffmpeg needs.*Unable to locate"):
+    with pytest.raises(fi.SetupError, match=r"libraries and fonts ffmpeg needs.*Unable to locate"):
         env.run()
 
 
