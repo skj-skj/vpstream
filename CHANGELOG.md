@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.7.1 (2026-11-10)
+
+### Bug Fixes
+
+- Close what was opened, refuse a second daemon, and the other review findings
+  ([#10](https://github.com/skj-skj/vpstream/pull/10),
+  [`6fc696c`](https://github.com/skj-skj/vpstream/commit/6fc696cb1ff0cd475eeaa34db58a47077f750cc6))
+
+
 ## v0.7.0 (2026-11-10)
 
 ### Features
