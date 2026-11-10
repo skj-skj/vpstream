@@ -41,7 +41,7 @@ class CaddyError(RuntimeError):
 
 def file_header(path: str) -> str:
     """A file's path as the gate names it to Caddy, which reads the value as a URL path."""
-    return quote(path, safe="/")
+    return quote(os.fsencode(path), safe="/")  # bytes: a file name need not be UTF-8
 
 
 def config(port: int, gate_socket: Path, access_log: Path) -> dict[str, Any]:
@@ -57,7 +57,10 @@ def config(port: int, gate_socket: Path, access_log: Path) -> dict[str, Any]:
     ask_gate = {
         "handler": "reverse_proxy",
         "upstreams": [{"dial": f"unix/{gate_socket}"}],
-        "headers": {"request": {"set": {HEADER_IP: ["{http.request.remote.host}"]}}},
+        "headers": {
+            "request": {"set": {HEADER_IP: ["{http.request.remote.host}"]}},
+            "response": {"delete": ["Server"]},  # what the daemon is built with is its own
+        },
         "handle_response": [
             {"match": {"headers": {HEADER_FILE: ["*"]}}, "routes": [{"handle": send_file}]}
         ],

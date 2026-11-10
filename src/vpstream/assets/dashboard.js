@@ -125,6 +125,10 @@
     var notes = [];
     $("version").textContent = info.version || "";
     if (info.firewall_problem) { notes.push(el("div", "Firewall: " + info.firewall_problem)); }
+    if (stream && stream.guessers.length) {
+      notes.push(el("div", "Shut out for trying addresses: " + stream.guessers.join(", ") +
+        " (enable one with: vpstream devices enable ADDRESS)"));
+    }
     fill($("notes"), notes);
     $("idle").hidden = !!stream;
     $("live").hidden = !stream;
@@ -151,7 +155,9 @@
 
   $("start").addEventListener("submit", function (event) {
     event.preventDefault();
-    var options = { ttl: Number($("ttl").value), policy: $("policy").value };
+    // An empty field is the default time limit, never "no limit".
+    var ttl = $("ttl").value.trim();
+    var options = { ttl: ttl === "" ? null : Number(ttl), policy: $("policy").value };
     options[$("kind").value] = $("path").value.trim();
     if ($("alias").value.trim()) { options.alias = $("alias").value.trim(); }
     change("stream/start", options);

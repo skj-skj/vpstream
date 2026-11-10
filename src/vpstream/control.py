@@ -45,9 +45,13 @@ class Control:
     stream: Stream | None = None
     port_state: str = "unknown"  # "closed", "open" or "unknown"
     firewall_problem: str | None = None
+    # Two locks, so that a slow Caddy or firewall helper never holds up a viewer or a status
+    # request: `_op` is held for a whole start, stop or resume; `_lock` only while the
+    # stream record is read or changed.
+    _op: threading.RLock = field(default_factory=threading.RLock)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _tail: LogTail | None = None
-    _host: str | None = None
+    _host: str = ""
 
     # --- the pieces
 
@@ -73,7 +77,7 @@ class Control:
         self.firewall_problem = None
 
     def base_url(self) -> str:
-        if self._host is None:
+        if not self._host:  # asked again while there is no route yet
             self._host = self.config.stream_host or net.outgoing_address()
         return f"http://{net.url_host(self._host)}:{self.config.stream_port}"
 
@@ -84,7 +88,7 @@ class Control:
 
     def _serve(self, stream: Stream) -> None:
         """Start Caddy, then open the port: the port is never open with nothing behind it
-        that asks the gate."""
+        that asks the gate. Called with `_op` held; viewers get a 404 until it is done."""
         if self.server is None:
             raise ControlError("this daemon has no public server to start")
         try:
@@ -93,24 +97,48 @@ class Control:
             raise ControlError(f"Caddy could not be started: {exc}") from exc
         try:
             self._port("open")
-        except FirewallError as exc:
-            self.server.stop()
+            with self._lock:
+                self.stream = stream
+                self._tail = LogTail(self.paths.access_log)
+                self._save()
+        except (FirewallError, OSError) as exc:
+            # A helper that was cut off may have opened the port all the same.
+            self._undo()
             raise ControlError(str(exc)) from exc
-        self.stream = stream
-        self._tail = LogTail(self.paths.access_log)
-        self._save()
 
-    def _end(self, why: str) -> None:
-        """Close the port, then stop Caddy, then forget the stream and its approvals."""
-        port = self.config.stream_port
-        try:
-            self._port("close")
-        except FirewallError as exc:
-            self.log(f"WARNING: {exc}")
+    def _undo(self) -> None:
+        """Take back whatever a start or a stop left: nothing of it may fail the caller."""
+        with self._lock:
+            self.stream = self._tail = None
+        steps: tuple[tuple[str, Callable[[], None]], ...] = (
+            ("closing the stream port", lambda: self._port("close")),
+            ("stopping Caddy", self._stop_server),
+            ("recording that no stream runs", self._forget),
+        )
+        for what, step in steps:
+            try:
+                step()
+            except (FirewallError, OSError) as exc:
+                self.log(f"WARNING: {what} failed: {exc}")
+
+    def _stop_server(self) -> None:
         if self.server is not None:
             self.server.stop()
-        self.stream = self._tail = None
-        self._save()
+
+    def _forget(self) -> None:
+        try:
+            with self._lock:
+                self._save()
+        except OSError:
+            # A record that stays would open the port again after a crash.
+            self._state_file.unlink(missing_ok=True)
+            raise
+
+    def _end(self, why: str) -> None:
+        """Forget the stream and its approvals, so the gate refuses at once; then close the
+        port and stop Caddy. Called with `_op` held."""
+        self._undo()
+        port = self.config.stream_port
         if self.firewall_problem:
             port_now = "may still be open"
         else:
@@ -126,7 +154,7 @@ class Control:
         not over and the machine has not rebooted. Otherwise the stream port is closed: an
         open rule survives a crash or a reboot.
         """
-        with self._lock:
+        with self._op:
             recorded, problem = state.load(self._state_file)
             if problem:
                 self.log(f"{problem}; treating it as no stream running")
@@ -134,7 +162,7 @@ class Control:
                 return
             port = self.config.stream_port
             if recorded.stream is not None:
-                self._save()
+                self._forget()
             if self.firewall is None:
                 self.log(f"no firewall helper; stream port {port} was not checked")
                 return
@@ -151,7 +179,7 @@ class Control:
         except StreamError as exc:
             self.log(f"{exc}; treating it as no stream running")
             return False
-        if recorded.get("boot") != self.boot:
+        if not self.boot or recorded.get("boot") != self.boot:
             self.log("the recorded stream is from before a reboot; it is not started again")
             return False
         if stream.expires is not None and stream.expires <= self.clock():
@@ -167,7 +195,7 @@ class Control:
 
     def shutdown(self) -> None:
         """The daemon is told to stop: the stream stops with it."""
-        with self._lock:
+        with self._op:
             if self.stream is not None:
                 self._end("the daemon is stopping")
 
@@ -175,20 +203,28 @@ class Control:
         """Called every second or so: count the bytes sent, and stop the stream when its
         time is over or Caddy is gone."""
         with self._lock:
-            if self.stream is None:
+            stream = self.stream
+            if stream is None:
                 return
             if self._tail is not None:
                 for ip, size in self._tail.read():
-                    self.stream.devices.add_bytes(ip, size)
-            if self.stream.expires is not None and self.stream.expires <= self.clock():
-                self._end("its time limit is over")
+                    stream.devices.add_bytes(ip, size)
+            # The wall clock, because the time limit must hold across a restart of the
+            # daemon; a clock that is set while a stream runs moves its end with it.
+            if stream.expires is not None and stream.expires <= self.clock():
+                why = "its time limit is over"
             elif self.server is not None and not self.server.running():
-                self._end("Caddy stopped unexpectedly")
+                why = "Caddy stopped unexpectedly"
+            else:
+                return
+        with self._op:
+            if self.stream is stream:  # not stopped by someone else in between
+                self._end(why)
 
     # --- what the command line and the dashboard ask for
 
     def start(self, options: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
+        with self._op:
             if self.stream is not None:
                 raise StreamError(
                     f"a stream is already running (/{self.stream.alias}); stop it first"
@@ -199,7 +235,7 @@ class Control:
             return self.status()
 
     def stop(self) -> dict[str, Any]:
-        with self._lock:
+        with self._op:
             self._running()
             self._end("stopped by request")
             return self.status()

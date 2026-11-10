@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 import re
 from pathlib import Path
 
@@ -33,6 +34,16 @@ def content_type(path: str | Path) -> str:
     )
 
 
+def shown(path: str | Path) -> str:
+    """A path or file name as text that can always be shown and sent. Linux file names are
+    bytes; one that is not UTF-8 gets a replacement mark for the bytes that are not."""
+    return os.fsencode(path).decode("utf-8", "replace")
+
+
+def is_video(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in VIDEO_TYPES
+
+
 def natural_key(name: str) -> list[int | str]:
     """A sort key that puts "episode 2" before "episode 10"."""
     # re.split puts the digit runs at the odd places, so a place always holds the same type.
@@ -46,8 +57,6 @@ def scan(folder: Path) -> list[Path]:
     found = [
         entry
         for entry in folder.iterdir()
-        if entry.suffix.lower() in VIDEO_TYPES
-        and not entry.name.startswith(".")
-        and entry.is_file()
+        if is_video(entry) and not entry.name.startswith(".") and entry.is_file()
     ]
     return sorted(found, key=lambda p: (natural_key(p.name), p.name))

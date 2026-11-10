@@ -316,3 +316,135 @@ def test_shutdown_stops_the_stream(rig: Rig) -> None:
     rig.control.shutdown()
     assert rig.fw.calls == ["open", "close"] and rig.server.calls == ["start", "stop"]  # type: ignore[union-attr]
     assert rig.recorded() is None and "the daemon is stopping" in rig.log[-1]
+
+
+# --- found in the review of milestone 2
+
+
+def test_status_and_viewers_do_not_wait_for_a_slow_firewall_or_caddy(rig: Rig) -> None:
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_open() -> None:
+        entered.set()
+        assert release.wait(10)
+
+    rig.fw.open = slow_open  # type: ignore[method-assign,union-attr]
+    starting = threading.Thread(target=rig.start, daemon=True)
+    starting.start()
+    assert entered.wait(5)
+    answered = threading.Event()
+
+    def ask() -> None:
+        assert rig.control.status()["stream"] is None  # not running until the port is open
+        assert rig.control.visit("aaa", "192.0.2.1", "x", False).status == 404
+        rig.control.tick()
+        answered.set()
+
+    threading.Thread(target=ask, daemon=True).start()
+    try:
+        assert answered.wait(2), "status waited for the firewall helper"
+    finally:
+        release.set()
+        starting.join(5)
+    assert rig.control.status()["stream"]["alias"] == "aaa"
+
+
+def test_a_second_start_waits_its_turn_and_is_refused(rig: Rig) -> None:
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    rig.fw.open = lambda: (entered.set(), release.wait(10))  # type: ignore[method-assign,union-attr]
+    first = threading.Thread(target=rig.start, daemon=True)
+    first.start()
+    assert entered.wait(5)
+    errors: list[Exception] = []
+
+    def again() -> None:
+        try:
+            rig.start(alias="bbb")
+        except StreamError as exc:
+            errors.append(exc)
+
+    second = threading.Thread(target=again, daemon=True)
+    second.start()
+    release.set()
+    first.join(5), second.join(5)
+    assert len(errors) == 1 and "already running" in str(errors[0])
+    assert rig.server.calls == ["start"]  # type: ignore[union-attr]
+
+
+def test_a_caddy_that_cannot_be_stopped_does_not_keep_the_stream_or_loop(rig: Rig) -> None:
+    rig.start()
+    rig.server.up = False  # type: ignore[union-attr]
+
+    def broken() -> None:
+        raise OSError("cannot remove the log")
+
+    rig.server.stop = broken  # type: ignore[method-assign,union-attr]
+    for _ in range(3):
+        rig.control.tick()
+    assert rig.control.stream is None and rig.recorded() is None
+    assert rig.fw.calls == ["open", "close"]  # type: ignore[union-attr]  # once, not every second
+    assert any("stopping Caddy failed" in line for line in rig.log)
+
+
+def test_a_record_that_cannot_be_rewritten_is_removed_so_no_crash_reopens_the_port(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.start()
+
+    def full(path: Any, value: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "save", full)
+    info = rig.control.stop()
+    assert info["stream"] is None and rig.fw.calls == ["open", "close"]  # type: ignore[union-attr]
+    assert not (rig.paths.state_dir / state.FILE_NAME).exists()
+    assert any("recording that no stream runs failed" in line for line in rig.log)
+    monkeypatch.undo()
+    control = rig.again()
+    control.reconcile()
+    assert control.stream is None
+
+
+def test_a_start_that_cannot_be_recorded_is_taken_back(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(path: Any, value: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "save", full)
+    with pytest.raises(ControlError, match="disk full"):
+        rig.start()
+    assert rig.control.stream is None
+    assert rig.fw.calls == ["open", "close"] and rig.server.calls == ["start", "stop"]  # type: ignore[union-attr]
+
+
+def test_a_port_that_may_have_opened_is_closed_again(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, FakeFirewall(fail="stopped: no result after 60 seconds"), FakeServer())
+    with pytest.raises(ControlError, match="no result"):
+        rig.start()
+    assert rig.fw.calls == ["open", "close"]  # type: ignore[union-attr]
+
+
+def test_without_a_boot_id_a_stream_is_never_taken_up_again(rig: Rig) -> None:
+    rig.again(boot="")
+    rig.start()
+    rig.fw.calls.clear()  # type: ignore[union-attr]
+    control = rig.again(boot="")
+    control.reconcile()
+    assert control.stream is None and rig.fw.calls == ["close"]  # type: ignore[union-attr]
+
+
+def test_the_address_is_looked_up_again_until_there_is_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vpstream import net
+
+    monkeypatch.setattr(net, "outgoing_address", lambda: "")
+    control = Control(config.Config(), config.Paths.under(tmp_path))
+    assert control.base_url() == "http://<server-ip>:1337"
+    monkeypatch.setattr(net, "outgoing_address", lambda: "192.0.2.5")
+    assert control.base_url() == "http://192.0.2.5:1337"

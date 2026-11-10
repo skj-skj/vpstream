@@ -10,6 +10,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -86,6 +87,7 @@ def test_a_file_is_served_whole_in_ranges_and_with_its_type(live: Live, show: Pa
     assert status == 200 and body == BODY
     assert headers["content-type"] == "video/mp4" and headers["accept-ranges"] == "bytes"
     assert "x-vpstream-file" not in headers and "x-vpstream-type" not in headers
+    assert "werkzeug" not in live.get("/nope")[1].get("server", "").lower()
 
     status, headers, body = live.get("/aaa/1", headers={"Range": "bytes=1000-1999"})
     assert status == 206 and body == BODY[1000:2000]
@@ -126,7 +128,7 @@ def test_only_what_the_gate_names_can_be_fetched(live: Live, show: Path) -> None
         f"//{secret}",
         "/aaa/1/../../../../etc/hostname",
     ):
-        status, _, body = live.get(target)
+        status, _, body = live.get(quote(target))
         assert b"not a video" not in body, target
         assert status in (301, 308, 400, 404) or body == BODY, (target, status)
     # A viewer cannot name a file itself, in a request header.

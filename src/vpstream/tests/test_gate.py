@@ -93,8 +93,8 @@ def test_the_table_is_capped_and_never_drops_a_decision(monkeypatch: pytest.Monk
 
     for n in (3, 4):
         table.decide(f"192.0.2.{n}", False, 4.0)
-    # Full of decisions: an unknown device is judged, but not written down.
-    assert table.visit(OPEN, "192.0.2.5", "x", 5.0)
+    # Full of decisions: an unknown device could not be listed or disabled, so it stays out.
+    assert not table.visit(OPEN, "192.0.2.5", "x", 5.0)
     assert not table.visit(LOCKED, "192.0.2.5", "x", 5.0)
     assert len(table) == 3 and table.get("192.0.2.5") is None
     with pytest.raises(gate.GateError, match="full"):
@@ -177,3 +177,47 @@ def test_natural_order(tmp_path) -> None:  # type: ignore[no-untyped-def]
 )
 def test_content_type(name: str, ctype: str) -> None:
     assert media.content_type(f"/srv/{name}") == ctype
+
+
+# --- viewers that try addresses until one works
+
+
+def test_misses_are_counted_until_the_viewer_is_a_guesser() -> None:
+    table = Devices()
+    for _ in range(gate.MAX_MISSES - 1):
+        table.miss("192.0.2.1")
+    assert not table.guesser("192.0.2.1") and table.guessers() == []
+    table.miss("192.0.2.1")
+    assert table.guesser("192.0.2.1") and table.guessers() == ["192.0.2.1"]
+    assert not table.guesser("192.0.2.2")
+    table.decide("192.0.2.1", False, 1.0)  # disabling does not let it back in
+    assert table.guesser("192.0.2.1")
+    table.decide("192.0.2.1", True, 1.0)  # enabling does
+    assert not table.guesser("192.0.2.1") and table.guessers() == []
+
+
+def test_the_guesser_count_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate, "MAX_GUESSERS", 2)
+    table = Devices()
+    for n in (1, 2, 3):
+        for _ in range(gate.MAX_MISSES):
+            table.miss(f"192.0.2.{n}")
+    assert table.guessers() == ["192.0.2.1", "192.0.2.2"]
+
+
+def test_passes_counts_nothing() -> None:
+    table = Devices()
+    assert not table.passes(OPEN, "192.0.2.1")  # not listed
+    table.visit(OPEN, "192.0.2.1", "x", 1.0)
+    assert table.passes(OPEN, "192.0.2.1") and not table.passes(LOCKED, "192.0.2.1")
+    assert table.rows()[0]["requests"] == 1
+
+
+def test_a_name_that_is_not_utf8_can_be_shown() -> None:
+    import os
+
+    name = os.fsdecode(b"caf\xe9.mkv")
+    assert media.shown(name) == "caf\ufffd.mkv"
+    media.shown(name).encode("utf-8")  # does not raise
+    assert media.shown("plain é.mkv") == "plain é.mkv"
+    assert media.is_video(name) and not media.is_video("notes.txt")

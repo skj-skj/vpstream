@@ -18,6 +18,8 @@ POLICIES = (APPROVAL, OPEN, LOCKED)
 
 MAX_DEVICES = 500  # a port scan must not grow the table without end
 MAX_USER_AGENT = 200
+MAX_MISSES = 20  # wrong addresses one viewer may try before it is shut out as a guesser
+MAX_GUESSERS = 5000
 
 
 class GateError(ValueError):
@@ -50,6 +52,7 @@ class Devices:
 
     def __init__(self, rows: list[Device] | None = None) -> None:
         self._rows = {row.ip: row for row in rows or []}
+        self._misses: dict[str, int] = {}
 
     def __len__(self) -> int:
         return len(self._rows)
@@ -75,8 +78,10 @@ class Devices:
     def visit(self, policy: str, ip: str, user_agent: str, now: float) -> bool:
         """Count one request from `ip` and say whether the policy lets it in."""
         row = self._row(ip, now)
-        if row is None:  # the table is full of decided devices; this one is not among them
-            return allows(policy, None)
+        if row is None:
+            # The table is full of decided devices and this one is not among them. It could
+            # not be listed or disabled, so it stays out, whatever the policy.
+            return False
         ok = allows(policy, row.allowed)
         row.last_seen = now
         row.requests += 1
@@ -97,7 +102,27 @@ class Devices:
         if row is None:
             raise GateError(f"the device table is full ({MAX_DEVICES} decided devices)")
         row.allowed = allowed
+        if allowed:
+            self._misses.pop(normal, None)
         return row
+
+    # --- viewers that try addresses until one works
+
+    def passes(self, policy: str, ip: str) -> bool:
+        """Whether a device that is already listed gets in. Nothing is counted."""
+        row = self._rows.get(ip)
+        return row is not None and allows(policy, row.allowed)
+
+    def miss(self, ip: str) -> None:
+        """Count a request for an address that does not exist."""
+        if ip in self._misses or len(self._misses) < MAX_GUESSERS:
+            self._misses[ip] = self._misses.get(ip, 0) + 1
+
+    def guesser(self, ip: str) -> bool:
+        return self._misses.get(ip, 0) >= MAX_MISSES
+
+    def guessers(self) -> list[str]:
+        return sorted(ip for ip in self._misses if self.guesser(ip))
 
     def keep_current(self, policy: str) -> None:
         """Before a lock: every device that gets in now is enabled, so the lock keeps the

@@ -522,6 +522,39 @@ def test_command_line_refusals(
     capsys.readouterr()
 
 
+def test_an_empty_path_is_refused_without_a_traceback(
+    streaming: Running, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for flag in ("--file", "--dir"):
+        assert cli.main(["start", flag, ""]) == 2
+        assert f"{flag} needs a path" in capsys.readouterr().err
+    assert streaming.daemon.control.stream is None
+
+
+def test_a_daemon_that_fails_while_starting_leaves_no_socket_behind(
+    short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()))
+    monkeypatch.setattr(
+        run.daemon.control, "reconcile", lambda: (_ for _ in ()).throw(OSError("no disk"))
+    )
+    with pytest.raises(OSError, match="no disk"):
+        run.daemon.serve(run.stop)
+    assert not run.paths.socket.exists() and not run.paths.gate_socket.exists()
+
+
+def test_a_stream_that_will_not_stop_does_not_keep_the_sockets(
+    short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    monkeypatch.setattr(
+        run.daemon.control, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("stuck"))
+    )
+    run.close()
+    assert not run.paths.socket.exists() and not run.paths.gate_socket.exists()
+    assert any("stopping the stream failed" in line for line in run.log)
+
+
 def test_start_sends_the_full_path_of_a_relative_one(
     streaming: Running, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

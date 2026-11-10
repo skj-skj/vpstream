@@ -232,8 +232,11 @@ def test_without_control_there_are_no_change_routes() -> None:
 def test_an_unexpected_failure_is_json_too(
     control: Control, dash: FlaskClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(control, "_save", lambda: (_ for _ in ()).throw(OSError("disk full")))
-    answer = dash.post("/api/v1/stream/start", json={"file": __file__})
+    def full(ip: object, allowed: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(control, "set_device", full)
+    answer = dash.post("/api/v1/devices", json={"ip": "192.0.2.1", "allowed": True})
     assert answer.status_code == 500 and "disk full" in answer.get_json()["error"]
 
 
@@ -254,3 +257,124 @@ def test_dashboard_script_never_builds_html_from_server_text(dash: FlaskClient) 
         assert risky not in script
     page = dash.get("/").get_data(as_text=True)
     assert "http://" not in page and "https://" not in page  # nothing loads from elsewhere
+
+
+# --- found in the review of milestone 2
+
+
+def test_a_file_name_that_is_not_utf8_is_listed_and_served(
+    control: Control, viewer: FlaskClient, tmp_path: Path
+) -> None:
+    import os
+
+    folder = tmp_path / "odd"
+    folder.mkdir()
+    (folder / "ok.mkv").write_bytes(b"x")
+    try:
+        with open(os.fsencode(folder) + b"/caf\xe9.mkv", "wb"):
+            pass
+    except OSError:
+        pytest.skip("this file system refuses names that are not UTF-8")
+    info = control.start({"dir": str(folder), "alias": "aaa"})
+    assert [v["name"] for v in info["stream"]["videos"]] == ["caf\ufffd.mkv", "ok.mkv"]
+    page = viewer.get("/aaa", headers={**IP, "Accept": "text/html"})
+    assert page.status_code == 200 and "caf\ufffd.mkv" in page.get_data(as_text=True)
+    assert viewer.get("/aaa/playlist.m3u", headers=IP).status_code == 200
+    video = viewer.get("/aaa/1", headers=IP)
+    assert video.status_code == 200 and video.headers["X-Vpstream-File"].endswith("/caf%E9.mkv")
+
+
+def test_a_video_swapped_for_a_link_or_a_folder_after_the_start_is_not_served(
+    control: Control, viewer: FlaskClient, show: Path, tmp_path: Path
+) -> None:
+    secret = tmp_path / "secret.mkv"
+    secret.write_text("private")
+    control.start({"dir": str(show), "alias": "aaa"})
+    first = show / "e1 100%?.mp4"
+    assert viewer.get("/aaa/1", headers=IP).status_code == 200
+    first.unlink()
+    first.symlink_to(secret)
+    swapped = viewer.get("/aaa/1", headers=IP)
+    assert swapped.status_code == 404 and "X-Vpstream-File" not in swapped.headers
+    first.unlink()
+    first.mkdir()
+    (first / "index.html").write_text("a page")
+    assert viewer.get("/aaa/1", headers=IP).status_code == 404
+    first.joinpath("index.html").unlink()
+    first.rmdir()
+    assert viewer.get("/aaa/1", headers=IP).status_code == 404  # gone
+    assert viewer.get("/aaa/2", headers=IP).status_code == 200
+
+
+def test_the_status_of_an_answer_is_what_the_viewer_gets(
+    control: Control, viewer: FlaskClient, show: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vpstream.stream import Answer
+
+    for answer in (Answer(410, "missing"), Answer(451, "denied")):
+        monkeypatch.setattr(control, "visit", lambda *a, answer=answer: answer)
+        assert viewer.get("/aaa", headers=IP).status_code == answer.status
+
+
+def test_a_guesser_is_shut_out_and_can_be_let_back_in(
+    control: Control, viewer: FlaskClient, dash: FlaskClient, show: Path
+) -> None:
+    from vpstream import gate
+
+    control.start({"dir": str(show), "alias": "aaa"})
+    other = {"X-Vpstream-Ip": "192.0.2.50"}
+    for n in range(gate.MAX_MISSES):
+        assert viewer.get(f"/guess{n}", headers=IP).status_code == 404
+    assert viewer.get("/aaa", headers=IP).status_code == 404  # the right one comes too late
+    assert viewer.get("/aaa", headers=other).status_code == 200  # others are not touched
+    info = dash.get("/api/v1/status").get_json()
+    assert info["stream"]["guessers"] == ["192.0.2.1"]
+    assert [d["ip"] for d in info["stream"]["devices"]] == ["192.0.2.50"]
+    dash.post("/api/v1/devices", json={"ip": "192.0.2.1", "allowed": True})
+    assert viewer.get("/aaa", headers=IP).status_code == 200
+
+
+def test_a_device_that_gets_in_is_never_a_guesser(
+    control: Control, viewer: FlaskClient, show: Path
+) -> None:
+    from vpstream import gate
+
+    control.start({"dir": str(show), "alias": "aaa"})
+    assert viewer.get("/aaa", headers=IP).status_code == 200
+    for _ in range(gate.MAX_MISSES * 2):  # a browser asks for its icon on every page
+        assert viewer.get("/favicon.ico", headers=IP).status_code == 404
+        assert viewer.get("/aaa/99", headers=IP).status_code == 404
+    assert viewer.get("/aaa/1", headers=IP).status_code == 200
+
+
+def test_a_waiting_device_is_not_counted_as_a_guesser_for_asking_again(
+    control: Control, viewer: FlaskClient, show: Path
+) -> None:
+    from vpstream import gate
+
+    control.start({"dir": str(show), "alias": "aaa", "policy": "approval"})
+    for _ in range(gate.MAX_MISSES * 2):
+        assert viewer.get("/aaa/1", headers=IP).status_code == 403
+    control.set_device("192.0.2.1", True)
+    assert viewer.get("/aaa/1", headers=IP).status_code == 200
+
+
+def test_only_videos_can_be_started_from_the_dashboard_port(
+    dash: FlaskClient, tmp_path: Path
+) -> None:
+    secret = tmp_path / "id_rsa"
+    secret.write_text("key")
+    hidden = tmp_path / "link.mkv"
+    hidden.symlink_to(secret)  # a video name that leads to something else
+    for path in (secret, hidden):
+        answer = dash.post("/api/v1/stream/start", json={"file": str(path)})
+        assert answer.status_code == 400 and "not a video file" in answer.get_json()["error"]
+    assert dash.get("/api/v1/status").get_json()["stream"] is None
+
+
+def test_the_dashboard_sends_no_time_limit_of_its_own_for_an_empty_field(
+    dash: FlaskClient,
+) -> None:
+    script = dash.get("/assets/dashboard.js").get_data(as_text=True)
+    assert 'ttl === "" ? null : Number(ttl)' in script
+    assert b'value="180" required' in dash.get("/").data

@@ -245,3 +245,31 @@ def test_describe(show: Path) -> None:
         "192.0.2.5": False,
     }
     assert s.describe("x", 99999.0)["seconds_left"] == 0.0
+
+
+# --- found in the review of milestone 2
+
+
+def test_only_a_video_can_be_streamed_as_a_file(tmp_path: Path) -> None:
+    for name in ("notes.txt", "key", ".env"):
+        (tmp_path / name).write_text("x")
+        with pytest.raises(StreamError, match="not a video file"):
+            make(file=str(tmp_path / name))
+
+
+def test_links_are_followed_once_at_the_start(tmp_path: Path) -> None:
+    real = tmp_path / "library" / "film.mkv"
+    real.parent.mkdir()
+    real.write_bytes(b"x")
+    folder = tmp_path / "show"
+    folder.mkdir()
+    (folder / "e1.mkv").symlink_to(real)
+    (folder / "e2.mkv").symlink_to(tmp_path / "library")  # a folder
+    (folder / "e3.mkv").symlink_to(tmp_path / "nowhere.mkv")  # broken
+    secret = tmp_path / "secret.txt"
+    secret.write_text("x")
+    (folder / "e4.mkv").symlink_to(secret)  # a video name on something else
+    assert make(dir=str(folder)).videos == [str(real)]
+    assert make(file=str(folder / "e1.mkv")).videos == [str(real)]
+    with pytest.raises(StreamError, match="not a video file"):
+        make(file=str(folder / "e4.mkv"))

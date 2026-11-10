@@ -111,8 +111,9 @@ vpstream devices                                      # who asked for it
 vpstream stop
 ```
 
-One stream runs at a time. The service has its own user, which must be able to read the
-videos and enter the folders above them.
+One stream runs at a time, and only video files are streamed (by their extension). The
+service has its own user, which must be able to read the videos and enter the folders above
+them. A link is followed once, when the stream starts.
 
 - **Addresses:** `/ALIAS` plays the video of a `--file` stream. For a `--dir` stream it is the
   episode list for a browser and an M3U playlist for a player, so VLC can open it directly;
@@ -136,10 +137,13 @@ videos and enter the folders above them.
   of the daemon and as the same unprivileged user. It asks the daemon about every request, so
   a change applies on the next one, and then sends the file itself, with range requests.
   Requests for anything but the alias get a 404 and are not listed as devices.
+- **Guessing the alias:** an address that asks for 20 things that are not there, without
+  being a device that gets in, gets a 404 for everything until the stream stops.
+  `vpstream devices` lists such addresses, and `devices enable ADDRESS` lets one back in.
 - **Dashboard:** the same controls, on the tailnet address `vpstream status` shows.
 - **Stop, crash and reboot:** `vpstream stop`, the time limit and stopping the service all
   close the port. After a crash the service starts again and takes the stream up where it
-  was, with its devices. A stream is never carried over a reboot.
+  was, with the devices you enabled or disabled. A stream is never carried over a reboot.
 - **Plain HTTP:** the stream is not encrypted, and anyone who knows the address can fetch it
   under the `open` policy.
 

@@ -70,6 +70,11 @@ def _videos(kind: str, path: Path) -> list[str]:
     if kind == "file":
         if not path.is_file():
             raise StreamError(f"not a file: {path}")
+        if not media.is_video(path):
+            raise StreamError(
+                f"not a video file: {path}. vpstream streams: "
+                + " ".join(sorted(media.VIDEO_TYPES))
+            )
         found = [path]
     else:
         if not path.is_dir():
@@ -79,6 +84,15 @@ def _videos(kind: str, path: Path) -> list[str]:
         found = media.scan(path)
         if not found:
             raise StreamError(f"no videos at the top level of {path}")
+    # A link is followed now, once: what is streamed is the file it names at this moment,
+    # and that must be a video too.
+    found = [real for real in (video.resolve() for video in found) if media.is_video(real)]
+    if not found:
+        raise StreamError(
+            f"no videos at the top level of {path}"
+            if kind == "dir"
+            else f"not a video file: {path}"
+        )
     for video in found:
         if not os.access(video, os.R_OK):
             raise _unreadable(video)
@@ -177,6 +191,16 @@ class Stream:
         Only a request under the alias counts as a device; anything else on the port, such
         as a scanner trying `/`, is simply not found.
         """
+        if self.devices.guesser(ip):
+            return MISSING
+        answer = self._route(path, ip, user_agent, wants_html, now)
+        # A device that gets in may ask for what is not there (a browser's favicon); from
+        # anyone else it is a guess at the alias.
+        if answer is MISSING and not self.devices.passes(self.policy, ip):
+            self.devices.miss(ip)
+        return answer
+
+    def _route(self, path: str, ip: str, user_agent: str, wants_html: bool, now: float) -> Answer:
         parts = [part for part in path.split("/") if part]
         if not parts or parts[0].lower() != self.alias:
             return MISSING
@@ -204,7 +228,7 @@ class Stream:
     # --- as plain data
 
     def names(self) -> list[str]:
-        return [Path(video).name for video in self.videos]
+        return [media.shown(Path(video).name) for video in self.videos]
 
     def to_dict(self) -> dict[str, Any]:
         """Everything, for the state file."""
@@ -257,9 +281,10 @@ class Stream:
         url = f"{base_url}/{self.alias}"
         return {
             "kind": self.kind,
-            "source": self.source,
+            "source": media.shown(self.source),
             "alias": self.alias,
             "url": url,
+            "guessers": self.devices.guessers(),
             "mode": self.mode,
             "policy": self.policy,
             "unlocked_policy": self.unlocked_policy,

@@ -197,7 +197,11 @@ class Daemon:
         except DaemonError:
             _close(servers)
             raise
-        self.control.reconcile()
+        try:
+            self.control.reconcile()
+        except BaseException:
+            _close(servers)
+            raise
         threads = [
             threading.Thread(target=server.serve_forever, name=path.name, daemon=True)
             for path, _, server in servers
@@ -214,7 +218,10 @@ class Daemon:
             stop.wait()
         finally:
             stop.set()
-            self.control.shutdown()
+            try:
+                self.control.shutdown()
+            except Exception as exc:  # the sockets are still closed and removed
+                self.log(f"WARNING: stopping the stream failed: {exc!r}")
             for _, _, server in servers:
                 server.shutdown()
             for thread in threads:

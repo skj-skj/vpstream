@@ -285,6 +285,11 @@ def _show(info: dict[str, Any] | None, devices: bool = False) -> int:
         print("No stream is running.")
     elif devices:
         print(f"Policy: {stream.get('policy')}")
+        if stream.get("guessers"):
+            print(
+                "Shut out for trying addresses: " + ", ".join(stream["guessers"]) + "\n"
+                "  (let one back in with: vpstream devices enable ADDRESS)"
+            )
         print(format_devices(stream, float(info.get("now") or 0)))
     else:
         print(format_stream(stream))
@@ -295,8 +300,11 @@ def _show(info: dict[str, Any] | None, devices: bool = False) -> int:
 
 def cmd_start(args: argparse.Namespace) -> int:
     options: dict[str, Any] = {"mode": args.mode, "ttl": args.ttl}
+    kind, path = ("file", args.file) if args.file is not None else ("dir", args.dir)
+    if not path:
+        return _error(f"--{kind} needs a path", 2)
     # The daemon runs elsewhere, so it is told the whole path.
-    options["file" if args.file else "dir"] = os.path.abspath(args.file or args.dir)
+    options[kind] = os.path.abspath(path)
     for name in ("alias", "policy"):
         if getattr(args, name):
             options[name] = getattr(args, name)
