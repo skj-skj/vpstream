@@ -36,8 +36,16 @@ MARKER = "vpstream-build.json"
 ARCHES = {"x86_64": "linux64", "amd64": "linux64", "aarch64": "linuxarm64", "arm64": "linuxarm64"}
 # The builds link the C library dynamically.
 MIN_GLIBC = (2, 28)
-# libgcc_s is the other library they link; libass reads /etc/fonts and needs a font.
-APT_PACKAGES = ("libgcc-s1", "fontconfig", "fonts-dejavu-core")
+# libgcc_s is the other library they link; libass reads /etc/fonts and needs fonts. Burned-in
+# subtitles fall back to these when a file does not carry its font: Liberation stands in for
+# Arial and Times New Roman, Noto CJK draws Chinese, Japanese and Korean.
+APT_PACKAGES = (
+    "libgcc-s1",
+    "fontconfig",
+    "fonts-dejavu-core",
+    "fonts-liberation",
+    "fonts-noto-cjk",
+)
 # What bench, caps and prepare use; each tuple needs one of its names.
 REQUIRED_ENCODERS = (("libx264",), ("libx265",), ("libsvtav1", "libaom-av1"))
 REQUIRED_FILTERS = ("overlay", "scale2ref", "subtitles", "tonemap", "zscale")
@@ -320,6 +328,7 @@ class Setup:
         existing = find_existing(self.runner, self.layout)
         ours = [e for e in existing if e.owner == "vpstream"]
         if ours and not update:
+            self._install_packages()
             version = f"{ours[0].version} " if ours[0].version else ""
             return (
                 f"ffmpeg {version}is already installed by vpstream. "
@@ -337,6 +346,7 @@ class Setup:
         build = latest_build(self.http.get_json(RELEASES_API), arch)
         current = version_key(ours[0].version) if ours else None
         if current and current >= build.key:
+            self._install_packages()
             return f"ffmpeg {ours[0].version} is already the newest stable build"
 
         removals = self._removals(existing)
@@ -392,7 +402,7 @@ class Setup:
             self.progress(f"installing {', '.join(missing)}")
             self._system(
                 *APT_GET, "install", "-y", "--no-install-recommends", *missing,
-                what="installing the libraries ffmpeg needs",
+                what="installing the libraries and fonts ffmpeg needs",
             )  # fmt: skip
 
     def _check_space(self, build: Build, tmp: Path) -> None:

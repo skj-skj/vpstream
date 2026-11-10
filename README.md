@@ -43,8 +43,10 @@ build when there is one, including a new major version.
   is run and must have libx264, libx265, an AV1 encoder and the zscale, tonemap, subtitles,
   overlay and scale2ref filters. If anything fails, nothing on the system is changed.
 - **Libraries:** the builds need glibc 2.28 or newer (Ubuntu 20.04 and later) on x86-64 or
-  ARM64. On apt systems, the packages they use (`libgcc-s1`, `fontconfig`, `fonts-dejavu-core`)
-  are installed when missing.
+  ARM64. On apt systems, the packages they use are installed when missing: `libgcc-s1`,
+  `fontconfig`, and the fonts burned-in subtitles fall back to (`fonts-dejavu-core`,
+  `fonts-liberation`, and `fonts-noto-cjk` for Chinese, Japanese and Korean, about 90 MB).
+  Running `vpstream install ffmpeg` again adds any that are missing.
 - **An existing ffmpeg:** you are asked first, `This will uninstall the existing ffmpeg (...).
   Do you want to proceed? [y/N]`; the question lists every package apt would remove with it.
   An apt or snap ffmpeg is removed after the new one is in place. An ffmpeg from elsewhere is
