@@ -143,6 +143,16 @@ def check_config(path: Path) -> Check:
     )
 
 
+def check_service(runner: Runner, unit_file: Path) -> Check:
+    if not unit_file.exists():
+        return Check("service", "warning", "not set up on this host", "sudo vpstream init")
+    res = runner.run(["systemctl", "is-active", unit_file.name], timeout=30)
+    state = res.stdout.strip() or "unknown"
+    if res.returncode == 0:
+        return Check("service", "ok", state)
+    return Check("service", "problem", state, "see: journalctl -u vpstream -n 50 --no-pager")
+
+
 def folder_problem(folder: Path, st: os.stat_result, owner_uid: int = 0) -> str | None:
     """Why one folder on the way to the package is not safe for the service, or None."""
     if not st.st_mode & stat.S_IXOTH:
@@ -196,6 +206,7 @@ def run_checks(
     paths: config.Paths | None = None,
     systemd_marker: Path = Path("/run/systemd/system"),
     ufw_conf: Path = Path("/etc/ufw/ufw.conf"),
+    unit_file: Path = Path("/etc/systemd/system/vpstream.service"),
 ) -> list[Check]:
     """Run every check. Nothing here changes the host or needs root."""
     paths = paths or config.Paths()
@@ -211,6 +222,8 @@ def run_checks(
     checks += check_fonts(runner)
     checks.append(check_install(package_dir or Path(__file__).parent))
     checks.append(check_config(paths.config_file))
+    if "systemctl" in found:
+        checks.append(check_service(runner, unit_file))
     return checks
 
 

@@ -47,7 +47,7 @@ def call(socket_path: Path, method: str, route: str, timeout: float = TIMEOUT) -
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         raise DaemonUnavailable(
             f"the vpstream daemon is not running (no answer on {socket_path}). "
-            "Start it with: sudo systemctl start vpstream"
+            "Start it with: sudo systemctl start vpstream (the first time: sudo vpstream init)"
         ) from exc
     except PermissionError as exc:
         raise DaemonUnavailable(

@@ -29,6 +29,7 @@ def _host(tmp_path: Path, available: tuple[str, ...] = ALL_TOOLS) -> tuple[FakeR
         "paths": config.Paths.under(tmp_path),
         "systemd_marker": marker,
         "ufw_conf": ufw_conf,
+        "unit_file": tmp_path / "vpstream.service",
     }
     return runner, kwargs
 
@@ -56,10 +57,11 @@ def test_a_missing_optional_tool_is_only_a_warning(tmp_path: Path) -> None:
     checks = doctor.run_checks(runner, **kwargs)
     # The install check needs root-owned folders, which a test cannot make.
     checks = [c for c in checks if c.name != "install"]
-    assert {c.name for c in checks if c.status == "warning"} == {"mkvextract", "mkvmerge"}
+    warned = {c.name for c in checks if c.status == "warning"}
+    assert warned == {"mkvextract", "mkvmerge", "service"}
     assert doctor.exit_code(checks) == 0
     report = doctor.format_report(checks)
-    assert "Everything vpstream needs is here. 2 warnings." in report
+    assert "Everything vpstream needs is here. 3 warnings." in report
     assert "fix: sudo apt install mkvtoolnix" in report
 
 
@@ -206,3 +208,16 @@ def test_cli_doctor_prints_a_report(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert code in (0, 1)
     assert "python" in out and "install" in out
+
+
+def test_service_check(tmp_path: Path) -> None:
+    unit = tmp_path / "vpstream.service"
+    runner = FakeRunner(("systemctl",))
+    missing = doctor.check_service(runner, unit)
+    assert missing.status == "warning" and missing.fix == "sudo vpstream init"
+    unit.write_text("[Unit]\n")
+    runner.on("systemctl", "is-active", stdout="active\n")
+    assert doctor.check_service(runner, unit) == doctor.Check("service", "ok", "active")
+    runner.on("systemctl", "is-active", returncode=3, stdout="failed\n")
+    failed = doctor.check_service(runner, unit)
+    assert failed.status == "problem" and failed.detail == "failed" and "journalctl" in failed.fix

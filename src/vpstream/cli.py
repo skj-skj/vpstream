@@ -210,6 +210,41 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         return _error(str(exc))
 
 
+def _service(args: argparse.Namespace) -> Any:
+    from vpstream import service
+    from vpstream.tools import SystemRunner
+
+    return service.Service(SystemRunner(), sudo_user=os.environ.get("SUDO_USER"))
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    from vpstream import service
+
+    try:
+        _service(args).init()
+    except (service.ServiceError, OSError) as exc:
+        return _error(str(exc))
+    return 0
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    from vpstream import service
+
+    what = "the vpstream service, its user, configuration and state"
+    what += ", and every prepared video" if args.purge else ""
+    if os.geteuid() == 0 and not args.yes:
+        if not sys.stdin.isatty():
+            return _error("no terminal to ask on; pass --yes to proceed", 2)
+        if not _ask(f"Remove {what} from this host?"):
+            print("Cancelled; nothing was changed.")
+            return 1
+    try:
+        _service(args).uninstall(purge=args.purge)
+    except (service.ServiceError, OSError) as exc:
+        return _error(str(exc))
+    return 0
+
+
 def _ask(question: str) -> bool:
     try:
         answer = input(f"{question} [y/N] ")
@@ -272,6 +307,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="check this host for the programs vpstream needs")
     d.set_defaults(func=cmd_doctor)
+
+    sub.add_parser(
+        "init", help="set the service up on this host (as root; safe to run again)"
+    ).set_defaults(func=cmd_init)
+    un = sub.add_parser("uninstall", help="remove what init created (as root)")
+    un.add_argument("--purge", action="store_true", help="also remove the prepared videos")
+    un.add_argument("--yes", action="store_true", help="do not ask first")
+    un.set_defaults(func=cmd_uninstall)
 
     s = sub.add_parser("status", help="show what the running daemon is doing")
     s.add_argument("--json", action="store_true", help="print the daemon's answer as JSON")
