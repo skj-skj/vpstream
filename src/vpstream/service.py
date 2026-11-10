@@ -1,8 +1,9 @@
 """`vpstream init` and `vpstream uninstall`: set the service up on a host, and remove it again.
 
 Both run as root and are safe to repeat. `init` writes down what it created in a manifest, and
-`uninstall` removes only that, so a user, a group membership or a firewall rule that was there
-before is left alone. Neither ever enables, disables, resets or reloads ufw.
+`uninstall` removes only that, so a user, a group membership or a served port that was there
+before is left alone. Neither ever enables, disables, resets or reloads ufw, and neither
+resets `tailscale serve` or touches a port of it that is not vpstream's.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ NEEDED = (
     "gpasswd",
     "id",
     "chown",
+    "tailscale",
 )
 # A path goes into the sudoers rule and the unit file as it is, so it must need no quoting.
 _PLAIN_PATH = re.compile(r"/[A-Za-z0-9_./+-]+")
@@ -75,7 +77,7 @@ class Manifest:
 
     user_created: bool = False
     members_added: list[str] = field(default_factory=list)
-    dashboard_rule_port: int | None = None  # the ufw rule init added, if it was not there before
+    serve_port: int | None = None  # the `tailscale serve` port init published, if any
 
     @classmethod
     def load(cls, path: Path) -> Manifest:
@@ -87,11 +89,11 @@ class Manifest:
             raise ServiceError(f"cannot read {path}: {exc}") from exc
         if not isinstance(data, dict):
             raise ServiceError(f"{path} is not a vpstream install record")
-        port = data.get("dashboard_rule_port")
+        port = data.get("serve_port")
         return cls(
             user_created=data.get("user_created") is True,
             members_added=[m for m in data.get("members_added") or [] if isinstance(m, str)],
-            dashboard_rule_port=port if isinstance(port, int) else None,
+            serve_port=port if isinstance(port, int) else None,
         )
 
     def save(self, path: Path) -> None:
@@ -134,11 +136,6 @@ def sudoers_text(helper: Path) -> str:
         "# Written by `vpstream init`. Removed by `vpstream uninstall`.\n"
         f"{USER} ALL=(root) NOPASSWD: {commands}\n"
     )
-
-
-def dashboard_rule(port: int) -> list[str]:
-    """ufw arguments (after `allow` or `delete allow`) for the dashboard port on the tailnet."""
-    return ["in", "on", tailscale.INTERFACE, "to", "any", "port", str(port), "proto", "tcp"]
 
 
 @dataclass
@@ -209,9 +206,32 @@ class Service:
             if not path.is_file():
                 raise ServiceError(f"{path} is missing; reinstall vpstream")
         try:
-            config.load(self.layout.paths.config_file)
+            cfg = config.load(self.layout.paths.config_file)
         except config.ConfigError as exc:
             raise ServiceError(f"fix the configuration first: {exc}") from exc
+        self._check_serve(cfg.dashboard_port)
+
+    def _served(self, port: int) -> str | None:
+        return tailscale.serve_proxy(tailscale.serve_config(self.runner), port)
+
+    def _check_serve(self, port: int) -> None:
+        """The dashboard is published with `tailscale serve`; make sure that can work."""
+        try:
+            node = tailscale.node(self.runner)
+            proxy = self._served(port)
+        except tailscale.TailscaleDown as exc:
+            raise ServiceError(f"Tailscale is needed for the dashboard: {exc}") from exc
+        if not node.https:
+            raise ServiceError(
+                "this tailnet does not issue HTTPS certificates for this host, which "
+                "`tailscale serve` needs. Enable HTTPS certificates in the Tailscale admin "
+                "console (DNS page), then run init again"
+            )
+        if proxy is not None and proxy != tailscale.local_target(port):
+            raise ServiceError(
+                f"port {port} is already used by tailscale serve ({proxy or 'another service'}). "
+                f"Set another port under [dashboard] in {self.layout.paths.config_file}"
+            )
 
     def init(self) -> None:
         self._require_root("init")
@@ -230,7 +250,7 @@ class Service:
             folder.chmod(0o750)
             self._run("chown", "-R", f"{USER}:{USER}", folder, what=f"giving {folder} to {USER}")
         self._init_sudoers()
-        self._init_dashboard_rule(manifest, cfg.dashboard_port)
+        self._init_serve(manifest, cfg.dashboard_port)
         self._init_member(manifest)
         self._init_unit()
         self.say(
@@ -290,20 +310,29 @@ class Service:
             raise
         self.say(f"{target}: written and checked")
 
-    def _init_dashboard_rule(self, manifest: Manifest, port: int) -> None:
-        old = manifest.dashboard_rule_port
+    def _serve_off(self, port: int) -> bool:
+        """Stop publishing `port`, but only when it is there and points at vpstream. Turning
+        off a port that is not served is an error in Tailscale, so it is looked up first."""
+        if self._served(port) != tailscale.local_target(port):
+            return False
+        self._run("tailscale", *tailscale.serve_off_args(port), what="unpublishing the dashboard")
+        return True
+
+    def _init_serve(self, manifest: Manifest, port: int) -> None:
+        old = manifest.serve_port
         if old is not None and old != port:
-            self._run("ufw", "delete", "allow", *dashboard_rule(old), what="removing the old rule")
-            manifest.dashboard_rule_port = None
+            self._serve_off(old)
+            manifest.serve_port = None
             manifest.save(self.layout.manifest)
-        res = self._run("ufw", "allow", *dashboard_rule(port), what="allowing the dashboard port")
-        if "existing" in res.stdout.lower():
-            # Either ours from an earlier init (recorded) or the user's own (not recorded).
-            self.say(f"ufw: dashboard port {port} on {tailscale.INTERFACE} already allowed")
+        name = tailscale.node(self.runner).name
+        if self._served(port) == tailscale.local_target(port):
+            # Either ours from an earlier init (recorded) or set up by hand (not recorded).
+            self.say(f"tailscale serve: https://{name}:{port}/ already published")
             return
-        manifest.dashboard_rule_port = port
+        self._run("tailscale", *tailscale.serve_on_args(port), what="publishing the dashboard")
+        manifest.serve_port = port
         manifest.save(self.layout.manifest)
-        self.say(f"ufw: allowed dashboard port {port} on {tailscale.INTERFACE} only")
+        self.say(f"tailscale serve: dashboard published at https://{name}:{port}/ (tailnet only)")
 
     def _init_member(self, manifest: Manifest) -> None:
         user = self.sudo_user
@@ -357,14 +386,16 @@ class Service:
                 self.runner.run(["systemctl", "reset-failed", UNIT], timeout=TIMEOUT)
             self.say("service: stopped and removed")
 
-        if self.runner.which("ufw"):
-            if port is not None:
-                self._run("ufw", *firewall.ufw_args("close", port), what="closing the stream port")
-                self.say(f"ufw: stream port {port} is closed")
-            if manifest.dashboard_rule_port is not None:
-                rule = dashboard_rule(manifest.dashboard_rule_port)
-                self._run("ufw", "delete", "allow", *rule, what="removing the dashboard rule")
-                self.say(f"ufw: removed the rule for dashboard port {manifest.dashboard_rule_port}")
+        if self.runner.which("ufw") and port is not None:
+            self._run("ufw", *firewall.ufw_args("close", port), what="closing the stream port")
+            self.say(f"ufw: stream port {port} is closed")
+
+        if manifest.serve_port is not None and self.runner.which("tailscale"):
+            try:
+                if self._serve_off(manifest.serve_port):
+                    self.say(f"tailscale serve: port {manifest.serve_port} is no longer published")
+            except tailscale.TailscaleDown as exc:
+                self.say(f"note: could not check tailscale serve ({exc})")
 
         if lay.sudoers_file.exists():
             lay.sudoers_file.unlink()

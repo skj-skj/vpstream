@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""A stand-in for the `tailscale` command on CI machines, which are on no tailnet.
+
+It answers the few subcommands vpstream uses, the way the real one was seen to answer them,
+and keeps the serve configuration in a file. It starts with one port that is not vpstream's,
+so the service check can prove that port is left alone.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+NAME = "ci-host.example.ts.net"
+STATE = Path("/var/tmp/ci-fake-tailscale.json")
+
+
+def load() -> dict:
+    if STATE.exists():
+        return json.loads(STATE.read_text())
+    return {"443": "http://127.0.0.1:2283"}
+
+
+def main(argv: list) -> int:
+    serve = load()
+    if argv == ["status", "--json"]:
+        print(json.dumps({"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME]}))
+        return 0
+    if argv == ["ip", "-4"]:
+        print("no tailnet address on a CI machine", file=sys.stderr)
+        return 1
+    if argv == ["serve", "status", "--json"]:
+        web = {f"{NAME}:{p}": {"Handlers": {"/": {"Proxy": t}}} for p, t in serve.items()}
+        print(json.dumps({"TCP": {p: {"HTTPS": True} for p in serve}, "Web": web}, indent=2))
+        return 0
+    if argv[:1] == ["serve"] and len(argv) >= 3 and os.geteuid() != 0:
+        print("sending serve config: Access denied: serve config denied", file=sys.stderr)
+        return 1
+    if len(argv) == 4 and argv[:2] == ["serve", "--bg"] and argv[2].startswith("--https="):
+        serve[argv[2].partition("=")[2]] = argv[3]
+    elif len(argv) == 3 and argv[0] == "serve" and argv[1].startswith("--https=") and argv[2] == "off":
+        if argv[1].partition("=")[2] not in serve:
+            print("error: failed to remove web serve: handler does not exist", file=sys.stderr)
+            return 1
+        del serve[argv[1].partition("=")[2]]
+    else:
+        print(f"ci-fake-tailscale: vpstream must not run: tailscale {' '.join(argv)}", file=sys.stderr)
+        return 64
+    STATE.write_text(json.dumps(serve))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

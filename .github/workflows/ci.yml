@@ -97,6 +97,8 @@ jobs:
           sudo PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
             /usr/bin/pipx install --python /usr/bin/python3 "${wheel}[dev]"
           vpstream --version
+      - name: Stand in for Tailscale (the runner is on no tailnet)
+        run: sudo install -m 0755 scripts/ci-fake-tailscale /usr/local/bin/tailscale
       - name: init, helper, restart, crash, uninstall
         run: scripts/ci-service-check.sh
 

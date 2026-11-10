@@ -47,23 +47,27 @@ sudo vpstream init               # restarts the service on the new version
 - `/etc/vpstream/config.toml` (kept if it exists), a state folder and a cache folder
 - a sudoers rule that lets the service user run `vpstream-fw open` and `vpstream-fw close` as
   root and nothing else; it is checked with `visudo` before and after it is installed
-- a ufw rule that allows the dashboard port on `tailscale0` only
+- the dashboard, published on your tailnet with `tailscale serve`: HTTPS on the dashboard
+  port of this host's tailnet name, proxied to `127.0.0.1`. No firewall rule is added for it
 - the systemd service, enabled and started; it closes the stream port after a stop or a crash
 - the user who ran `sudo` is added to the `vpstream` group, to use `vpstream status` without
   sudo (log out and in once)
 
 `uninstall` removes what `init` created and nothing else: a user, a group membership or a
-firewall rule that was there before stays. The configuration and state are removed; prepared
+served port that was there before stays. The configuration and state are removed; prepared
 videos are kept unless `--purge` is given. It asks first; `--yes` skips the question.
 
-Neither command ever enables, disables, resets or reloads ufw, or touches any rule other than
-the stream port and the dashboard port.
+Neither command ever enables, disables, resets or reloads ufw, or touches any ufw rule other
+than the stream port. Neither resets `tailscale serve`: only the dashboard port is added or
+turned off, and a port that already serves something else is refused.
+
+`init` needs Tailscale running, with HTTPS certificates enabled for the tailnet.
 
 ## `vpstream doctor`
 
 Checks this host for everything vpstream needs and lists all of it in one report: the Python
-version, ffmpeg, ffprobe, Caddy, ufw, Tailscale, systemd and sudo, whether ufw is enabled and
-Tailscale is connected, the fonts burned-in subtitles fall back to, the configuration file,
+version, ffmpeg, ffprobe, Caddy, ufw, Tailscale, systemd and sudo, whether ufw is enabled,
+Tailscale is connected and the tailnet issues HTTPS certificates, the fonts burned-in subtitles fall back to, the configuration file,
 and where vpstream itself is installed. Each problem comes with the command that fixes it.
 The exit code is 1 when something required is missing. Nothing is changed and no root is
 needed.
@@ -82,9 +86,10 @@ One daemon does the work, and the command line and the dashboard both talk to it
 - **Command line:** `vpstream status` asks the daemon over a unix socket,
   `/run/vpstream/daemon.sock`, which only the service user and its group can use.
   `--json` prints the raw answer.
-- **Dashboard port:** bound to this host's Tailscale address only (from `tailscale ip -4`),
-  never to every interface. While Tailscale has no address the daemon keeps running and tries
-  again every 10 seconds; `vpstream status` says why the dashboard is not available.
+- **Dashboard port:** bound to `127.0.0.1` only, never to every interface. `vpstream init`
+  publishes it on your tailnet with `tailscale serve`, so the dashboard is
+  `https://<this host's tailnet name>:1338/`, reachable only from your own devices.
+  `vpstream status` shows that address, or says that the dashboard is not published.
 
 ## The firewall helper, `vpstream-fw`
 

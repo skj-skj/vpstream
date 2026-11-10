@@ -50,11 +50,27 @@ class Running:
         assert not self.thread.is_alive()
 
 
+NAME = "host.example.ts.net"
+
+
+def publish(runner: FakeRunner, port: int, target: str | None = None) -> None:
+    """Make the fake Tailscale say that serve publishes `port` (to vpstream by default)."""
+    serve = {
+        "TCP": {str(port): {"HTTPS": True}},
+        "Web": {
+            f"{NAME}:{port}": {"Handlers": {"/": {"Proxy": target or f"http://127.0.0.1:{port}"}}}
+        },
+    }
+    runner.on("tailscale", "serve", "status", "--json", stdout=json.dumps(serve))
+
+
 @pytest.fixture
 def tailnet() -> FakeRunner:
-    """A host whose "Tailscale address" is the loopback address, so tests can bind it."""
+    """A host on a tailnet, with nothing published by `tailscale serve` yet."""
     runner = FakeRunner(("tailscale",))
-    runner.on("tailscale", "ip", "-4", stdout="127.0.0.1\n")
+    status = {"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME]}
+    runner.on("tailscale", "status", "--json", stdout=json.dumps(status))
+    runner.on("tailscale", "serve", "status", "--json", stdout="{}")
     return runner
 
 
@@ -159,13 +175,15 @@ def test_cli_status(
     running: Running, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     address = running.wait_for_dashboard()
+    port = running.daemon.config.dashboard_port
+    publish(running.daemon.runner, port)  # type: ignore[arg-type]
     monkeypatch.setenv(config.ROOT_ENV, str(running.paths.run_dir.parent.parent))
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert f"vpstream daemon {__version__}" in out
     assert "Stream:       none" in out
     assert "Stream port:  " in out and "(unknown)" in out
-    assert f"Dashboard:    http://{address}/" in out
+    assert f"Dashboard:    https://{NAME}:{port}/ (Tailscale only)" in out
     assert cli.main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["dashboard"]["address"] == address
 
@@ -180,7 +198,11 @@ def test_cli_status_without_a_daemon(
 
 def test_status_notes_a_version_mismatch() -> None:
     info = {"version": "0.3.0", "uptime_seconds": 3725, "pid": 7, "stream_port": 1337}
-    info["dashboard"] = {"address": None, "problem": "the dashboard is not available: x"}
+    info["dashboard"] = {
+        "address": None,
+        "url": None,
+        "problem": "the dashboard is not available: x",
+    }
     text = cli.format_status(info, "0.4.0")
     assert "up 1h 02m (pid 7)" in text
     assert "Dashboard:    the dashboard is not available: x" in text
@@ -198,13 +220,11 @@ def test_duration(seconds: float, text: str) -> None:
 # --- the dashboard port
 
 
-def test_dashboard_listens_on_the_tailscale_address_only(running: Running) -> None:
+def test_dashboard_listens_on_loopback_only(running: Running) -> None:
     address = running.wait_for_dashboard()
-    host, _, port = address.partition(":")
-    assert host == "127.0.0.1" and int(port) == running.daemon.config.dashboard_port
+    assert address == f"127.0.0.1:{running.daemon.config.dashboard_port}"
     with urllib.request.urlopen(f"http://{address}/api/v1/status", timeout=5) as answer:
         assert json.load(answer)["dashboard"]["address"] == address
-    assert "tailscale ip -4" in [" ".join(c) for c in running.daemon.runner.calls]  # type: ignore[attr-defined]
 
 
 def test_dashboard_is_never_bound_to_every_interface(
@@ -226,42 +246,68 @@ def test_dashboard_is_never_bound_to_every_interface(
     assert bound == ["127.0.0.1"]
 
 
-def test_without_tailscale_the_socket_works_and_the_dashboard_waits(short_tmp: Path) -> None:
-    runner = FakeRunner(("tailscale",))
-    runner.on("tailscale", "ip", "-4", returncode=1, stdout="Tailscale is stopped.\n")
-    run = Running(short_tmp, runner, config.Config(dashboard_port=_free_port())).start()
+def _dash(root: Path, runner: FakeRunner) -> dict[str, object]:
+    d = daemon.Daemon(config.Config(), config.Paths.under(root), runner, log=lambda m: None)
+    d.dashboard_address = "127.0.0.1:1338"
+    return d.status()["dashboard"]  # type: ignore[no-any-return]
+
+
+def test_status_gives_the_tailnet_address_when_serve_publishes_it(
+    tmp_path: Path, tailnet: FakeRunner
+) -> None:
+    publish(tailnet, 1338)
+    dash = _dash(tmp_path, tailnet)
+    assert dash["url"] == f"https://{NAME}:1338/" and dash["problem"] is None
+
+
+def test_status_says_when_the_dashboard_is_not_published(
+    tmp_path: Path, tailnet: FakeRunner
+) -> None:
+    dash = _dash(tmp_path, tailnet)
+    assert dash["url"] is None and "sudo vpstream init" in str(dash["problem"])
+    text = cli.format_status({"dashboard": dash, "version": "1"}, "1")
+    assert "http://127.0.0.1:1338/ on this host only; not published" in text
+
+    publish(tailnet, 1338, target="http://127.0.0.1:3000")  # the port serves something else
+    assert _dash(tmp_path, tailnet)["url"] is None
+    assert "tailscale was not found" in str(_dash(tmp_path, FakeRunner(()))["problem"])
+
+
+def test_the_tailnet_address_is_remembered_between_status_requests(
+    tmp_path: Path, tailnet: FakeRunner
+) -> None:
+    publish(tailnet, 1338)
+    d = daemon.Daemon(config.Config(), config.Paths.under(tmp_path), tailnet, log=lambda m: None)
+    d.dashboard_address = "127.0.0.1:1338"
+    for _ in range(5):
+        d.status()
+    assert len(tailnet.calls) == 2  # one serve lookup and one name lookup
+
+
+def test_a_busy_dashboard_port_is_reported_and_retried(
+    short_tmp: Path, tailnet: FakeRunner
+) -> None:
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    cfg = config.Config(dashboard_port=busy.getsockname()[1])
+    run = Running(short_tmp, tailnet, cfg).start()
     try:
         for _ in range(100):
-            if "Tailscale is stopped" in run.daemon.dashboard_problem:
+            if "not available" in run.daemon.dashboard_problem:
                 break
             run.stop.wait(0.05)
         dash = client.call(run.paths.socket, "GET", "status")["dashboard"]
-        assert dash["address"] is None and "Tailscale is stopped" in dash["problem"]
+        assert dash["address"] is None and "not available" in dash["problem"]
         # The same problem is logged once, not on every retry.
         run.stop.wait(0.3)
-        assert sum("Tailscale is stopped" in line for line in run.log) == 1
-
-        # Tailscale comes up: the dashboard starts without a restart.
-        runner.on("tailscale", "ip", "-4", stdout="127.0.0.1\n")
-        assert run.wait_for_dashboard().startswith("127.0.0.1:")
+        assert sum("not available" in line for line in run.log) == 1
+        # The port becomes free: the dashboard starts without a restart.
+        busy.close()
+        assert run.wait_for_dashboard() == f"127.0.0.1:{cfg.dashboard_port}"
     finally:
+        busy.close()
         run.close()
-
-
-def test_a_busy_dashboard_port_is_reported(short_tmp: Path, tailnet: FakeRunner) -> None:
-    with socket.socket() as busy:
-        busy.bind(("127.0.0.1", 0))
-        busy.listen()
-        cfg = config.Config(dashboard_port=busy.getsockname()[1])
-        run = Running(short_tmp, tailnet, cfg).start()
-        try:
-            for _ in range(100):
-                if "not available" in run.daemon.dashboard_problem:
-                    break
-                run.stop.wait(0.05)
-            assert "not available" in run.daemon.status()["dashboard"]["problem"]
-        finally:
-            run.close()
 
 
 # --- the firewall when the daemon starts

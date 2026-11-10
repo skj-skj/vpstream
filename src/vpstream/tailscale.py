@@ -1,12 +1,13 @@
-"""What vpstream needs to know from Tailscale: this host's tailnet address."""
+"""What vpstream needs from Tailscale: this host's tailnet address and name, and `serve`."""
 
 from __future__ import annotations
 
 import ipaddress
+import json
+from dataclasses import dataclass
+from typing import Any
 
 from vpstream.tools import Runner, tail
-
-INTERFACE = "tailscale0"
 
 
 class TailscaleDown(RuntimeError):
@@ -25,3 +26,70 @@ def ipv4(runner: Runner) -> str:
         return str(ipaddress.IPv4Address(lines[0]))
     except (IndexError, ValueError):
         raise TailscaleDown(f"tailscale ip -4 printed no address: {res.stdout.strip()!r}") from None
+
+
+# --- `tailscale serve`: publishing a loopback port on the tailnet over HTTPS
+
+
+def _json(runner: Runner, *args: str) -> dict[str, Any]:
+    if not runner.which("tailscale"):
+        raise TailscaleDown("tailscale was not found on PATH")
+    res = runner.run(["tailscale", *args], timeout=30)
+    if res.returncode != 0:
+        raise TailscaleDown(f"tailscale {' '.join(args)} failed: {tail(res, stdout=True)}")
+    try:
+        data = json.loads(res.stdout) if res.stdout.strip() else {}
+    except ValueError as exc:
+        raise TailscaleDown(f"tailscale {' '.join(args)} did not print JSON") from exc
+    return data if isinstance(data, dict) else {}
+
+
+@dataclass(frozen=True)
+class Node:
+    name: str  # this host's name on the tailnet, without the trailing dot; "" when unknown
+    https: bool  # whether the tailnet issues HTTPS certificates for that name
+
+
+def node(runner: Runner) -> Node:
+    """This host's tailnet name, from `tailscale status --json`."""
+    data = _json(runner, "status", "--json")
+    me = data.get("Self")
+    name = str(me.get("DNSName") or "").rstrip(".") if isinstance(me, dict) else ""
+    domains = data.get("CertDomains") or []
+    return Node(name=name, https=bool(name) and name in domains)
+
+
+def serve_config(runner: Runner) -> dict[str, Any]:
+    """The serve configuration, from `tailscale serve status --json`. Readable without root."""
+    return _json(runner, "serve", "status", "--json")
+
+
+def local_target(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def serve_proxy(cfg: dict[str, Any], port: int) -> str | None:
+    """Where serve sends requests for `/` on `port`: a URL, "" when the port is served in
+    some other way, or None when serve does not use the port at all."""
+    tcp = cfg.get("TCP")
+    if not isinstance(tcp, dict) or str(port) not in tcp:
+        return None
+    web = cfg.get("Web")
+    for host, site in web.items() if isinstance(web, dict) else ():
+        if not host.endswith(f":{port}") or not isinstance(site, dict):
+            continue
+        handlers = site.get("Handlers")
+        root = handlers.get("/") if isinstance(handlers, dict) else None
+        if isinstance(root, dict) and isinstance(root.get("Proxy"), str):
+            return str(root["Proxy"])
+    return ""
+
+
+def serve_on_args(port: int) -> list[str]:
+    """`tailscale` arguments that publish the loopback port on the same HTTPS port."""
+    return ["serve", "--bg", f"--https={port}", local_target(port)]
+
+
+def serve_off_args(port: int) -> list[str]:
+    """`tailscale` arguments that stop serving one port. Fails when the port is not served."""
+    return ["serve", f"--https={port}", "off"]

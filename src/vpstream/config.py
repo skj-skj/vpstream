@@ -66,7 +66,8 @@ DEFAULT_TEXT = """\
 port = 1337
 
 [dashboard]
-# The dashboard port. It listens on the Tailscale address only.
+# The dashboard port. It listens on this host only (127.0.0.1); `vpstream init` publishes it
+# on your tailnet with `tailscale serve`, as https://<this host's tailnet name>:<port>/.
 port = 1338
 """
 

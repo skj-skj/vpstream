@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the real `vpstream init` and `vpstream uninstall` on a throwaway CI machine and checks
 # that they do what they say and leave no trace. It changes users, sudoers, systemd and ufw
-# rules, so it refuses to run anywhere but CI.
+# rules, so it refuses to run anywhere but CI. The machine is on no tailnet, so `tailscale` is
+# scripts/ci-fake-tailscale there; the real `tailscale serve` is checked on a real host.
 set -euo pipefail
 [ "${CI:-}" = "true" ] || { echo "this script is for CI machines only" >&2; exit 2; }
 
@@ -16,6 +17,8 @@ no() { if "$@"; then echo "!! expected to fail: $*" >&2; exit 1; fi; }
 
 step "before"
 rules > /tmp/ufw-before.txt
+tailscale serve status --json > /tmp/serve-before.json
+grep -q '"443"' /tmp/serve-before.json
 getent passwd > /tmp/passwd-before.txt
 getent group > /tmp/group-before.txt
 sudo ls /etc/sudoers.d > /tmp/sudoers-before.txt
@@ -30,7 +33,15 @@ systemctl is-active vpstream
 systemctl is-enabled vpstream
 sudo visudo -c
 id -nG "$USER" | tr ' ' '\n' | grep -qx vpstream
-has_rule 1338
+rules | diff /tmp/ufw-before.txt -   # init adds no ufw rule
+
+step "the dashboard listens on loopback only and is published by tailscale serve"
+ss -ltn | grep -w 1338 | tee /tmp/listen.txt
+[ "$(wc -l < /tmp/listen.txt)" = 1 ] && grep -q "127.0.0.1:1338" /tmp/listen.txt
+curl -sS -m 5 http://127.0.0.1:1338/api/v1/status | grep -q '"version"'
+tailscale serve status --json | tee /tmp/serve-now.json
+grep -q '"Proxy": "http://127.0.0.1:1338"' /tmp/serve-now.json
+grep -q '"Proxy": "http://127.0.0.1:2283"' /tmp/serve-now.json
 
 step "the CLI talks to the daemon over the socket (group only)"
 sudo ls -la /run/vpstream
@@ -38,6 +49,7 @@ as_group "$BIN/vpstream status"
 as_group "$BIN/vpstream status --json" > /tmp/status.json
 grep -q '"stream_port_state": "closed"' /tmp/status.json
 grep -q '"firewall_problem": null' /tmp/status.json
+grep -q '"url": "https://ci-host.example.ts.net:1338/"' /tmp/status.json
 no sudo -u nobody "$BIN/vpstream" status
 vpstream doctor || true
 
@@ -79,6 +91,7 @@ for path in /etc/vpstream /var/lib/vpstream /var/cache/vpstream /run/vpstream \
   no sudo test -e "$path"
 done
 rules | diff /tmp/ufw-before.txt -
+tailscale serve status --json | diff /tmp/serve-before.json -
 getent passwd | diff /tmp/passwd-before.txt -
 getent group | diff /tmp/group-before.txt -
 sudo ls /etc/sudoers.d | diff /tmp/sudoers-before.txt -

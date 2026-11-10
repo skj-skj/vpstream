@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import cli, config, service
+from vpstream import cli, config, service, tailscale
 from vpstream.tools import Result
 
-DASH_RULE = "in on tailscale0 to any port 1338 proto tcp"
+NAME = "host.example.ts.net"
+OTHERS = {443: "http://127.0.0.1:2283", 8443: "http://127.0.0.1:3000"}  # not vpstream's
+MINE = "http://127.0.0.1:1338"
 
 
 class FakeHost:
@@ -20,6 +22,8 @@ class FakeHost:
         self.users = {"root", "alice"}
         self.groups: dict[str, set[str]] = {"alice": set()}
         self.rules = {"in on tailscale0", "41641/udp"}
+        self.serve = dict(OTHERS)
+        self.https = True
         self.active = True
         self.fail: dict[tuple[str, ...], str] = {}
         self.calls: list[list[str]] = []
@@ -84,6 +88,25 @@ class FakeHost:
             return Result(0, "Rule deleted\n", "")
         raise AssertionError(f"vpstream must never run: {' '.join(cmd)}")
 
+    def _tailscale(self, cmd: list[str]) -> Result:
+        if cmd[1:] == ["status", "--json"]:
+            status = {"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME] if self.https else []}
+            return Result(0, json.dumps(status), "")
+        if cmd[1:] == ["serve", "status", "--json"]:
+            web = {f"{NAME}:{p}": {"Handlers": {"/": {"Proxy": t}}} for p, t in self.serve.items()}
+            tcp = {str(p): {"HTTPS": True} for p in self.serve}
+            return Result(0, json.dumps({"TCP": tcp, "Web": web} if tcp else {}), "")
+        if cmd[1:3] == ["serve", "--bg"] and cmd[3].startswith("--https=") and len(cmd) == 5:
+            self.serve[int(cmd[3].partition("=")[2])] = cmd[4]
+            return Result(0, "Serve started and running in the background.\n", "")
+        if cmd[1] == "serve" and cmd[2].startswith("--https=") and cmd[3:] == ["off"]:
+            port = int(cmd[2].partition("=")[2])
+            if port not in self.serve:  # like the real one
+                return Result(1, "", "error: failed to remove web serve: handler does not exist")
+            del self.serve[port]
+            return Result(0, "", "")
+        raise AssertionError(f"vpstream must never run: {' '.join(cmd)}")
+
     def _systemctl(self, cmd: list[str]) -> Result:
         if cmd[1] == "is-active":
             return Result(0 if self.active else 3, "", "")
@@ -115,9 +138,9 @@ class Setup:
     def files(self) -> list[str]:
         return sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*") if p.is_file())
 
-    def snapshot(self) -> tuple[set[str], dict[str, set[str]], set[str]]:
+    def snapshot(self) -> tuple[set[str], dict[str, set[str]], set[str], dict[int, str]]:
         groups = {g: set(m) for g, m in self.host.groups.items()}
-        return set(self.host.users), groups, set(self.host.rules)
+        return set(self.host.users), groups, set(self.host.rules), dict(self.host.serve)
 
 
 @pytest.fixture
@@ -153,8 +176,20 @@ def test_sudoers_rule_allows_exactly_open_and_close() -> None:
     ]
 
 
-def test_dashboard_rule_is_for_the_tailnet_interface() -> None:
-    assert " ".join(service.dashboard_rule(1338)) == DASH_RULE
+def test_serve_arguments_name_one_port_and_never_reset() -> None:
+    assert tailscale.serve_on_args(1338) == ["serve", "--bg", "--https=1338", MINE]
+    assert tailscale.serve_off_args(1338) == ["serve", "--https=1338", "off"]
+
+
+def test_serve_proxy_reads_the_configuration() -> None:
+    cfg = {
+        "TCP": {"443": {"HTTPS": True}, "5000": {"TCPForward": "127.0.0.1:22"}},
+        "Web": {f"{NAME}:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:2283"}}}},
+    }
+    assert tailscale.serve_proxy(cfg, 443) == "http://127.0.0.1:2283"
+    assert tailscale.serve_proxy(cfg, 5000) == ""  # used, but not as a proxy for /
+    assert tailscale.serve_proxy(cfg, 1338) is None
+    assert tailscale.serve_proxy({}, 443) is None
 
 
 # --- init
@@ -176,7 +211,10 @@ def test_init_creates_everything(setup: Setup) -> None:
         "/usr/sbin/nologin",
         "vpstream",
     ]
-    assert host.rules == before[2] | {DASH_RULE}
+    assert host.rules == before[2]  # no ufw rule: the dashboard is published by Tailscale
+    assert host.ran("ufw") == []
+    assert host.serve == {**OTHERS, 1338: MINE}
+    assert ["tailscale", "serve", "--bg", "--https=1338", MINE] in host.calls
     assert config.load(lay.paths.config_file) == config.Config()
     assert lay.paths.config_file.stat().st_mode & 0o777 == 0o644
     assert lay.sudoers_file.read_text() == service.sudoers_text(
@@ -188,7 +226,7 @@ def test_init_creates_everything(setup: Setup) -> None:
     assert json.loads(lay.manifest.read_text()) == {
         "user_created": True,
         "members_added": ["alice"],
-        "dashboard_rule_port": 1338,
+        "serve_port": 1338,
     }
     systemctl = [c[1:] for c in host.ran("systemctl")]
     assert systemctl == [
@@ -198,6 +236,7 @@ def test_init_creates_everything(setup: Setup) -> None:
         ["is-active", "--quiet", "vpstream.service"],
     ]
     assert any("Log out and in again" in line for line in setup.said)
+    assert any(f"https://{NAME}:1338/" in line for line in setup.said)
 
 
 def test_the_sudoers_rule_is_checked_before_and_after_it_is_installed(setup: Setup) -> None:
@@ -218,6 +257,7 @@ def test_init_is_safe_to_run_again(setup: Setup) -> None:
     assert setup.files() == files and setup.snapshot() == state
     assert setup.layout.manifest.read_text() == manifest
     assert setup.host.ran("useradd") == [] and setup.host.ran("gpasswd") == []
+    assert setup.host.ran("tailscale", "serve", "--bg") == []
     assert setup.layout.paths.config_file.read_text() == "[stream]\nport = 2000\n"  # kept
     assert setup.host.ran("systemctl", "restart")  # an upgrade needs the new code running
 
@@ -251,26 +291,62 @@ def test_uninstall_leaves_what_was_there_before_init(setup: Setup) -> None:
     host = setup.host
     host.users.add("vpstream")
     host.groups["vpstream"] = {"alice"}
-    host.rules.add(DASH_RULE)
+    host.serve[1338] = MINE  # published by hand before init
     before = setup.snapshot()
 
     setup.service().init()
     assert json.loads(setup.layout.manifest.read_text()) == {
         "user_created": False,
         "members_added": [],
-        "dashboard_rule_port": None,
+        "serve_port": None,
     }
     setup.service().uninstall()
     assert setup.snapshot() == before
     assert host.ran("userdel") == [] and host.ran("groupdel") == []
-    assert host.ran("ufw", "delete", "allow", "in") == []
+    assert host.ran("tailscale", "serve", "--https=1338") == []
 
 
-def test_only_the_two_vpstream_rules_are_ever_touched(setup: Setup) -> None:
+def test_only_the_stream_port_is_touched_in_ufw_and_only_one_port_in_serve(setup: Setup) -> None:
     setup.service().init()
     setup.service().uninstall(purge=True)
-    ufw = {" ".join(c[1:]) for c in setup.host.ran("ufw")}
-    assert ufw == {f"allow {DASH_RULE}", f"delete allow {DASH_RULE}", "delete allow 1337/tcp"}
+    setup.service().uninstall(purge=True)
+    assert {" ".join(c[1:]) for c in setup.host.ran("ufw")} == {"delete allow 1337/tcp"}
+    changes = [c[2:] for c in setup.host.ran("tailscale", "serve") if "status" not in c]
+    # Published once, turned off once: the second uninstall looks first and finds nothing.
+    assert changes == [["--bg", "--https=1338", MINE], ["--https=1338", "off"]]
+    assert setup.host.serve == OTHERS
+
+
+def test_init_refuses_a_port_that_serve_uses_for_something_else(setup: Setup) -> None:
+    cfg = setup.layout.paths.config_file
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("[dashboard]\nport = 8443\n")
+    with pytest.raises(service.ServiceError, match="8443 is already used by tailscale serve"):
+        setup.service().init()
+    assert setup.host.serve == OTHERS
+    assert setup.host.ran("useradd") == [] and setup.host.ran("systemctl") == []
+
+
+def test_init_needs_https_certificates_on_the_tailnet(setup: Setup) -> None:
+    setup.host.https = False
+    with pytest.raises(service.ServiceError, match="HTTPS certificates"):
+        setup.service().init()
+    assert setup.host.ran("useradd") == [] and setup.files() == []
+
+
+def test_init_needs_tailscale_running(setup: Setup) -> None:
+    setup.host.fail[("tailscale", "status")] = "Tailscale is stopped."
+    with pytest.raises(service.ServiceError, match=r"Tailscale is needed.*stopped"):
+        setup.service().init()
+    assert setup.host.ran("useradd") == [] and setup.files() == []
+
+
+def test_uninstall_leaves_a_port_that_was_given_to_something_else(setup: Setup) -> None:
+    setup.service().init()
+    setup.host.serve[1338] = "http://127.0.0.1:9000"  # changed by hand after init
+    setup.service().uninstall()
+    assert setup.host.serve[1338] == "http://127.0.0.1:9000"
+    assert setup.host.ran("tailscale", "serve", "--https=1338") == []
 
 
 def test_uninstall_keeps_prepared_videos_unless_purged(setup: Setup) -> None:
@@ -285,14 +361,13 @@ def test_uninstall_keeps_prepared_videos_unless_purged(setup: Setup) -> None:
     assert setup.files() == [] and not setup.layout.paths.cache_dir.exists()
 
 
-def test_a_changed_dashboard_port_moves_the_rule(setup: Setup) -> None:
+def test_a_changed_dashboard_port_moves_the_published_port(setup: Setup) -> None:
     setup.service().init()
     setup.layout.paths.config_file.write_text("[dashboard]\nport = 4000\n")
     setup.service().init()
-    assert DASH_RULE not in setup.host.rules
-    assert "in on tailscale0 to any port 4000 proto tcp" in setup.host.rules
+    assert setup.host.serve == {**OTHERS, 4000: "http://127.0.0.1:4000"}
     setup.service().uninstall()
-    assert setup.host.rules == {"in on tailscale0", "41641/udp"}
+    assert setup.host.serve == OTHERS
 
 
 def test_root_without_sudo_adds_nobody_to_the_group(setup: Setup) -> None:
@@ -322,8 +397,8 @@ def test_init_refuses_a_per_user_install(setup: Setup) -> None:
 
 
 def test_init_lists_missing_programs(setup: Setup) -> None:
-    setup.host.available -= {"ufw", "visudo"}
-    with pytest.raises(service.ServiceError, match="visudo, ufw"):
+    setup.host.available -= {"ufw", "visudo", "tailscale"}
+    with pytest.raises(service.ServiceError, match="visudo, ufw, tailscale"):
         setup.service().init()
     assert setup.host.calls == [] and setup.files() == []
 

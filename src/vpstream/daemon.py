@@ -1,7 +1,7 @@
 """The always-on daemon: serves the API on a unix socket and on the dashboard port.
 
-The dashboard port is bound to the Tailscale address only, never to every interface. While
-Tailscale has no address the daemon keeps running, so the CLI works, and tries again.
+The dashboard port is bound to the loopback address only, never to every interface. It is
+`tailscale serve`, set up by `vpstream init`, that publishes it on the tailnet over HTTPS.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out
 RETRY_SECONDS = 10.0
+LOOPBACK = "127.0.0.1"
+URL_SECONDS = 30.0  # how long the tailnet address is remembered between status requests
 
 
 class DaemonError(RuntimeError):
@@ -74,6 +76,28 @@ class Daemon:
     stream: dict[str, Any] | None = None
     stream_port_state: str = "unknown"  # "closed", "open" or "unknown"
     firewall_problem: str | None = None
+    _published: tuple[float, str | None, str | None] | None = None
+
+    def published(self) -> tuple[str | None, str | None]:
+        """The dashboard's tailnet URL, or why it has none. Asked from Tailscale, then
+        remembered for a short while."""
+        now = time.monotonic()
+        if self._published and now - self._published[0] < URL_SECONDS:
+            return self._published[1], self._published[2]
+        port = self.config.dashboard_port
+        url: str | None = None
+        problem: str | None = None
+        try:
+            proxy = tailscale.serve_proxy(tailscale.serve_config(self.runner), port)
+            name = tailscale.node(self.runner).name
+            if proxy != tailscale.local_target(port) or not name:
+                problem = "not published on the tailnet; publish it with: sudo vpstream init"
+            else:
+                url = f"https://{name}:{port}/"
+        except tailscale.TailscaleDown as exc:
+            problem = f"not published on the tailnet: {exc}"
+        self._published = (now, url, problem)
+        return url, problem
 
     def reconcile(self) -> None:
         """Bring the firewall in line with the recorded state when the daemon starts.
@@ -110,12 +134,21 @@ class Daemon:
             "stream_port": self.config.stream_port,
             "stream_port_state": self.stream_port_state,
             "firewall_problem": self.firewall_problem,
-            "dashboard": {
-                "port": self.config.dashboard_port,
-                "address": self.dashboard_address,
-                "problem": None if self.dashboard_address else self.dashboard_problem,
-            },
+            "dashboard": self._dashboard_status(),
         }
+
+    def _dashboard_status(self) -> dict[str, Any]:
+        info: dict[str, Any] = {
+            "port": self.config.dashboard_port,
+            "address": self.dashboard_address,
+            "url": None,
+            "problem": None,
+        }
+        if not self.dashboard_address:
+            info["problem"] = self.dashboard_problem
+        else:
+            info["url"], info["problem"] = self.published()
+        return info
 
     def serve(self, stop: threading.Event) -> None:
         """Serve until `stop` is set. The socket file is removed on the way out."""
@@ -148,15 +181,16 @@ class Daemon:
             self.log("vpstream daemon stopped")
 
     def _dashboard(self, app: Any, stop: threading.Event) -> None:
-        """Keep the dashboard up on the Tailscale address; wait and retry while it has none."""
+        """Keep the dashboard up on the loopback address; wait and retry while the port is
+        taken."""
         from werkzeug.serving import make_server
 
         port = self.config.dashboard_port
         while not stop.is_set():
+            host = LOOPBACK
             try:
-                host = tailscale.ipv4(self.runner)
                 listener = bind_tcp(host, port)
-            except (tailscale.TailscaleDown, OSError) as exc:
+            except OSError as exc:
                 problem = f"the dashboard is not available: {exc}"
                 if problem != self.dashboard_problem:
                     self.log(f"{problem}; trying again every {self.retry_seconds:g} seconds")
@@ -166,7 +200,7 @@ class Daemon:
             bound_port = listener.getsockname()[1]
             server = make_server(host, bound_port, app, threaded=True, fd=listener.fileno())
             self.dashboard_address = f"{host}:{bound_port}"
-            self.log(f"dashboard on http://{self.dashboard_address}/ (Tailscale only)")
+            self.log(f"dashboard on http://{self.dashboard_address}/ (this host only)")
             closer = threading.Thread(
                 target=lambda s=server: (stop.wait(), s.shutdown()), daemon=True
             )
