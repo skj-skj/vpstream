@@ -29,6 +29,26 @@ vpstream --version
 vpstream selftest --integration
 ```
 
+## `vpstream doctor`
+
+Checks this host for everything vpstream needs and lists all of it in one report: the Python
+version, ffmpeg, ffprobe, Caddy, ufw, Tailscale, systemd and sudo, whether ufw is enabled and
+Tailscale is connected, the fonts burned-in subtitles fall back to, the configuration file,
+and where vpstream itself is installed. Each problem comes with the command that fixes it.
+The exit code is 1 when something required is missing. Nothing is changed and no root is
+needed.
+
+The service runs as its own user, with a small root helper for the firewall, so it needs a
+system-wide install that root owns. A per-user `pipx install` is reported as a problem:
+
+```text
+sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "vpstream[dev]"
+pipx uninstall vpstream          # the per-user copy, if there is one
+```
+
+Settings are read from `/etc/vpstream/config.toml` when it exists: `port` under `[stream]`
+(default 1337) and `port` under `[dashboard]` (default 1338).
+
 ## `vpstream install ffmpeg` and `vpstream update ffmpeg`
 
 Distribution packages of ffmpeg are often several versions old. `vpstream install ffmpeg`
