@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from vpstream import cli, config, service, tailscale
+from vpstream.tests.fakes import NAME, node_status, serve_status
 from vpstream.tools import Result
 
-NAME = "host.example.ts.net"
 OTHERS = {443: "http://127.0.0.1:2283", 8443: "http://127.0.0.1:3000"}  # not vpstream's
 MINE = "http://127.0.0.1:1338"
 
@@ -90,12 +91,9 @@ class FakeHost:
 
     def _tailscale(self, cmd: list[str]) -> Result:
         if cmd[1:] == ["status", "--json"]:
-            status = {"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME] if self.https else []}
-            return Result(0, json.dumps(status), "")
+            return Result(0, json.dumps(node_status(self.https)), "")
         if cmd[1:] == ["serve", "status", "--json"]:
-            web = {f"{NAME}:{p}": {"Handlers": {"/": {"Proxy": t}}} for p, t in self.serve.items()}
-            tcp = {str(p): {"HTTPS": True} for p in self.serve}
-            return Result(0, json.dumps({"TCP": tcp, "Web": web} if tcp else {}), "")
+            return Result(0, json.dumps(serve_status(self.serve)), "")
         if cmd[1:3] == ["serve", "--bg"] and cmd[3].startswith("--https=") and len(cmd) == 5:
             self.serve[int(cmd[3].partition("=")[2])] = cmd[4]
             return Result(0, "Serve started and running in the background.\n", "")
@@ -126,6 +124,9 @@ class Setup:
             "sudo_user": "alice",
             "bin_dir": bin_dir,
             "install_problem": lambda: None,
+            "program_problem": lambda path: None,
+            "port_busy": lambda port: False,
+            "owner_uid": os.getuid(),
             "say": self.said.append,
             "pause": lambda seconds: None,
         }
@@ -467,11 +468,85 @@ def test_a_link_in_place_of_a_folder_is_not_followed(setup: Setup) -> None:
 
 
 def test_cli_init_and_uninstall_need_root(capsys: pytest.CaptureFixture[str]) -> None:
-    import os
-
     if os.geteuid() == 0:
         pytest.skip("runs as root")
     assert cli.main(["init"]) == 1
     assert "sudo vpstream init" in capsys.readouterr().err
     assert cli.main(["uninstall", "--yes"]) == 1
     assert "sudo vpstream uninstall" in capsys.readouterr().err
+
+
+# --- found in the review before milestone 2
+
+
+def test_uninstall_on_a_host_that_was_never_set_up_touches_no_ufw_rule(setup: Setup) -> None:
+    setup.host.rules.add("1337/tcp")  # made by hand, for something else
+    setup.service().uninstall()
+    assert "1337/tcp" in setup.host.rules and setup.host.ran("ufw") == []
+
+
+def test_uninstall_closes_what_the_helper_recorded_and_warns_about_a_bad_config(
+    setup: Setup,
+) -> None:
+    setup.service().init()
+    setup.host.rules |= {"1337/tcp", "2000/tcp"}
+    setup.layout.paths.open_ports_file.write_text("2000\n")  # opened before the config broke
+    setup.layout.paths.open_ports_file.chmod(0o644)
+    setup.layout.paths.config_file.write_text("[stream]\nprot = 1337\n")
+    setup.said.clear()
+    setup.service().uninstall()
+    assert "2000/tcp" not in setup.host.rules
+    assert "1337/tcp" in setup.host.rules  # unknown to vpstream now, so it says so
+    assert any(s.startswith("WARNING") and "sudo ufw status" in s for s in setup.said)
+
+
+@pytest.mark.parametrize("cut_after", ["useradd", "gpasswd", "tailscale serve --bg"])
+def test_an_init_cut_off_right_after_a_change_can_still_be_undone(
+    setup: Setup, cut_after: str
+) -> None:
+    before = setup.snapshot()
+    real = setup.host.run
+
+    def run(args: Sequence[str], *, timeout: float | None = None) -> Result:
+        res = real(args, timeout=timeout)
+        if " ".join(args).startswith(cut_after):
+            raise KeyboardInterrupt  # the change happened; init never got to its next line
+        return res
+
+    setup.host.run = run  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        setup.service().init()
+    setup.host.run = real  # type: ignore[method-assign]
+    setup.service().uninstall()
+    assert setup.snapshot() == before
+
+
+def test_init_refuses_a_dashboard_port_another_program_listens_on(setup: Setup) -> None:
+    setup.host.active = False  # vpstream is not running, so the listener is someone else
+    with pytest.raises(service.ServiceError, match=r"1338 on 127\.0\.0\.1 is already used"):
+        setup.service(port_busy=lambda port: True).init()
+    assert setup.host.serve == OTHERS and setup.host.ran("useradd") == []
+
+
+def test_init_again_accepts_the_port_its_own_daemon_listens_on(setup: Setup) -> None:
+    setup.service().init()
+    setup.service(port_busy=lambda port: True).init()
+    assert setup.host.serve == {**OTHERS, 1338: MINE}
+
+
+def test_port_busy_sees_a_listener() -> None:
+    import socket
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        assert service.port_busy(port)
+    assert not service.port_busy(port)
+
+
+def test_init_refuses_a_helper_that_others_can_change(setup: Setup) -> None:
+    problem = "/opt/pipx/venvs/vpstream/bin/vpstream-fw is writable by users other than root"
+    with pytest.raises(service.ServiceError, match="writable by users other than root"):
+        setup.service(program_problem=lambda path: problem).init()
+    assert setup.host.calls == [] and setup.files() == []

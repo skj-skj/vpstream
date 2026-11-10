@@ -56,8 +56,10 @@ vpstream doctor || true
 step "the helper opens and closes only the configured port"
 sudo -u vpstream sudo -n "$FW" open
 has_rule "ufw allow 1337/tcp"
+sudo grep -qx 1337 /etc/vpstream/open-ports   # written down, so it can always be closed
 sudo -u vpstream sudo -n "$FW" close
 no has_rule 1337
+no sudo test -e /etc/vpstream/open-ports
 no sudo -u vpstream sudo -n "$FW" open 22
 no sudo -u vpstream sudo -n "$FW" status
 no sudo -u vpstream sudo -n /usr/sbin/ufw status

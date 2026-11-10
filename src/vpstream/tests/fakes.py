@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from vpstream.firewall import FirewallError
 from vpstream.tools import Result
+
+NAME = "host.example.ts.net"  # the fake host's name on its tailnet
+
+
+def node_status(https: bool = True, state: str = "Running") -> dict[str, Any]:
+    """What `tailscale status --json` prints, as far as vpstream reads it."""
+    return {
+        "BackendState": state,
+        "Self": {"DNSName": NAME + "."},
+        "CertDomains": [NAME] if https else [],
+    }
+
+
+def serve_status(ports: Mapping[int, str]) -> dict[str, Any]:
+    """What `tailscale serve status --json` prints for HTTPS ports proxied to these targets."""
+    if not ports:
+        return {}
+    web = {f"{NAME}:{p}": {"Handlers": {"/": {"Proxy": t}}} for p, t in ports.items()}
+    return {"TCP": {str(p): {"HTTPS": True} for p in ports}, "Web": web}
 
 
 class FakeRunner:

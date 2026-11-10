@@ -24,16 +24,43 @@ SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone
 RETRY_SECONDS = 10.0
 LOOPBACK = "127.0.0.1"
 URL_SECONDS = 30.0  # how long the tailnet address is remembered between status requests
+# A status request asks Tailscale two things. Both waits together stay well under the time
+# the command line waits for the daemon (client.TIMEOUT), so a slow Tailscale is reported as
+# "not published" instead of the daemon looking dead.
+TAILSCALE_SECONDS = 4.0
+PROBE_SECONDS = 2.0
 
 
 class DaemonError(RuntimeError):
     pass
 
 
+def socket_in_use(path: Path) -> bool:
+    """Whether something answers on the unix socket at `path`. A file left by a daemon that
+    is gone refuses the connection."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(PROBE_SECONDS)
+    try:
+        probe.connect(str(path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        return False
+    finally:
+        probe.close()
+    return True
+
+
 def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
-    """Listen on a unix socket at `path`, replacing a socket file left by an earlier run."""
+    """Listen on a unix socket at `path`, replacing a socket file left by an earlier run.
+
+    A socket that another daemon still listens on is never taken over.
+    """
     try:
         if path.is_socket():
+            if socket_in_use(path):
+                raise DaemonError(
+                    f"a vpstream daemon is already listening on {path}; "
+                    "stop it first (sudo systemctl stop vpstream)"
+                )
             path.unlink()
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         # The mask applies from the moment the file exists, so it is never open to others.
@@ -88,8 +115,8 @@ class Daemon:
         url: str | None = None
         problem: str | None = None
         try:
-            proxy = tailscale.serve_proxy(tailscale.serve_config(self.runner), port)
-            name = tailscale.node(self.runner).name
+            proxy = tailscale.serve_target(self.runner, port, TAILSCALE_SECONDS)
+            name = tailscale.node(self.runner, TAILSCALE_SECONDS).name
             if proxy != tailscale.local_target(port) or not name:
                 problem = "not published on the tailnet; publish it with: sudo vpstream init"
             else:

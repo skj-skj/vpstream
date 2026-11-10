@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -19,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from vpstream import config, doctor, firewall, tailscale
+from vpstream.files import write_atomic
 from vpstream.tools import Result, Runner, tail
 
 USER = "vpstream"  # the service user, and its group
@@ -97,9 +99,18 @@ class Manifest:
         )
 
     def save(self, path: Path) -> None:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        write_atomic(path, json.dumps(asdict(self), indent=2) + "\n")
+
+
+def port_busy(port: int) -> bool:
+    """Whether a program already listens on this loopback port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+    return False
 
 
 def unit_text(vpstream_bin: Path, helper: Path) -> str:
@@ -148,6 +159,9 @@ class Service:
     install_problem: Callable[[], str | None] = lambda: doctor.install_problem(
         Path(__file__).parent
     )
+    program_problem: Callable[[Path], str | None] = doctor.program_problem
+    port_busy: Callable[[int], bool] = port_busy
+    owner_uid: int = 0  # who must own the files root trusts; tests are not root
     say: Callable[[str], None] = print
     pause: Callable[[float], None] = time.sleep
 
@@ -193,7 +207,9 @@ class Service:
             raise ServiceError(
                 f"missing on this host: {', '.join(missing)}. Run `vpstream doctor` for the fixes"
             )
-        problem = self.install_problem()
+        # The helper is what sudoers lets the service user run as root, so its own file and
+        # folder are checked as well as the package.
+        problem = self.install_problem() or self.program_problem(self.helper)
         if problem:
             raise ServiceError(
                 f"{problem}. The service runs as its own user and cannot use this install. "
@@ -209,13 +225,24 @@ class Service:
             cfg = config.load(self.layout.paths.config_file)
         except config.ConfigError as exc:
             raise ServiceError(f"fix the configuration first: {exc}") from exc
-        self._check_serve(cfg.dashboard_port)
+        port = cfg.dashboard_port
+        published = self._check_serve(port)
+        if self.port_busy(port) and not (
+            (published or Manifest.load(self.layout.manifest).serve_port == port)
+            and self._succeeds("systemctl", "is-active", "--quiet", UNIT)
+        ):
+            # Publishing it would put that other program on the tailnet.
+            raise ServiceError(
+                f"port {port} on 127.0.0.1 is already used by another program. "
+                f"Set another port under [dashboard] in {self.layout.paths.config_file}"
+            )
 
     def _served(self, port: int) -> str | None:
-        return tailscale.serve_proxy(tailscale.serve_config(self.runner), port)
+        return tailscale.serve_target(self.runner, port)
 
-    def _check_serve(self, port: int) -> None:
-        """The dashboard is published with `tailscale serve`; make sure that can work."""
+    def _check_serve(self, port: int) -> bool:
+        """The dashboard is published with `tailscale serve`; make sure that can work.
+        Returns whether the port is published for vpstream already."""
         try:
             node = tailscale.node(self.runner)
             proxy = self._served(port)
@@ -232,6 +259,7 @@ class Service:
                 f"port {port} is already used by tailscale serve ({proxy or 'another service'}). "
                 f"Set another port under [dashboard] in {self.layout.paths.config_file}"
             )
+        return proxy is not None
 
     def init(self) -> None:
         self._require_root("init")
@@ -262,6 +290,11 @@ class Service:
         if self._user_exists():
             self.say(f"user {USER}: already there")
             return
+        # Written down before each change, never after: an init that is cut off between the
+        # two must not leave something uninstall does not know about. Uninstall looks before
+        # it removes, so a record of a change that never happened is harmless.
+        manifest.user_created = True
+        manifest.save(self.layout.manifest)
         self._run(
             "useradd",
             "--system",
@@ -274,8 +307,6 @@ class Service:
             USER,
             what=f"creating the user {USER}",
         )
-        manifest.user_created = True
-        manifest.save(self.layout.manifest)
         self.say(f"user {USER}: created")
 
     def _init_config(self) -> None:
@@ -329,9 +360,9 @@ class Service:
             # Either ours from an earlier init (recorded) or set up by hand (not recorded).
             self.say(f"tailscale serve: https://{name}:{port}/ already published")
             return
-        self._run("tailscale", *tailscale.serve_on_args(port), what="publishing the dashboard")
         manifest.serve_port = port
         manifest.save(self.layout.manifest)
+        self._run("tailscale", *tailscale.serve_on_args(port), what="publishing the dashboard")
         self.say(f"tailscale serve: dashboard published at https://{name}:{port}/ (tailnet only)")
 
     def _init_member(self, manifest: Manifest) -> None:
@@ -340,10 +371,10 @@ class Service:
             return
         if self._in_group(user):
             return
-        self._run("gpasswd", "-a", user, USER, what=f"adding {user} to the group {USER}")
         if user not in manifest.members_added:
             manifest.members_added.append(user)
             manifest.save(self.layout.manifest)
+        self._run("gpasswd", "-a", user, USER, what=f"adding {user} to the group {USER}")
         self.say(
             f"{user} was added to the group {USER}, to use vpstream without sudo. "
             "Log out and in again for it to take effect."
@@ -371,10 +402,15 @@ class Service:
         self._require_root("uninstall")
         lay = self.layout
         manifest = Manifest.load(lay.manifest)
+        record = lay.paths.open_ports_file
+        # Without any trace of an install, a rule for the stream port is not vpstream's.
+        installed = any(p.exists() for p in (lay.manifest, lay.unit_file, lay.sudoers_file, record))
+        port: int | None = None
+        port_problem = ""
         try:
-            port: int | None = config.load(lay.paths.config_file).stream_port
-        except config.ConfigError:
-            port = None
+            port = config.load(lay.paths.config_file).stream_port
+        except config.ConfigError as exc:
+            port_problem = str(exc)
 
         have_systemctl = bool(self.runner.which("systemctl"))
         if lay.unit_file.exists():
@@ -386,9 +422,17 @@ class Service:
                 self.runner.run(["systemctl", "reset-failed", UNIT], timeout=TIMEOUT)
             self.say("service: stopped and removed")
 
-        if self.runner.which("ufw") and port is not None:
-            self._run("ufw", *firewall.ufw_args("close", port), what="closing the stream port")
-            self.say(f"ufw: stream port {port} is closed")
+        if installed and self.runner.which("ufw"):
+            # After the stop: the service's own close has normally emptied the record.
+            opened = firewall.recorded_ports(record, self.owner_uid)
+            for one in dict.fromkeys([*opened, *([] if port is None else [port])]):
+                self._run("ufw", *firewall.ufw_args("close", one), what="closing the stream port")
+                self.say(f"ufw: stream port {one} is closed")
+            if port is None:
+                self.say(
+                    f"WARNING: the stream port is not known ({port_problem}), so its ufw rule "
+                    "could not be removed. Look for one with: sudo ufw status"
+                )
 
         if manifest.serve_port is not None and self.runner.which("tailscale"):
             try:

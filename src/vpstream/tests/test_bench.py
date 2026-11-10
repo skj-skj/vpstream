@@ -148,3 +148,18 @@ def test_filter_source_keeps_only_plain_suffixes(tmp_path: Path) -> None:
         work.mkdir()
         link = bench.filter_source(work, src)
         assert link.name == linked and link.is_symlink() and link.resolve() == src.resolve()
+
+
+@pytest.mark.parametrize("name", ["-dash.mkv", "a:b.mkv"])
+def test_ffmpeg_is_given_an_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    # A relative -dash.mkv is taken for an option and a:b.mkv for a URL.
+    (tmp_path / name).write_bytes(b"x")
+    monkeypatch.chdir(tmp_path)
+    r = _runner()
+    report = bench.benchmark(r, Path(name), presets=("veryfast",), tmp_dir=str(tmp_path))
+    inputs = [c[c.index("-i") + 1] for c in r.calls if "-i" in c]
+    assert inputs and set(inputs) == {str(tmp_path.resolve() / name)}
+    assert r.calls[0][-1] == str(tmp_path.resolve() / name)  # ffprobe
+    assert report.file == name  # shown as it was given

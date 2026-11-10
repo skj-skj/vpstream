@@ -11,6 +11,7 @@ from pathlib import Path
 
 from vpstream import __version__
 from vpstream.ffargs import aac_args, base_args, hls_output_args
+from vpstream.files import write_atomic
 from vpstream.tools import Result, Runner, ffmpeg_names, low_priority_prefix, require, tail
 
 CODEC_SECONDS = 4
@@ -104,7 +105,7 @@ def _map_inputs(audio_tracks: int) -> list[str]:
     return args
 
 
-def test_clip_args(
+def pattern_clip_args(
     out: Path,
     *,
     encoder: str,
@@ -136,7 +137,7 @@ def test_clip_args(
 
 
 def codec_clip_args(spec: ClipSpec, encoder: str, out: Path) -> list[str]:
-    return test_clip_args(
+    return pattern_clip_args(
         out,
         encoder=encoder,
         pix_fmt=spec.pix_fmt,
@@ -148,7 +149,7 @@ def codec_clip_args(spec: ClipSpec, encoder: str, out: Path) -> list[str]:
 
 
 def long_clip_args(out: Path) -> list[str]:
-    return test_clip_args(
+    return pattern_clip_args(
         out, encoder="libx264", pix_fmt="yuv420p", seconds=LONG_SECONDS, size="1280x720", gop=60
     )
 
@@ -223,6 +224,14 @@ def made_by_vpstream(out: Path) -> bool:
     return manifest is not None and {"version", "clips", "extras"} <= manifest.keys()
 
 
+def _has_clips(manifest: dict[str, object]) -> bool:
+    """Whether any clip was made. A set made while ffmpeg failed is not worth keeping."""
+    items = manifest.get("clips")
+    if not isinstance(items, list):
+        return False
+    return any(isinstance(c, dict) and c.get("mp4") for c in items)
+
+
 def check_dir(out: Path) -> None:
     """Raise ClipDirError unless `out` is new, empty or made by vpstream. Deletes nothing."""
     if not out.exists():
@@ -260,7 +269,7 @@ def generate(
     manifest_path = out / "clips.json"
     if not regen and made_by_vpstream(out):
         cached = _read_manifest(manifest_path)
-        if cached is not None:
+        if cached is not None and _has_clips(cached):
             return cached
     check_dir(out)  # refuse a user's folder before anything else
     require(runner, "ffmpeg")
@@ -331,7 +340,5 @@ def generate(
         "errors": errors,
     }
     # Written last and atomically, so a folder with a manifest always has every clip.
-    tmp = manifest_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(manifest, indent=2))
-    tmp.replace(manifest_path)
+    write_atomic(manifest_path, json.dumps(manifest, indent=2))
     return manifest

@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from vpstream.files import write_atomic
+
 MAX_SPEED_MB = 256
 MAX_REPORT_BYTES = 256 * 1024
 # One page load is one session, so this is plenty for a test and bounds memory and disk.
@@ -157,12 +159,6 @@ class CapsState:
         self.log(f"report from {client} ({stage}), saved to {self.results_path}")
         for line in summarize(report):
             self.log(line)
-
-
-def write_atomic(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    tmp.replace(path)
 
 
 def load_assets() -> dict[str, tuple[bytes, str]]:

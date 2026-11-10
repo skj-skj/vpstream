@@ -3,10 +3,14 @@
 On-demand video streaming from a VPS. The public port opens only while a stream runs, and
 everything is controlled over SSH or a private dashboard.
 
-Status: early development. This release contains only the measuring tools:
+Status: early development. Streaming itself is not here yet. This release has the measuring
+tools and the service skeleton:
 
 | Command | What it does |
 | --- | --- |
+| `vpstream doctor` | Checks this host for everything vpstream needs |
+| `sudo vpstream init` / `uninstall` | Sets the service up on this host, and removes it again |
+| `vpstream status` | Shows what the running daemon is doing |
 | `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles for a file |
 | `vpstream caps` | Serves a test page that checks what a TV browser can play |
 | `vpstream selftest` | Runs the tests shipped with the package (`--integration` uses the real ffmpeg) |
@@ -54,14 +58,16 @@ sudo vpstream init               # restarts the service on the new version
   sudo (log out and in once)
 
 `uninstall` removes what `init` created and nothing else: a user, a group membership or a
-served port that was there before stays. The configuration and state are removed; prepared
+served port that was there before stays, and on a host that was never set up no ufw rule is
+touched. The configuration and state are removed; prepared
 videos are kept unless `--purge` is given. It asks first; `--yes` skips the question.
 
 Neither command ever enables, disables, resets or reloads ufw, or touches any ufw rule other
 than the stream port. Neither resets `tailscale serve`: only the dashboard port is added or
 turned off, and a port that already serves something else is refused.
 
-`init` needs Tailscale running, with HTTPS certificates enabled for the tailnet.
+`init` needs Tailscale running, with HTTPS certificates enabled for the tailnet. It refuses a
+dashboard port that another program on this host already listens on.
 
 ## `vpstream doctor`
 
@@ -81,7 +87,8 @@ Settings are read from `/etc/vpstream/config.toml` when it exists: `port` under 
 ## `vpstream daemon` and `vpstream status`
 
 One daemon does the work, and the command line and the dashboard both talk to it.
-`vpstream daemon` runs it in the foreground; normally the service does that.
+`vpstream daemon` runs it in the foreground; normally the service does that. It refuses to
+start while another daemon is listening on the same socket.
 
 - **Command line:** `vpstream status` asks the daemon over a unix socket,
   `/run/vpstream/daemon.sock`, which only the service user and its group can use.
@@ -99,6 +106,10 @@ small helper does it as root: `vpstream-fw open` and `vpstream-fw close`, nothin
 - **One port:** the helper takes no port. It reads `port` under `[stream]` from the root-owned
   `/etc/vpstream/config.toml` and refuses a file that other users can write, so its caller
   cannot make it touch any other port.
+- **What it opened, it closes:** `open` writes the port down in `/etc/vpstream/open-ports`
+  before it opens it, and `close` closes every port written there as well as the configured
+  one. A port therefore stays closable after the configuration was changed, or broken, while
+  it was open.
 - **Two ufw commands:** `ufw allow PORT/tcp` and `ufw delete allow PORT/tcp`. It never enables,
   disables, resets or reloads ufw and never touches another rule.
 - **After a crash or reboot:** a ufw rule stays on disk, so when the daemon starts it closes

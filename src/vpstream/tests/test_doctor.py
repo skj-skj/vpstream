@@ -7,11 +7,10 @@ from pathlib import Path
 import pytest
 
 from vpstream import cli, config, doctor, tailscale
-from vpstream.tests.fakes import FakeRunner
+from vpstream.tests.fakes import NAME, FakeRunner, node_status, serve_status
 
 ALL_TOOLS = (*(t.name for t in doctor.TOOLS), "fc-list")
-NAME = "host.example.ts.net"
-STATUS = {"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME]}
+STATUS = node_status()
 FAMILIES = "Noto Sans CJK JP\nLiberation Sans\nDejaVu Sans\n"
 
 
@@ -210,11 +209,14 @@ def test_report_and_exit_code() -> None:
     assert doctor.exit_code(checks[:1]) == 0
 
 
-def test_cli_doctor_prints_a_report(capsys: pytest.CaptureFixture[str]) -> None:
-    code = cli.main(["doctor"])
-    out = capsys.readouterr().out
-    assert code in (0, 1)
-    assert "python" in out and "install" in out
+@pytest.mark.parametrize(("status", "code"), [("ok", 0), ("warning", 0), ("problem", 1)])
+def test_cli_doctor_prints_the_report_and_exits_by_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str, code: int
+) -> None:
+    check = doctor.Check("caddy", status, "detail here", "the fix")  # type: ignore[arg-type]
+    monkeypatch.setattr(doctor, "run_checks", lambda runner: [check])
+    assert cli.main(["doctor"]) == code
+    assert "caddy  detail here" in capsys.readouterr().out
 
 
 def test_service_check(tmp_path: Path) -> None:
@@ -242,8 +244,7 @@ def test_tailnet_https_is_needed_for_the_dashboard() -> None:
 
 
 def _serve(port: int, target: str) -> str:
-    web = {f"{NAME}:{port}": {"Handlers": {"/": {"Proxy": target}}}}
-    return json.dumps({"TCP": {str(port): {"HTTPS": True}}, "Web": web})
+    return json.dumps(serve_status({port: target}))
 
 
 def test_dashboard_check() -> None:
@@ -268,3 +269,42 @@ def test_dashboard_is_checked_only_once_the_service_is_set_up(tmp_path: Path) ->
     kwargs["unit_file"].write_text("[Unit]\n")
     runner.on("systemctl", "is-active", stdout="active\n")
     assert _by_name(doctor.run_checks(runner, **kwargs))["dashboard"].status == "warning"
+
+
+# --- found in the review before milestone 2
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [("Stopped", "Tailscale is stopped"), ("NeedsLogin", "logged out"), ("NoState", "NoState")],
+)
+def test_tailscale_that_answers_but_is_not_up_counts_as_down(state: str, message: str) -> None:
+    # `tailscale status --json` exits 0 in every state; only the answer says it is stopped.
+    runner = FakeRunner(("tailscale",))
+    runner.on("tailscale", "status", "--json", stdout=json.dumps(node_status(state=state)))
+    with pytest.raises(tailscale.TailscaleDown, match=message):
+        tailscale.node(runner)
+    check = doctor.check_tailnet_https(runner)
+    assert check.status == "problem" and "certificate" not in check.detail
+
+
+def test_the_helper_and_its_folder_must_be_roots_alone(tmp_path: Path) -> None:
+    me = os.getuid()
+    helper = tmp_path / "bin" / "vpstream-fw"
+    helper.parent.mkdir()
+    helper.parent.chmod(0o755)
+    helper.write_text("#!/bin/sh\n")
+    helper.chmod(0o755)
+    assert doctor.program_problem(helper, me) is None
+    helper.chmod(0o757)
+    assert doctor.program_problem(helper, me) == f"{helper} is writable by users other than root"
+    helper.chmod(0o755)
+    assert doctor.program_problem(helper, me + 1) == f"{helper.parent} is not owned by root"
+    helper.parent.chmod(0o757)
+    assert doctor.program_problem(helper, me) == f"{helper.parent} is writable by every user"
+    helper.parent.chmod(0o755)
+    assert "cannot check" in str(doctor.program_problem(tmp_path / "bin" / "nope", me))
+    package = tmp_path / "pkg"
+    package.mkdir(mode=0o755)
+    if me != 0:  # the package folder itself is refused first: the test is not root
+        assert doctor.check_install(package, helper=helper).status == "problem"

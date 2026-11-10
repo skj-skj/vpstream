@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from vpstream import __version__, api, cli, client, config, daemon, state
-from vpstream.tests.fakes import FakeFirewall, FakeRunner
+from vpstream.tests.fakes import NAME, FakeFirewall, FakeRunner, node_status, serve_status
 
 
 def _free_port() -> int:
@@ -50,17 +50,9 @@ class Running:
         assert not self.thread.is_alive()
 
 
-NAME = "host.example.ts.net"
-
-
 def publish(runner: FakeRunner, port: int, target: str | None = None) -> None:
     """Make the fake Tailscale say that serve publishes `port` (to vpstream by default)."""
-    serve = {
-        "TCP": {str(port): {"HTTPS": True}},
-        "Web": {
-            f"{NAME}:{port}": {"Handlers": {"/": {"Proxy": target or f"http://127.0.0.1:{port}"}}}
-        },
-    }
+    serve = serve_status({port: target or f"http://127.0.0.1:{port}"})
     runner.on("tailscale", "serve", "status", "--json", stdout=json.dumps(serve))
 
 
@@ -68,8 +60,7 @@ def publish(runner: FakeRunner, port: int, target: str | None = None) -> None:
 def tailnet() -> FakeRunner:
     """A host on a tailnet, with nothing published by `tailscale serve` yet."""
     runner = FakeRunner(("tailscale",))
-    status = {"Self": {"DNSName": NAME + "."}, "CertDomains": [NAME]}
-    runner.on("tailscale", "status", "--json", stdout=json.dumps(status))
+    runner.on("tailscale", "status", "--json", stdout=json.dumps(node_status()))
     runner.on("tailscale", "serve", "status", "--json", stdout="{}")
     return runner
 
@@ -371,3 +362,57 @@ def test_serving_reconciles_first(short_tmp: Path, tailnet: FakeRunner) -> None:
     finally:
         run.close()
     assert fw.calls == ["close"]  # stopping is the service's job (ExecStopPost), not the daemon's
+
+
+# --- found in the review before milestone 2
+
+
+def test_a_second_daemon_does_not_take_over_a_socket_that_is_in_use(running: Running) -> None:
+    with pytest.raises(daemon.DaemonError, match="already listening"):
+        daemon.bind_unix(running.paths.socket)
+    second = daemon.Daemon(running.daemon.config, running.paths, FakeRunner(()), log=lambda m: None)
+    with pytest.raises(daemon.DaemonError, match="already listening"):
+        second.serve(threading.Event())
+    assert client.call(running.paths.socket, "GET", "status")["pid"]  # the first still answers
+
+
+def test_status_waits_for_tailscale_less_than_the_cli_waits_for_status(tmp_path: Path) -> None:
+    waits: list[float | None] = []
+
+    class Timed(FakeRunner):
+        def run(self, args, *, timeout=None):  # type: ignore[no-untyped-def]
+            waits.append(timeout)
+            return super().run(args, timeout=timeout)
+
+    _dash(tmp_path, Timed(("tailscale",)))
+    assert len(waits) == 2 and sum(w or 1e9 for w in waits) < client.TIMEOUT
+
+
+def test_a_stopped_tailscale_is_named_in_status(tmp_path: Path, tailnet: FakeRunner) -> None:
+    publish(tailnet, 1338)
+    stopped = json.dumps(node_status(state="Stopped"))
+    tailnet.on("tailscale", "status", "--json", stdout=stopped)  # exit 0, as the real one
+    dash = _dash(tmp_path, tailnet)
+    assert dash["url"] is None and "Tailscale is stopped" in str(dash["problem"])
+
+
+def test_daemon_command_reports_a_folder_it_cannot_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "run").write_text("a file where the run folder should go")
+    monkeypatch.setenv(config.ROOT_ENV, str(tmp_path))
+    assert cli.main(["daemon"]) == 1
+    err = capsys.readouterr().err
+    assert "the daemon cannot start" in err and "Traceback" not in err
+
+
+def test_a_trial_daemon_gets_no_firewall_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[object] = []
+    monkeypatch.setattr(daemon, "run", lambda cfg, paths, runner, fw: seen.append(fw) or 0)
+    monkeypatch.setenv(config.ROOT_ENV, str(tmp_path))
+    assert cli.main(["daemon"]) == 0
+    monkeypatch.delenv(config.ROOT_ENV)
+    assert cli.main(["daemon"]) == 0
+    assert seen[0] is None and type(seen[1]).__name__ == "SudoFirewall"

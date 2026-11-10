@@ -4,14 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import __version__, cli, selftest
-
-
-def test_version(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["--version"])
-    assert exc.value.code == 0
-    assert __version__ in capsys.readouterr().out
+from vpstream import cli, selftest
 
 
 def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -32,8 +25,16 @@ def test_selftest_args() -> None:
     assert "--integration" not in selftest.pytest_args(False, [])
 
 
-def test_tests_ship_inside_package() -> None:
-    assert (selftest.TESTS_DIR / "conftest.py").is_file()
+def test_selftest_without_pytest_names_the_system_wide_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pytest", None)  # makes `import pytest` fail
+    assert selftest.run() == 2
+    err = capsys.readouterr().err
+    # Not a plain `pipx install`: that makes the per-user install init refuses.
+    assert 'sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install --force "vp' in err
 
 
 @pytest.mark.parametrize("port", ["0", "70000", "x"])

@@ -214,12 +214,13 @@ def test_report_length_errors_close_the_connection(
     assert _post(port, big) == 413
 
 
-def test_report_save_failure_is_a_500(tmp_path: Path) -> None:
-    state = server.CapsState(
-        clip_dir=tmp_path, results_path=tmp_path / "missing" / "r.json", log=lambda _m: None
-    )
-    with pytest.raises(OSError):
-        state.record("c", "ua", {"session": "s"})
+def test_report_save_failure_is_a_500(
+    caps_server: tuple[int, server.CapsState], tmp_path: Path
+) -> None:
+    port, state = caps_server
+    state.results_path = tmp_path / "missing" / "r.json"
+    assert _post(port, json.dumps({"session": "s"}).encode()) == 500
+    assert _post(port, json.dumps({"session": "s"}).encode()) == 500  # and the server lives on
 
 
 def test_head_sends_headers_only(caps_server: tuple[int, server.CapsState]) -> None:
@@ -307,3 +308,13 @@ def test_generate_records_a_timeout(tmp_path: Path) -> None:
     manifest = clips.generate(r, tmp_path / "c")
     first = manifest["clips"][0]  # type: ignore[index]
     assert "600 seconds" in first["error"]
+
+
+def test_a_clip_set_made_while_ffmpeg_failed_is_not_reused(tmp_path: Path) -> None:
+    out = tmp_path / "c"
+    broken = clips.generate(FakeRunner(), out)  # `ffmpeg -encoders` listed nothing
+    assert not any(c["mp4"] for c in broken["clips"])  # type: ignore[union-attr]
+    manifest = clips.generate(_clip_runner(), out)
+    assert manifest["clips"][0]["encoder"] == "libx264"  # type: ignore[index]
+    r = _clip_runner()
+    assert clips.generate(r, out) == manifest and r.calls == []  # a good set is reused

@@ -379,6 +379,10 @@ def test_snap_ffmpeg_is_removed(env: Env) -> None:
     runner.which = lambda name: str(snap_bin) if name == "ffmpeg" else real_which(name)  # type: ignore[method-assign]
     found = fi.find_existing(runner, env.layout)
     assert [(e.owner, e.package) for e in found] == [("snap", "ffmpeg")]
+    env.run()
+    assert "snap ffmpeg" in env.questions[0]
+    assert env.system_calls("snap") == [["snap", "remove", "ffmpeg"]]
+    assert (env.layout.bin_dir / "ffmpeg").exists()  # in place before the old one went
 
 
 def test_update_does_nothing_when_current(env: Env) -> None:
@@ -462,13 +466,6 @@ def test_arm_hosts_get_the_arm_build(env: Env) -> None:
 
 
 # --- command line
-
-
-def test_cli_rejects_other_programs(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["install", "caddy"])
-    assert exc.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

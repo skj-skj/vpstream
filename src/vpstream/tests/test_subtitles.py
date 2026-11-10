@@ -50,7 +50,7 @@ def _mkvtoolnix(identify: dict[str, Any], **extract: Any) -> FakeRunner:
 
 
 class WritingRunner(FakeRunner):
-    """Writes the output file the way a successful run would."""
+    """Writes the file it is asked for, the way the real programs do (also when they fail)."""
 
     def __init__(self, out: Path, *available: str) -> None:
         super().__init__(available=available)
@@ -58,8 +58,10 @@ class WritingRunner(FakeRunner):
 
     def run(self, args: Any, *, timeout: float | None = None) -> Result:
         res = super().run(args, timeout=timeout)
-        if args[0] in ("ffmpeg", "mkvextract"):
-            self.out.write_text("WEBVTT\n")
+        if args[0] == "ffmpeg":
+            Path(args[-1]).write_text("WEBVTT\n")
+        elif args[0] == "mkvextract":
+            Path(args[-1].partition(":")[2]).write_text("WEBVTT\n")
         return res
 
 
@@ -107,7 +109,8 @@ def test_mkvextract_is_given_the_mkvmerge_track_id(tmp_path: Path) -> None:
     identify = _identify((2, "S_TEXT/UTF8", "eng"), (5, MKV, "spa"))
     r.on("mkvmerge", "-J", stdout=json.dumps(identify))
     subtitles.extract_webvtt(r, "in.mkv", _vtt(), out)
-    assert r.calls[-1] == ["mkvextract", "-q", "in.mkv", "tracks", f"5:{out}"]
+    assert r.calls[-1] == ["mkvextract", "-q", "in.mkv", "tracks", f"5:{tmp_path / 's.part.vtt'}"]
+    assert out.read_text() == "WEBVTT\n" and [p.name for p in tmp_path.iterdir()] == ["s.vtt"]
 
 
 @pytest.mark.parametrize("missing", MKVTOOLNIX)
@@ -167,6 +170,8 @@ def test_ffmpeg_failure_is_an_error(tmp_path: Path) -> None:
     r.on("ffmpeg", returncode=1, stderr="Invalid data found")
     with pytest.raises(subtitles.SubtitleError, match="Invalid data found"):
         subtitles.extract_webvtt(r, "in.mkv", _track("subrip"), out)
+    # What ffmpeg wrote before it failed is not left behind as if it were a result.
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_no_file_written_is_an_error(tmp_path: Path) -> None:

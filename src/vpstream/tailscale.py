@@ -31,10 +31,21 @@ def ipv4(runner: Runner) -> str:
 # --- `tailscale serve`: publishing a loopback port on the tailnet over HTTPS
 
 
-def _json(runner: Runner, *args: str) -> dict[str, Any]:
+TIMEOUT = 30.0
+# `tailscale status --json` prints its answer and exits 0 in every state, so the state is
+# read from the answer. The plain `tailscale status` uses the same words.
+_NOT_UP = {
+    "Stopped": "Tailscale is stopped",
+    "NeedsLogin": "Tailscale is logged out",
+    "NeedsMachineAuth": "this machine is not yet approved by the tailnet admin",
+}
+_UP = ("Running", "Starting")
+
+
+def _json(runner: Runner, *args: str, timeout: float = TIMEOUT) -> dict[str, Any]:
     if not runner.which("tailscale"):
         raise TailscaleDown("tailscale was not found on PATH")
-    res = runner.run(["tailscale", *args], timeout=30)
+    res = runner.run(["tailscale", *args], timeout=timeout)
     if res.returncode != 0:
         raise TailscaleDown(f"tailscale {' '.join(args)} failed: {tail(res, stdout=True)}")
     try:
@@ -50,18 +61,24 @@ class Node:
     https: bool  # whether the tailnet issues HTTPS certificates for that name
 
 
-def node(runner: Runner) -> Node:
-    """This host's tailnet name, from `tailscale status --json`."""
-    data = _json(runner, "status", "--json")
+def node(runner: Runner, timeout: float = TIMEOUT) -> Node:
+    """This host's tailnet name, from `tailscale status --json`.
+
+    Raises TailscaleDown when Tailscale answers but is stopped or logged out.
+    """
+    data = _json(runner, "status", "--json", timeout=timeout)
+    state = data.get("BackendState")
+    if isinstance(state, str) and state not in _UP:
+        raise TailscaleDown(_NOT_UP.get(state, f"Tailscale is not running (state {state})"))
     me = data.get("Self")
     name = str(me.get("DNSName") or "").rstrip(".") if isinstance(me, dict) else ""
     domains = data.get("CertDomains") or []
     return Node(name=name, https=bool(name) and name in domains)
 
 
-def serve_config(runner: Runner) -> dict[str, Any]:
+def serve_config(runner: Runner, timeout: float = TIMEOUT) -> dict[str, Any]:
     """The serve configuration, from `tailscale serve status --json`. Readable without root."""
-    return _json(runner, "serve", "status", "--json")
+    return _json(runner, "serve", "status", "--json", timeout=timeout)
 
 
 def local_target(port: int) -> str:
@@ -83,6 +100,11 @@ def serve_proxy(cfg: dict[str, Any], port: int) -> str | None:
         if isinstance(root, dict) and isinstance(root.get("Proxy"), str):
             return str(root["Proxy"])
     return ""
+
+
+def serve_target(runner: Runner, port: int, timeout: float = TIMEOUT) -> str | None:
+    """Where serve sends `port` right now; see `serve_proxy` for the three answers."""
+    return serve_proxy(serve_config(runner, timeout), port)
 
 
 def serve_on_args(port: int) -> list[str]:
