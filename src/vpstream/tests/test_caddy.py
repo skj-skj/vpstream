@@ -65,7 +65,9 @@ def _server(tmp_path: Path, program: Path | None) -> caddy.CaddyServer:
 
 
 def test_config_is_json_and_never_opens_an_admin_port() -> None:
-    cfg = caddy.config(1337, Path("/run/vpstream/gate.sock"), Path("/var/lib/x/access.log"))
+    cfg = caddy.config(
+        1337, Path("/run/vpstream/gate.sock"), Path("/var/lib/x/access.log"), Path("/v")
+    )
     assert json.loads(json.dumps(cfg)) == cfg
     assert cfg["admin"] == {"disabled": True, "config": {"persist": False}}
     server = cfg["apps"]["http"]["servers"]["vpstream"]
@@ -74,7 +76,7 @@ def test_config_is_json_and_never_opens_an_admin_port() -> None:
 
 
 def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
-    cfg = caddy.config(1337, Path("/run/vpstream/gate.sock"), Path("/x/access.log"))
+    cfg = caddy.config(1337, Path("/run/vpstream/gate.sock"), Path("/x/access.log"), Path("/v"))
     refuse, ask = cfg["apps"]["http"]["servers"]["vpstream"]["routes"]
     assert refuse["match"] == [{"not": [{"method": ["GET", "HEAD"]}]}] and refuse["terminal"]
     assert refuse["handle"][0]["status_code"] == 405
@@ -86,36 +88,39 @@ def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
 
 
 def test_a_file_is_sent_only_when_the_gate_names_one() -> None:
-    cfg = caddy.config(1337, Path("/g.sock"), Path("/x/access.log"))
+    cfg = caddy.config(1337, Path("/g.sock"), Path("/x/access.log"), Path("/v"))
     proxy = cfg["apps"]["http"]["servers"]["vpstream"]["routes"][1]["handle"][0]
     (on_file,) = proxy["handle_response"]
     assert on_file["match"] == {"headers": {"X-Vpstream-File": ["*"]}}
     handlers = on_file["routes"][0]["handle"]
     assert [h["handler"] for h in handlers] == ["headers", "rewrite", "file_server"]
-    assert handlers[1]["uri"] == "{http.reverse_proxy.header.X-Vpstream-File}"
-    assert handlers[2]["root"] == "/"
+    # The gate names a number, and only the folder of numbered links is served.
+    assert handlers[1]["uri"] == "/{http.reverse_proxy.header.X-Vpstream-File}"
+    assert handlers[2]["root"] == "/v"
 
 
 def test_the_access_log_goes_to_its_own_file() -> None:
-    cfg = caddy.config(1337, Path("/g.sock"), Path("/x/access.log"))
+    cfg = caddy.config(1337, Path("/g.sock"), Path("/x/access.log"), Path("/v"))
     logs = cfg["logging"]["logs"]
     assert logs["access"]["writer"]["filename"] == "/x/access.log"
     assert logs["access"]["include"] == logs["default"]["exclude"] == ["http.log.access.vpstream"]
     assert cfg["apps"]["http"]["servers"]["vpstream"]["logs"] == {"default_logger_name": "vpstream"}
 
 
-@pytest.mark.parametrize(
-    ("path", "header"),
-    [
-        ("/srv/media/film.mkv", "/srv/media/film.mkv"),
-        ("/srv/a film.mkv", "/srv/a%20film.mkv"),
-        ("/srv/100%?#.mkv", "/srv/100%25%3F%23.mkv"),
-        ("/srv/{http.request.host}.mkv", "/srv/%7Bhttp.request.host%7D.mkv"),
-        ("/srv/é\n.mkv", "/srv/%C3%A9%0A.mkv"),
-    ],
-)
-def test_file_header_is_a_url_path(path: str, header: str) -> None:
-    assert caddy.file_header(path) == header
+def test_videos_are_linked_by_number(tmp_path: Path) -> None:
+    import os
+
+    odd = os.fsdecode(b"caf\xe9 100%? {x}.mkv")
+    videos = [str(tmp_path / "a.mkv"), str(tmp_path / odd)]
+    folder = tmp_path / "caddy" / "videos"
+    caddy.link_videos(folder, videos)
+    assert sorted(p.name for p in folder.iterdir()) == ["1", "2"]
+    assert [os.readlink(folder / n) for n in ("1", "2")] == videos
+    caddy.link_videos(folder, videos[:1])  # the stream before is cleared away
+    assert [p.name for p in folder.iterdir()] == ["1"]
+    caddy.unlink_videos(folder)
+    assert not folder.exists()
+    caddy.unlink_videos(folder)  # nothing to remove is fine
 
 
 # --- the access log
@@ -194,7 +199,9 @@ def test_start_writes_the_configuration_and_waits_until_caddy_listens(
         with socket.create_connection(("127.0.0.1", server.port), timeout=2):
             pass
         written = json.loads((paths.caddy_dir / "caddy.json").read_text())
-        assert written == caddy.config(server.port, paths.gate_socket, paths.access_log)
+        assert written == caddy.config(
+            server.port, paths.gate_socket, paths.access_log, paths.videos_dir
+        )
         assert not paths.access_log.exists()
         server.start()  # already running: nothing more happens
     finally:

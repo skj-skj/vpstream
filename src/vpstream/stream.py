@@ -116,6 +116,7 @@ class Answer:
     status: int
     kind: str  # "video", "index", "playlist", "denied" or "missing"
     file: str = ""  # for a video: the file to send
+    number: int = 0  # and its number
     alias: str = ""  # for an index or a playlist: what it lists
     names: list[str] = field(default_factory=list)
 
@@ -223,7 +224,7 @@ class Stream:
     def _video(self, number: int) -> Answer:
         if not 1 <= number <= len(self.videos):
             return MISSING
-        return Answer(200, "video", self.videos[number - 1])
+        return Answer(200, "video", self.videos[number - 1], number)
 
     # --- as plain data
 

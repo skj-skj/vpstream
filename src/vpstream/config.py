@@ -40,6 +40,11 @@ class Paths:
         return self.state_dir / "caddy"
 
     @property
+    def videos_dir(self) -> Path:
+        """One link per video of the running stream, named by its number."""
+        return self.caddy_dir / "videos"
+
+    @property
     def access_log(self) -> Path:
         return self.caddy_dir / "access.log"
 

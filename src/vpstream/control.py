@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream import net, state
-from vpstream.caddy import CaddyError, LogTail, Server
+from vpstream.caddy import CaddyError, LogTail, Server, link_videos, unlink_videos
 from vpstream.config import Config, Paths
 from vpstream.firewall import Firewall, FirewallError
 from vpstream.stream import MISSING, Answer, Stream, StreamError, check_alias
@@ -92,8 +92,10 @@ class Control:
         if self.server is None:
             raise ControlError("this daemon has no public server to start")
         try:
+            link_videos(self.paths.videos_dir, stream.videos)
             self.server.start()
         except (CaddyError, ToolMissing, OSError) as exc:
+            unlink_videos(self.paths.videos_dir)
             raise ControlError(f"Caddy could not be started: {exc}") from exc
         try:
             self._port("open")
@@ -122,6 +124,7 @@ class Control:
                 self.log(f"WARNING: {what} failed: {exc}")
 
     def _stop_server(self) -> None:
+        unlink_videos(self.paths.videos_dir)
         if self.server is not None:
             self.server.stop()
 

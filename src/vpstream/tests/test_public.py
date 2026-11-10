@@ -53,9 +53,7 @@ def test_a_video_is_answered_with_the_file_for_caddy_to_send(
     control.start({"dir": str(show), "alias": "aaa"})
     answer = viewer.get("/aaa/1", headers=IP)
     assert answer.status_code == 200 and answer.data == b""
-    assert answer.headers["X-Vpstream-File"] == f"{show}/e1 100%?.mp4".replace(" ", "%20").replace(
-        "%?", "%25%3F"
-    )
+    assert answer.headers["X-Vpstream-File"] == "1"
     assert answer.headers["X-Vpstream-Type"] == "video/mp4"
     assert answer.headers["Cache-Control"] == "no-store"
     assert viewer.head("/aaa/2", headers=IP).headers["X-Vpstream-Type"] == "video/x-matroska"
@@ -281,7 +279,7 @@ def test_a_file_name_that_is_not_utf8_is_listed_and_served(
     assert page.status_code == 200 and "caf\ufffd.mkv" in page.get_data(as_text=True)
     assert viewer.get("/aaa/playlist.m3u", headers=IP).status_code == 200
     video = viewer.get("/aaa/1", headers=IP)
-    assert video.status_code == 200 and video.headers["X-Vpstream-File"].endswith("/caf%E9.mkv")
+    assert video.status_code == 200 and video.headers["X-Vpstream-File"] == "1"
 
 
 def test_a_video_swapped_for_a_link_or_a_folder_after_the_start_is_not_served(

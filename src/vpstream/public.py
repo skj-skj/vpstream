@@ -68,7 +68,7 @@ def respond(answer: Answer, host: str) -> Response:
         if os.path.realpath(answer.file) != answer.file or not os.path.isfile(answer.file):
             return _text(404, "Nothing here.")
         headers = {
-            caddy.HEADER_FILE: caddy.file_header(answer.file),
+            caddy.HEADER_FILE: str(answer.number),
             caddy.HEADER_TYPE: media.content_type(answer.file),
         }
         return Response(b"", 200, headers=headers)

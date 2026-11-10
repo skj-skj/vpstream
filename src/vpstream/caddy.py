@@ -2,22 +2,24 @@
 
 Caddy listens on the stream port only while a stream runs. It hands every request to the
 daemon's gate over a unix socket. The gate answers either with the page itself (an index, a
-playlist, a refusal) or with the name of a file, which Caddy then sends, with range requests.
-So nothing about a stream is in Caddy's configuration, and a change of alias, policy or
-device applies on the next request without a reload.
+playlist, a refusal) or with the number of a video, which Caddy then sends, with range
+requests, from a folder that holds one link per video. A number needs no encoding, which
+Caddy versions do differently for a path. Nothing about a stream is in Caddy's
+configuration, and a change of alias, policy or device applies on the next request without
+a reload.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote
 
 from vpstream.config import Paths
 from vpstream.files import write_atomic
@@ -25,7 +27,7 @@ from vpstream.tools import Runner, require
 
 # Set by Caddy on the way in, whatever the viewer sent: the address the request came from.
 HEADER_IP = "X-Vpstream-Ip"
-# Set by the gate on the way back: send this file (a URL-encoded full path) with this type.
+# Set by the gate on the way back: send the video with this number, with this type.
 HEADER_FILE = "X-Vpstream-File"
 HEADER_TYPE = "X-Vpstream-Type"
 
@@ -39,20 +41,27 @@ class CaddyError(RuntimeError):
     pass
 
 
-def file_header(path: str) -> str:
-    """A file's path as the gate names it to Caddy, which reads the value as a URL path."""
-    return quote(os.fsencode(path), safe="/")  # bytes: a file name need not be UTF-8
+def link_videos(folder: Path, videos: Sequence[str]) -> None:
+    """Fill `folder` with one link per video, named 1, 2, 3 and so on. What was there goes."""
+    unlink_videos(folder)
+    folder.mkdir(mode=0o750, parents=True)
+    for number, video in enumerate(videos, 1):
+        (folder / str(number)).symlink_to(video)
 
 
-def config(port: int, gate_socket: Path, access_log: Path) -> dict[str, Any]:
+def unlink_videos(folder: Path) -> None:
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def config(port: int, gate_socket: Path, access_log: Path, videos_dir: Path) -> dict[str, Any]:
     """Caddy's whole configuration, as its native JSON."""
     send_file = [
         {
             "handler": "headers",
             "response": {"set": {"Content-Type": [f"{{http.reverse_proxy.header.{HEADER_TYPE}}}"]}},
         },
-        {"handler": "rewrite", "uri": f"{{http.reverse_proxy.header.{HEADER_FILE}}}"},
-        {"handler": "file_server", "root": "/"},
+        {"handler": "rewrite", "uri": f"/{{http.reverse_proxy.header.{HEADER_FILE}}}"},
+        {"handler": "file_server", "root": str(videos_dir)},
     ]
     ask_gate = {
         "handler": "reverse_proxy",
@@ -180,6 +189,7 @@ class CaddyServer:
         self.gate_socket = paths.gate_socket
         self.work_dir = paths.caddy_dir  # Caddy's own files and its error output
         self.access_log = paths.access_log
+        self.videos_dir = paths.videos_dir
         self._proc: subprocess.Popen[bytes] | None = None
 
     @property
@@ -203,7 +213,10 @@ class CaddyServer:
         self.access_log.unlink(missing_ok=True)
         config_file = self.work_dir / "caddy.json"
         write_atomic(
-            config_file, json.dumps(config(self.port, self.gate_socket, self.access_log), indent=1)
+            config_file,
+            json.dumps(
+                config(self.port, self.gate_socket, self.access_log, self.videos_dir), indent=1
+            ),
         )
         # The service user has no home folder; Caddy keeps its files where it is told to.
         env = {

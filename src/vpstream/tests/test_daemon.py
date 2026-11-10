@@ -465,7 +465,9 @@ def test_start_devices_alias_and_stop_from_the_command_line(
     assert fw.calls == ["close", "open"] and server.calls == ["start"]  # type: ignore[union-attr]
 
     status, headers, _ = _gate(streaming.paths.gate_socket, "/aaa/2")
-    assert status == 200 and headers["X-Vpstream-File"] == str(tmp_path / "e2.mkv")
+    assert status == 200 and headers["X-Vpstream-File"] == "2"
+    link = streaming.paths.videos_dir / "2"
+    assert link.is_symlink() and link.resolve() == tmp_path / "e2.mkv"
     assert _gate(streaming.paths.gate_socket, "/nope")[0] == 404
 
     assert cli.main(["devices"]) == 0
@@ -494,6 +496,7 @@ def test_start_devices_alias_and_stop_from_the_command_line(
 
     assert cli.main(["stop"]) == 0
     assert "Stopped. Stream port 1337: closed" in capsys.readouterr().out
+    assert not streaming.paths.videos_dir.exists()
     assert fw.calls == ["close", "open", "close"] and server.calls == ["start", "stop"]  # type: ignore[union-attr]
     assert _gate(streaming.paths.gate_socket, "/film")[0] == 404
 
