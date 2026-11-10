@@ -9,6 +9,7 @@ import tarfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from vpstream import __version__
 
@@ -143,6 +144,64 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return doctor.exit_code(checks)
 
 
+def _duration(seconds: float) -> str:
+    """A short human duration: 45s, 3m 12s, 2h 05m, 3d 4h."""
+    total = int(seconds)
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def format_status(info: dict[str, Any], cli_version: str) -> str:
+    """The daemon's status as text for `vpstream status`."""
+    dash = info.get("dashboard") or {}
+    lines = [
+        f"vpstream daemon {info.get('version')}, "
+        f"up {_duration(float(info.get('uptime_seconds') or 0))} (pid {info.get('pid')})",
+        f"Stream:       {'running' if info.get('stream') else 'none'}",
+        f"Stream port:  {info.get('stream_port')}",
+        "Dashboard:    "
+        + (f"http://{dash['address']}/" if dash.get("address") else str(dash.get("problem"))),
+    ]
+    if info.get("version") != cli_version:
+        lines.append(
+            f"note: the daemon runs {info.get('version')} but this command is {cli_version}; "
+            "restart it with: sudo systemctl restart vpstream"
+        )
+    return "\n".join(lines)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    import json
+
+    from vpstream import client, config
+
+    try:
+        info = client.call(config.default_paths().socket, "GET", "status")
+    except (client.DaemonUnavailable, client.DaemonRefused) as exc:
+        return _error(str(exc))
+    print(json.dumps(info, indent=2) if args.json else format_status(info, __version__))
+    return 0
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    from vpstream import config, daemon
+    from vpstream.tools import SystemRunner
+
+    paths = config.default_paths()
+    try:
+        return daemon.run(config.load(paths.config_file), paths, SystemRunner())
+    except (config.ConfigError, daemon.DaemonError) as exc:
+        return _error(str(exc))
+
+
 def _ask(question: str) -> bool:
     try:
         answer = input(f"{question} [y/N] ")
@@ -205,6 +264,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="check this host for the programs vpstream needs")
     d.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("status", help="show what the running daemon is doing")
+    s.add_argument("--json", action="store_true", help="print the daemon's answer as JSON")
+    s.set_defaults(func=cmd_status)
+
+    dm = sub.add_parser("daemon", help="run the daemon in the foreground (the service does this)")
+    dm.set_defaults(func=cmd_daemon)
 
     b = sub.add_parser("bench", help="measure how fast this host prepares a file")
     b.add_argument("file")
