@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-11-10)
+
+### Features
+
+- Add the daemon with its unix-socket CLI and Tailscale-only dashboard port
+  ([#6](https://github.com/skj-skj/vpstream/pull/6),
+  [`acdef5e`](https://github.com/skj-skj/vpstream/commit/acdef5ec4f27005cf00c419e22040d34b297c2a8))
+
+
 ## v0.3.0 (2026-11-10)
 
 ### Features
