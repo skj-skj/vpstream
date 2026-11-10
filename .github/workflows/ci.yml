@@ -48,6 +48,11 @@ jobs:
         run: python -m pytest --integration
       - name: selftest from the installed command
         run: vpstream selftest
+      - name: TEMP time the font install
+        if: matrix.python-version == '3.12'
+        run: |
+          dpkg-query -W -f='${Package} ${Status}\n' libgcc-s1 fontconfig fonts-dejavu-core fonts-liberation fonts-noto-cjk || true
+          time sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Debug::pkgDPkgPM=0 install -y --no-install-recommends fonts-liberation fonts-noto-cjk 2>&1 | while IFS= read -r l; do echo "$(date +%T) $l"; done
       - name: install the real ffmpeg build (into a temporary folder, through sudo)
         if: matrix.python-version == '3.12'
         env:
