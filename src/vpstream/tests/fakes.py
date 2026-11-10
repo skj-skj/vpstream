@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from vpstream.firewall import FirewallError
 from vpstream.tools import Result
 
 
@@ -30,3 +31,22 @@ class FakeRunner:
             if tuple(core[: len(prefix)]) == prefix:
                 return result
         return Result(0, "", "")
+
+
+class FakeFirewall:
+    """Records open and close calls; `fail` makes every call raise FirewallError."""
+
+    def __init__(self, fail: str = "") -> None:
+        self.calls: list[str] = []
+        self.fail = fail
+
+    def _call(self, action: str) -> None:
+        self.calls.append(action)
+        if self.fail:
+            raise FirewallError(self.fail)
+
+    def open(self) -> None:
+        self._call("open")
+
+    def close(self) -> None:
+        self._call("close")
