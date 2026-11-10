@@ -166,10 +166,12 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
         f"vpstream daemon {info.get('version')}, "
         f"up {_duration(float(info.get('uptime_seconds') or 0))} (pid {info.get('pid')})",
         f"Stream:       {'running' if info.get('stream') else 'none'}",
-        f"Stream port:  {info.get('stream_port')}",
+        f"Stream port:  {info.get('stream_port')} ({info.get('stream_port_state', 'unknown')})",
         "Dashboard:    "
         + (f"http://{dash['address']}/" if dash.get("address") else str(dash.get("problem"))),
     ]
+    if info.get("firewall_problem"):
+        lines.append(f"WARNING: {info['firewall_problem']}")
     if info.get("version") != cli_version:
         lines.append(
             f"note: the daemon runs {info.get('version')} but this command is {cli_version}; "
@@ -192,12 +194,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    from vpstream import config, daemon
+    from vpstream import config, daemon, firewall
     from vpstream.tools import SystemRunner
 
     paths = config.default_paths()
+    runner = SystemRunner()
     try:
-        return daemon.run(config.load(paths.config_file), paths, SystemRunner())
+        return daemon.run(
+            config.load(paths.config_file),
+            paths,
+            runner,
+            firewall.SudoFirewall(runner, firewall.helper_path()),
+        )
     except (config.ConfigError, daemon.DaemonError) as exc:
         return _error(str(exc))
 

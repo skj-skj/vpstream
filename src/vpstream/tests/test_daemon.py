@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import __version__, api, cli, client, config, daemon
-from vpstream.tests.fakes import FakeRunner
+from vpstream import __version__, api, cli, client, config, daemon, state
+from vpstream.tests.fakes import FakeFirewall, FakeRunner
 
 
 def _free_port() -> int:
@@ -164,6 +164,7 @@ def test_cli_status(
     out = capsys.readouterr().out
     assert f"vpstream daemon {__version__}" in out
     assert "Stream:       none" in out
+    assert "Stream port:  " in out and "(unknown)" in out
     assert f"Dashboard:    http://{address}/" in out
     assert cli.main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["dashboard"]["address"] == address
@@ -261,3 +262,66 @@ def test_a_busy_dashboard_port_is_reported(short_tmp: Path, tailnet: FakeRunner)
             assert "not available" in run.daemon.status()["dashboard"]["problem"]
         finally:
             run.close()
+
+
+# --- the firewall when the daemon starts
+
+
+def _daemon(root: Path, fw: FakeFirewall | None) -> tuple[daemon.Daemon, list[str]]:
+    log: list[str] = []
+    d = daemon.Daemon(config.Config(), config.Paths.under(root), FakeRunner(()), fw, log=log.append)
+    return d, log
+
+
+def test_start_closes_the_stream_port_when_no_stream_is_recorded(tmp_path: Path) -> None:
+    fw = FakeFirewall()
+    d, log = _daemon(tmp_path, fw)
+    d.reconcile()
+    assert fw.calls == ["close"]
+    assert d.status()["stream_port_state"] == "closed"
+    assert log == ["stream port 1337 is closed (no stream is running)"]
+
+
+def test_start_leaves_the_port_alone_when_a_stream_is_recorded(tmp_path: Path) -> None:
+    fw = FakeFirewall()
+    d, log = _daemon(tmp_path, fw)
+    state.save(d.paths.state_dir / state.FILE_NAME, state.State(stream={"alias": "aaa"}))
+    d.reconcile()
+    assert fw.calls == []
+    assert d.status()["stream"] == {"alias": "aaa"}
+    assert d.status()["stream_port_state"] == "unknown"
+    assert "leaving stream port 1337 as it is" in log[0]
+
+
+def test_start_closes_the_port_when_the_state_file_is_unusable(tmp_path: Path) -> None:
+    fw = FakeFirewall()
+    d, log = _daemon(tmp_path, fw)
+    d.paths.state_dir.mkdir(parents=True)
+    (d.paths.state_dir / state.FILE_NAME).write_text("{")
+    d.reconcile()
+    assert fw.calls == ["close"]
+    assert "treating it as no stream running" in log[0]
+
+
+def test_a_firewall_failure_is_reported_not_hidden(tmp_path: Path) -> None:
+    fw = FakeFirewall(fail="could not close the stream port: sudo: a password is required")
+    d, log = _daemon(tmp_path, fw)
+    d.reconcile()
+    info = d.status()
+    assert info["stream_port_state"] == "unknown"
+    assert "password is required" in info["firewall_problem"]
+    assert log[0].startswith("WARNING: could not close")
+    assert "WARNING: could not close" in cli.format_status(info, info["version"])
+
+
+def test_serving_reconciles_first(short_tmp: Path, tailnet: FakeRunner) -> None:
+    fw = FakeFirewall()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()))
+    run.daemon.firewall = fw
+    run.start()
+    try:
+        assert fw.calls == ["close"]
+        assert client.call(run.paths.socket, "GET", "status")["stream_port_state"] == "closed"
+    finally:
+        run.close()
+    assert fw.calls == ["close"]  # stopping is the service's job (ExecStopPost), not the daemon's

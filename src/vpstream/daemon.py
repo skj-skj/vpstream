@@ -15,8 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, api, tailscale
+from vpstream import __version__, api, state, tailscale
 from vpstream.config import Config, Paths
+from vpstream.firewall import Firewall, FirewallError
 from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out
@@ -63,20 +64,52 @@ class Daemon:
     config: Config
     paths: Paths
     runner: Runner
+    firewall: Firewall | None = None
     log: Callable[[str], None] = print
     retry_seconds: float = RETRY_SECONDS
     started: float = field(default_factory=time.time)
     dashboard_address: str | None = None
     dashboard_problem: str = "starting"
     ready: threading.Event = field(default_factory=threading.Event)
+    stream: dict[str, Any] | None = None
+    stream_port_state: str = "unknown"  # "closed", "open" or "unknown"
+    firewall_problem: str | None = None
+
+    def reconcile(self) -> None:
+        """Bring the firewall in line with the recorded state when the daemon starts.
+
+        An open rule survives a crash or a reboot, so the stream port is closed here unless
+        a running stream is recorded.
+        """
+        recorded, problem = state.load(self.paths.state_dir / state.FILE_NAME)
+        if problem:
+            self.log(f"{problem}; treating it as no stream running")
+        self.stream = recorded.stream
+        port = self.config.stream_port
+        if self.stream is not None:
+            self.log(f"a running stream is recorded; leaving stream port {port} as it is")
+            return
+        if self.firewall is None:
+            self.log(f"no firewall helper; stream port {port} was not checked")
+            return
+        try:
+            self.firewall.close()
+        except FirewallError as exc:
+            self.firewall_problem = str(exc)
+            self.log(f"WARNING: {exc}")
+            return
+        self.stream_port_state = "closed"
+        self.log(f"stream port {port} is closed (no stream is running)")
 
     def status(self) -> dict[str, Any]:
         return {
             "version": __version__,
             "pid": os.getpid(),
             "uptime_seconds": round(time.time() - self.started, 1),
-            "stream": None,
+            "stream": self.stream,
             "stream_port": self.config.stream_port,
+            "stream_port_state": self.stream_port_state,
+            "firewall_problem": self.firewall_problem,
             "dashboard": {
                 "port": self.config.dashboard_port,
                 "address": self.dashboard_address,
@@ -88,6 +121,7 @@ class Daemon:
         """Serve until `stop` is set. The socket file is removed on the way out."""
         from werkzeug.serving import make_server
 
+        self.reconcile()
         app = api.create_app(self.status)
         self.paths.run_dir.mkdir(parents=True, exist_ok=True)
         listener = bind_unix(self.paths.socket)
@@ -146,12 +180,12 @@ class Daemon:
                 listener.close()
 
 
-def run(config: Config, paths: Paths, runner: Runner) -> int:
+def run(config: Config, paths: Paths, runner: Runner, firewall: Firewall | None = None) -> int:
     """Run the daemon in the foreground until SIGTERM or Ctrl+C."""
     import signal
 
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
-    Daemon(config, paths, runner, log=lambda m: print(m, flush=True)).serve(stop)
+    Daemon(config, paths, runner, firewall, log=lambda m: print(m, flush=True)).serve(stop)
     return 0

@@ -26,6 +26,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 vpstream = "vpstream.cli:main"
+vpstream-fw = "vpstream.firewall:main"
 
 [tool.hatch.build.targets.sdist]
 include = ["src/vpstream", "README.md", "LICENSE", "CHANGELOG.md"]

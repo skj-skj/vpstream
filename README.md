@@ -61,6 +61,20 @@ One daemon does the work, and the command line and the dashboard both talk to it
   never to every interface. While Tailscale has no address the daemon keeps running and tries
   again every 10 seconds; `vpstream status` says why the dashboard is not available.
 
+## The firewall helper, `vpstream-fw`
+
+The stream port is open in ufw only while a stream runs. The daemon has no privileges, so a
+small helper does it as root: `vpstream-fw open` and `vpstream-fw close`, nothing else.
+
+- **One port:** the helper takes no port. It reads `port` under `[stream]` from the root-owned
+  `/etc/vpstream/config.toml` and refuses a file that other users can write, so its caller
+  cannot make it touch any other port.
+- **Two ufw commands:** `ufw allow PORT/tcp` and `ufw delete allow PORT/tcp`. It never enables,
+  disables, resets or reloads ufw and never touches another rule.
+- **After a crash or reboot:** a ufw rule stays on disk, so when the daemon starts it closes
+  the stream port unless a running stream is recorded. `vpstream status` shows the port's
+  state, and a warning when the helper could not be run.
+
 ## `vpstream install ffmpeg` and `vpstream update ffmpeg`
 
 Distribution packages of ffmpeg are often several versions old. `vpstream install ffmpeg`
