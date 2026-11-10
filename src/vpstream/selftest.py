@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from vpstream.doctor import SYSTEM_INSTALL
+
 TESTS_DIR = Path(__file__).parent / "tests"
 
 
@@ -20,8 +22,8 @@ def run(integration: bool = False, extra: list[str] | None = None) -> int:
         import pytest
     except ImportError:
         print(
-            "pytest is not installed. Install the dev extra:\n"
-            '  pipx install --force "vpstream[dev]"',
+            "pytest is not installed. Install vpstream again with the dev extra:\n"
+            f"  {SYSTEM_INSTALL.replace('pipx install', 'pipx install --force')}",
             file=sys.stderr,
         )
         return 2

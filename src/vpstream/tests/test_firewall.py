@@ -14,7 +14,14 @@ ME = os.getuid()
 
 
 def _helper(argv: list[str], runner: FakeRunner, config_file: Path, **kwargs: object) -> tuple:
-    options = {"config_file": config_file, "euid": 0, "ufw": UFW, "owner_uid": ME, **kwargs}
+    options = {
+        "config_file": config_file,
+        "record_file": config_file.parent / "open-ports",
+        "euid": 0,
+        "ufw": UFW,
+        "owner_uid": ME,
+        **kwargs,
+    }
     return firewall.helper(argv, runner, **options)  # type: ignore[arg-type]
 
 
@@ -166,3 +173,92 @@ def test_an_unusable_state_file_means_no_stream(tmp_path: Path, text: str) -> No
     path.write_text(text)
     loaded, problem = state.load(path)
     assert loaded.stream is None and problem and str(path) in problem
+
+
+# --- found in the review before milestone 2: what was opened is what gets closed
+
+
+class Ufw(FakeRunner):
+    """Remembers its rules, like the real ufw."""
+
+    def __init__(self) -> None:
+        super().__init__(())
+        self.rules: set[str] = set()
+
+    def run(self, args, *, timeout=None):  # type: ignore[no-untyped-def]
+        if args[1] == "allow":
+            self.rules.add(args[2])
+        else:
+            self.rules.discard(args[3])
+        return super().run(args, timeout=timeout)
+
+
+def test_open_writes_the_port_down_and_close_forgets_it(config_file: Path) -> None:
+    ufw, record = Ufw(), config_file.parent / "open-ports"
+    assert _helper(["open"], ufw, config_file)[0] == 0
+    assert firewall.recorded_ports(record, ME) == [2000]
+    assert record.stat().st_mode & 0o777 == 0o644
+    assert _helper(["open"], ufw, config_file)[0] == 0  # twice is once
+    assert firewall.recorded_ports(record, ME) == [2000]
+    assert _helper(["close"], ufw, config_file)[0] == 0
+    assert ufw.rules == set() and not record.exists()
+
+
+def test_close_after_the_port_was_changed_closes_the_old_port_too(config_file: Path) -> None:
+    ufw = Ufw()
+    _helper(["open"], ufw, config_file)
+    config_file.write_text("[stream]\nport = 2001\n")
+    code, message = _helper(["close"], ufw, config_file)
+    assert code == 0 and "also closed 2000/tcp" in message
+    assert ufw.rules == set()
+    assert ufw.calls[-2:] == [
+        [UFW, "delete", "allow", "2000/tcp"],
+        [UFW, "delete", "allow", "2001/tcp"],
+    ]
+
+
+def test_close_with_a_broken_config_still_closes_what_was_opened(config_file: Path) -> None:
+    ufw = Ufw()
+    _helper(["open"], ufw, config_file)
+    config_file.write_text("[stream]\nprot = 2000\n")
+    code, message = _helper(["close"], ufw, config_file)
+    assert ufw.rules == set()
+    assert code == 1 and "closed 2000/tcp" in message and "unknown setting" in message
+    assert _helper(["open"], ufw, config_file)[0] == 1 and ufw.rules == set()  # never opens blind
+
+
+def test_a_failed_close_keeps_the_record_for_the_next_try(config_file: Path) -> None:
+    ufw = Ufw()
+    _helper(["open"], ufw, config_file)
+    ufw.on(UFW, returncode=1, stdout="ERROR: could not lock\n")
+    assert _helper(["close"], ufw, config_file)[0] == 1
+    assert firewall.recorded_ports(config_file.parent / "open-ports", ME) == [2000]
+
+
+def test_the_record_is_trusted_no_more_than_the_config(tmp_path: Path) -> None:
+    record = tmp_path / "open-ports"
+    record.write_text("2000\n22\n2000\n99999\nx\n3000\n")
+    record.chmod(0o644)
+    assert firewall.recorded_ports(record, ME) == [2000, 3000]  # only ports the config allows
+    assert firewall.recorded_ports(record, ME + 1) == []  # not root's
+    record.chmod(0o666)
+    assert firewall.recorded_ports(record, ME) == []
+    assert firewall.recorded_ports(tmp_path / "nope", ME) == []
+
+
+def test_a_port_is_not_opened_when_it_cannot_be_written_down(config_file: Path) -> None:
+    ufw = Ufw()
+    blocked = config_file.parent / "a-file" / "open-ports"
+    blocked.parent.write_text("")
+    code, message = _helper(["open"], ufw, config_file, record_file=blocked)
+    assert code == 1 and "stays closed" in message and ufw.calls == []
+
+
+def test_a_sudo_that_cannot_be_run_is_a_firewall_error() -> None:
+    class NoSudo(FakeRunner):
+        def run(self, args, *, timeout=None):  # type: ignore[no-untyped-def]
+            raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    fw = firewall.SudoFirewall(NoSudo(), Path("/opt/x/bin/vpstream-fw"))
+    with pytest.raises(firewall.FirewallError, match="could not close the stream port"):
+        fw.close()

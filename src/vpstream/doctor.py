@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from vpstream import config, tailscale
+from vpstream import config, firewall, tailscale
 from vpstream.tools import PACKAGES, Runner
 
 Status = Literal["ok", "problem", "warning"]
@@ -127,7 +127,7 @@ def check_tailnet_https(runner: Runner) -> Check:
 
 def check_dashboard(runner: Runner, port: int) -> Check:
     try:
-        proxy = tailscale.serve_proxy(tailscale.serve_config(runner), port)
+        proxy = tailscale.serve_target(runner, port)
     except tailscale.TailscaleDown as exc:
         return Check("dashboard", "problem", str(exc))
     if proxy == tailscale.local_target(port):
@@ -219,8 +219,26 @@ def install_problem(package_dir: Path, owner_uid: int = 0) -> str | None:
     return None
 
 
-def check_install(package_dir: Path, owner_uid: int = 0) -> Check:
+def program_problem(path: Path, owner_uid: int = 0) -> str | None:
+    """Why a program that root runs from this install (the firewall helper) is not safe
+    where it is, or None: its folder and the file itself must be root's alone to change."""
+    try:
+        if problem := folder_problem(path.parent, path.parent.stat(), owner_uid):
+            return problem
+        st = path.stat()
+    except OSError as exc:
+        return f"cannot check {path}: {exc.strerror}"
+    if st.st_uid != owner_uid:
+        return f"{path} is not owned by root"
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return f"{path} is writable by users other than root"
+    return None
+
+
+def check_install(package_dir: Path, owner_uid: int = 0, helper: Path | None = None) -> Check:
     problem = install_problem(package_dir, owner_uid)
+    if problem is None and helper is not None:
+        problem = program_problem(helper, owner_uid)
     if problem is None:
         return Check("install", "ok", str(package_dir))
     return Check(
@@ -254,7 +272,10 @@ def run_checks(
         checks.append(check_tailscale(runner))
         checks.append(check_tailnet_https(runner))
     checks += check_fonts(runner)
-    checks.append(check_install(package_dir or Path(__file__).parent))
+    if package_dir is None:
+        checks.append(check_install(Path(__file__).parent, helper=firewall.helper_path()))
+    else:
+        checks.append(check_install(package_dir))
     checks.append(check_config(paths.config_file))
     if "systemctl" in found:
         checks.append(check_service(runner, unit_file))

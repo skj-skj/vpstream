@@ -206,15 +206,16 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
     paths = config.default_paths()
     runner = SystemRunner()
+    # The helper always works on the real host, so a daemon tried out under $VPSTREAM_ROOT
+    # gets none: it must not close the real stream port.
+    trial = bool(os.environ.get(config.ROOT_ENV))
+    fw = None if trial else firewall.SudoFirewall(runner, firewall.helper_path())
     try:
-        return daemon.run(
-            config.load(paths.config_file),
-            paths,
-            runner,
-            firewall.SudoFirewall(runner, firewall.helper_path()),
-        )
+        return daemon.run(config.load(paths.config_file), paths, runner, fw)
     except (config.ConfigError, daemon.DaemonError) as exc:
         return _error(str(exc))
+    except OSError as exc:  # the run folder cannot be made, for example
+        return _error(f"the daemon cannot start: {exc}")
 
 
 def _service(args: argparse.Namespace) -> Any:

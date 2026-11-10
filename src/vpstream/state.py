@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from vpstream.files import write_atomic
 
 FILE_NAME = "state.json"
 
@@ -36,6 +37,4 @@ def load(path: Path) -> tuple[State, str | None]:
 def save(path: Path, state: State) -> None:
     """Write the state file whole, so a crash never leaves half of it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"stream": state.stream}) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    write_atomic(path, json.dumps({"stream": state.stream}) + "\n")

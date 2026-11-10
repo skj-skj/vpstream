@@ -234,7 +234,9 @@ def benchmark(
     progress: Callable[[str], None] = lambda _m: None,
 ) -> BenchReport:
     require(runner, "ffmpeg")
-    info = probe(runner, path)
+    # Absolute, so ffmpeg never takes a name such as -x.mkv for an option or a:b.mkv for a URL.
+    source = path.resolve()
+    info = probe(runner, source)
     if not info.video:
         raise ValueError(f"{path} has no video track")
     v = info.video[0]
@@ -247,7 +249,7 @@ def benchmark(
     tonemap = {"zscale", "tonemap"} <= filters
     prefix = low_priority_prefix(runner) if nice else []
     burn = pick_burn_track(info, sub)
-    src = str(path)
+    src = str(source)
     steps: list[StepResult] = []
 
     def step(name: str, build: ArgsBuilder, note: str = "", check_fonts: bool = False) -> None:
@@ -291,7 +293,7 @@ def benchmark(
         else:
             image = burn.kind == "image"
             try:
-                link = filter_source(work, path)
+                link = filter_source(work, source)
             except (OSError, ValueError) as exc:
                 steps.append(
                     skipped_step(

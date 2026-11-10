@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -74,21 +75,27 @@ def extract_webvtt(runner: Runner, src: str, track: SubtitleTrack, out: Path) ->
     if track.treatment != "soft":
         raise ValueError(f"subtitle {track.number} ({track.codec or 'unknown'}) cannot be soft")
     needed = f"subtitle {track.number} ({track.codec})"
+    # Written under another name and renamed when complete, so `out` is never half a file.
+    # The suffix is kept: ffmpeg picks the format from it.
+    part = out.with_name(f"{out.stem}.part{out.suffix}")
     if track.reader == MKVEXTRACT:
         require(runner, "mkvextract", needed)
         require(runner, "mkvmerge", needed)
         track_id = mkvextract_track_id(_identify_mkv(runner, src, track), track)
-        args = mkvextract_args(src, track_id, out)
+        args = mkvextract_args(src, track_id, part)
         # mkvtoolnix prints its errors on stdout, and exits 1 when it only warned (the file
         # is then complete).
         ok_codes: tuple[int, ...] = (0, 1)
         errors_on_stdout = True
     else:
         require(runner, "ffmpeg", needed)
-        args = ffmpeg_webvtt_args(src, track, out)
+        args = ffmpeg_webvtt_args(src, track, part)
         ok_codes, errors_on_stdout = (0,), False
     out.unlink(missing_ok=True)  # a file left by an earlier run must not pass for a result
+    part.unlink(missing_ok=True)
     res = runner.run(args, timeout=EXTRACT_TIMEOUT)
-    if res.returncode not in ok_codes or not out.is_file():
+    if res.returncode not in ok_codes or not part.is_file():
+        part.unlink(missing_ok=True)
         why = tail(res, default="no file written", stdout=errors_on_stdout)
         raise SubtitleError(f"subtitle {track.number}: {why}")
+    os.replace(part, out)

@@ -28,6 +28,12 @@ class Paths:
     def socket(self) -> Path:
         return self.run_dir / "daemon.sock"
 
+    @property
+    def open_ports_file(self) -> Path:
+        """The firewall helper's record of what it opened. Next to the configuration, in a
+        folder only root can write: the helper trusts it as much as the configuration."""
+        return self.config_file.parent / "open-ports"
+
     @classmethod
     def under(cls, root: Path) -> Paths:
         default = cls()
