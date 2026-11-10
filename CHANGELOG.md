@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-11-10)
+
+### Features
+
+- Add the firewall helper and close the stream port when the daemon starts
+  ([#7](https://github.com/skj-skj/vpstream/pull/7),
+  [`1584aa2`](https://github.com/skj-skj/vpstream/commit/1584aa2b4581cd915b03514ffc52a172bc2ca487))
+
+
 ## v0.4.0 (2026-11-10)
 
 ### Features
