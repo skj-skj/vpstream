@@ -91,8 +91,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ufw pipx
       - name: Install vpstream for the whole system
         run: |
-          sudo PIPX_HOME=/opt/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
-            /usr/bin/pipx install --python /usr/bin/python3 "$(ls dist/*.whl)[dev]"
+          # The runner's sudo keeps a umask of 0, which would make the install writable by
+          # everyone, and init rightly refuses that. A normal host has 022.
+          wheel="$(ls "$PWD"/dist/*.whl)"
+          sudo sh -c "umask 022 && PIPX_HOME=/opt/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
+            /usr/bin/pipx install --python /usr/bin/python3 '${wheel}[dev]'"
           vpstream --version
       - name: init, helper, restart, crash, uninstall
         run: scripts/ci-service-check.sh
