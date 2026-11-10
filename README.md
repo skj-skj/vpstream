@@ -24,10 +24,40 @@ Status: early development. This release contains only the measuring tools:
 ## Install
 
 ```text
-pipx install "vpstream[dev]"     # the dev extra adds pytest for `vpstream selftest`
+sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "vpstream[dev]"
 vpstream --version
-vpstream selftest --integration
+vpstream doctor
+sudo vpstream init
 ```
+
+The dev extra adds pytest for `vpstream selftest`. The install is for the whole system and
+owned by root, because the service runs as its own user and its firewall helper runs as root;
+a per-user `pipx install` cannot be used for the service. Upgrade with the same prefix:
+
+```text
+sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade vpstream
+sudo vpstream init               # restarts the service on the new version
+```
+
+## `sudo vpstream init` and `sudo vpstream uninstall`
+
+`init` sets the service up and is safe to run again, for example after an upgrade:
+
+- a service user and group, `vpstream`, with no login and no home
+- `/etc/vpstream/config.toml` (kept if it exists), a state folder and a cache folder
+- a sudoers rule that lets the service user run `vpstream-fw open` and `vpstream-fw close` as
+  root and nothing else; it is checked with `visudo` before and after it is installed
+- a ufw rule that allows the dashboard port on `tailscale0` only
+- the systemd service, enabled and started; it closes the stream port after a stop or a crash
+- the user who ran `sudo` is added to the `vpstream` group, to use `vpstream status` without
+  sudo (log out and in once)
+
+`uninstall` removes what `init` created and nothing else: a user, a group membership or a
+firewall rule that was there before stays. The configuration and state are removed; prepared
+videos are kept unless `--purge` is given. It asks first; `--yes` skips the question.
+
+Neither command ever enables, disables, resets or reloads ufw, or touches any rule other than
+the stream port and the dashboard port.
 
 ## `vpstream doctor`
 
@@ -38,13 +68,8 @@ and where vpstream itself is installed. Each problem comes with the command that
 The exit code is 1 when something required is missing. Nothing is changed and no root is
 needed.
 
-The service runs as its own user, with a small root helper for the firewall, so it needs a
-system-wide install that root owns. A per-user `pipx install` is reported as a problem:
-
-```text
-sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "vpstream[dev]"
-pipx uninstall vpstream          # the per-user copy, if there is one
-```
+A per-user `pipx install` is reported as a problem, with the system-wide install command as
+the fix (see Install); remove the per-user copy afterwards with `pipx uninstall vpstream`.
 
 Settings are read from `/etc/vpstream/config.toml` when it exists: `port` under `[stream]`
 (default 1337) and `port` under `[dashboard]` (default 1338).
