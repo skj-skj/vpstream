@@ -97,6 +97,8 @@ jobs:
           sudo sh -c "umask 022 && PIPX_HOME=/opt/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
             /usr/bin/pipx install --python /usr/bin/python3 '${wheel}[dev]'"
           vpstream --version
+          umask; sudo sh -c umask; namei -l "$(dirname "$(readlink -f /usr/local/bin/vpstream)")"/../lib/python3*/site-packages/vpstream/cli.py || true
+          getfacl -p /opt /opt/vpstream-pipx 2>/dev/null || true
       - name: init, helper, restart, crash, uninstall
         run: scripts/ci-service-check.sh
 
