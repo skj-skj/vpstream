@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.1 (2026-11-10)
+
+### Bug Fixes
+
+- Install fallback fonts for burned-in subtitles ([#4](https://github.com/skj-skj/vpstream/pull/4),
+  [`edc367d`](https://github.com/skj-skj/vpstream/commit/edc367d79ac70e990145162921282a691d33cabd))
+
+
 ## v0.2.0 (2026-11-09)
 
 ### Features
