@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.9.1 (2026-11-11)
+
+### Bug Fixes
+
+- Name the init segment of a burned-in version, so browsers can load it
+  ([#17](https://github.com/skj-skj/vpstream/pull/17),
+  [`c952b74`](https://github.com/skj-skj/vpstream/commit/c952b74e5512a5f1e6158bc33619ce69074239fb))
+
+
 ## v0.9.0 (2026-11-11)
 
 ### Features
