@@ -6,8 +6,8 @@ and every close. The kernel knows what each connection really delivered, so it i
 once a second with `ss` (no root needed). What a connection sends after the last look before
 it closes is missed there: at most a second of its speed. A connection that opened and closed
 between two looks is never seen at all. In both cases the access log fills in what it can,
-matched by the viewer's port. Where `ss` cannot be used (Termux), the access log is all there is, and Caddy
-versions that count a cut-off transfer correctly make that enough.
+matched by the viewer's port. Where `ss` cannot be used (Termux), the access log is all
+there is, and Caddy versions that count a cut-off transfer correctly make that enough.
 """
 
 from __future__ import annotations
