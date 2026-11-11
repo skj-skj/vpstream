@@ -398,3 +398,47 @@ def test_a_video_being_prepared_says_to_try_again(control: Control, tmp_path: Pa
         assert "X-Vpstream-File" not in answer.headers
     finally:
         control.stop()
+
+
+# --- the dashboard keeps doing what it did (found while redesigning it)
+
+
+def test_the_dashboard_uses_every_route_the_api_offers(dash: FlaskClient) -> None:
+    import re
+
+    script = dash.get("/assets/dashboard.js").get_data(as_text=True)
+    rules = [rule.rule for rule in dash.application.url_map.iter_rules()]
+    routes = {rule.removeprefix(api.API + "/") for rule in rules if rule.startswith(api.API)}
+    used = set(re.findall(r'(?:change|request)\((?:"(?:GET|POST)", )?"([a-z/]+)"', script))
+    assert routes and routes <= used, routes - used
+
+
+def test_every_element_the_dashboard_script_looks_up_is_on_the_page(dash: FlaskClient) -> None:
+    import re
+
+    script = dash.get("/assets/dashboard.js").get_data(as_text=True)
+    page = dash.get("/").get_data(as_text=True)
+    ids = set(re.findall(r'\$\("([A-Za-z]+)"\)', script))
+    missing = [i for i in sorted(ids) if f'id="{i}"' not in page]
+    assert len(ids) > 30 and missing == []
+
+
+def test_the_dashboard_behaves(dash: FlaskClient) -> None:
+    """The real page and script in node with a small DOM of their own (dashboard_test.js):
+    what they show for a status, and what each button and form sends."""
+    import shutil
+    import subprocess
+    from importlib import resources
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    assets = resources.files("vpstream.assets")
+    harness = Path(__file__).with_name("dashboard_test.js")
+    page, script = (str(assets.joinpath(name)) for name in ("dashboard.html", "dashboard.js"))
+    res = subprocess.run(
+        [node, str(harness), page, script], capture_output=True, text=True, timeout=60, check=False
+    )
+    lines = res.stdout.splitlines()
+    assert res.returncode == 0 and len(lines) >= 15, res.stdout + res.stderr
+    assert all(line.startswith("pass ") for line in lines), res.stdout
