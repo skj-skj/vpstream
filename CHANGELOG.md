@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.8.4 (2026-11-11)
+
+### Bug Fixes
+
+- Serve MKV files with a full seek index, so VLC resumes them quickly
+  ([#15](https://github.com/skj-skj/vpstream/pull/15),
+  [`3749019`](https://github.com/skj-skj/vpstream/commit/3749019b7316f31b0a596ed7a4b81f39e1894183))
+
+
 ## v0.8.3 (2026-11-11)
 
 ### Bug Fixes
