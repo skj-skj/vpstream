@@ -218,3 +218,44 @@ def test_take_moves_a_folder_aside_in_one_step(tmp_path: Path, entry: Path) -> N
     assert prepared.entries(tmp_path / "cache") == []  # never listed as half there
     assert prepared.take(entry) == entry  # gone already: nothing to move
     assert prepared.sweep(tmp_path / "cache") == 1 and not trash.exists()  # a cut-off remove
+
+
+def test_playlist_uris() -> None:
+    text = '#EXTM3U\n#EXT-X-MAP:URI="video_init.mp4"\n#EXTINF:6,\nvideo_00000.m4s\n\n' \
+           '#EXT-X-MEDIA:TYPE=AUDIO,URI="../../base/a1.m3u8"\n'  # fmt: skip
+    assert prepared.playlist_uris(text) == [
+        "video_init.mp4",
+        "video_00000.m4s",
+        "../../base/a1.m3u8",
+    ]
+
+
+def test_a_version_naming_a_file_a_viewer_cannot_fetch_is_not_whole(entry: Path) -> None:
+    part = entry / "burn" / "2.part"
+    part.mkdir(parents=True)
+    (part / "video_00000.m4s").write_bytes(b"x")
+    (part / "%v_init.mp4").write_bytes(b"x")  # what ffmpeg wrote for a video alone
+    (part / "video.m3u8").write_text(
+        '#EXT-X-MAP:URI="%v_init.mp4"\nvideo_00000.m4s\nvideo_00001.m4s\n'
+    )
+    (part / "master.m3u8").write_text(
+        '#EXT-X-MEDIA:TYPE=AUDIO,URI="../../base/a1.m3u8"\n#EXT-X-MEDIA:TYPE=AUDIO,URI="../../base/master.m3u8"\n'
+        "video.m3u8\n../../../x/video.m3u8\n"
+    )  # fmt: skip
+    problems = prepared.playlist_problems(entry, part, "burn/2")
+    assert problems == [
+        "master.m3u8 names '../../base/a1.m3u8', which is not there",
+        "master.m3u8 names '../../../x/video.m3u8', which cannot be served",
+        "video.m3u8 names '%v_init.mp4', which cannot be served",
+        "video.m3u8 names 'video_00001.m4s', which is not there",
+    ]
+
+
+def test_a_whole_version_has_no_problems(entry: Path) -> None:
+    part = entry / "base.part"
+    part.mkdir()
+    for name in ("video_init.mp4", "video_00000.m4s"):
+        (part / name).write_bytes(b"x")
+    (part / "video.m3u8").write_text('#EXT-X-MAP:URI="video_init.mp4"\nvideo_00000.m4s\n')
+    (part / "master.m3u8").write_text("#EXTM3U\nvideo.m3u8\n")
+    assert prepared.playlist_problems(entry, part, "base") == []

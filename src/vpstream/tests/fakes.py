@@ -178,8 +178,14 @@ if out.suffix == ".vtt":
     sys.exit(0)
 folder = out.parent
 names = [p.split("name:")[1].split(",")[0] for p in args[args.index("-var_stream_map") + 1].split()]
+init = args[args.index("-hls_fmp4_init_filename") + 1]
 for name in names:
-    (folder / f"{{name}}.m3u8").write_text("#EXTM3U\\n")
+    # As the real one: %v in the init segment's name is filled in only for two or more.
+    own = init.replace("%v", name) if len(names) > 1 else init
+    (folder / own).write_bytes(b"init")
+    (folder / f"{{name}}.m3u8").write_text(
+        f'#EXTM3U\\n#EXT-X-MAP:URI="{{own}}"\\n#EXTINF:6.0,\\n{{name}}_00000.m4s\\n'
+    )
     (folder / f"{{name}}_00000.m4s").write_bytes(b"seg")
 audio = [n for n in names if n != "video"]
 media = "".join(

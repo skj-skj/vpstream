@@ -301,6 +301,27 @@ def _wait_prepared(live: Live, timeout: float = 120) -> list[dict[str, Any]]:
 HTML = {"Accept": "text/html"}
 
 
+def _fetch_all(live: Live, url: str) -> set[str]:
+    """Fetch a playlist and, as a player does, every file it names; fail on any that does
+    not come. Returns every address fetched."""
+    from urllib.parse import urljoin
+
+    from vpstream.prepared import playlist_uris
+
+    seen: set[str] = set()
+    todo = [url]
+    while todo:
+        target = todo.pop()
+        if target in seen:
+            continue
+        seen.add(target)
+        status, _, body = live.get(target)
+        assert status == 200, (target, status)
+        if target.endswith(".m3u8"):
+            todo += [urljoin(target, uri) for uri in playlist_uris(body.decode())]
+    return seen
+
+
 def test_a_prepared_video_plays_through_caddy(live: Live, sample: Path) -> None:
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg is not installed on this host")
@@ -337,6 +358,12 @@ def test_a_prepared_video_plays_through_caddy(live: Live, sample: Path) -> None:
     assert status == 200 and headers["content-type"].startswith("text/vtt") and b"Hello" in body
     status, _, body = live.get("/aaa/1/hls/burn/2/master.m3u8")
     assert status == 200 and b'URI="../../base/a1.m3u8"' in body
+    # Every file each playlist names, as a browser resolves it, through Caddy. (Found on the
+    # TV: the burned-in version named "%v_init.mp4", which only a reader of the disk finds.)
+    for master in ("/aaa/1/hls/base/master.m3u8", "/aaa/1/hls/burn/2/master.m3u8"):
+        fetched = _fetch_all(live, master)
+        assert any(url.endswith("_init.mp4") for url in fetched), fetched
+        assert sum(url.endswith(".m3u8") for url in fetched) >= 4, fetched  # video, a1, a2
     status, headers, body = live.get("/aaa/assets/hls.min.js")
     assert status == 200 and headers["content-type"].startswith("text/javascript") and body
 

@@ -36,14 +36,17 @@
     say("");
     if (window.Hls && window.Hls.isSupported()) {
       var recovered = false;
+      var retries = 0;
       hls = new window.Hls({ enableWorker: true, startPosition: at > 0 ? at : -1 });
+      hls.on(window.Hls.Events.FRAG_LOADED, function () { retries = 0; say(""); });
       hls.on(window.Hls.Events.MANIFEST_PARSED, function () {
         applyAudio();
         if (play) { start(); }
       });
       hls.on(window.Hls.Events.ERROR, function (event, data) {
         if (!data || !data.fatal) { return; }
-        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR && retries < 3) {
+          retries += 1;
           say("The connection dropped; trying again...");
           hls.startLoad();
         } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && !recovered) {

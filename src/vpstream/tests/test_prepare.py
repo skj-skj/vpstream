@@ -360,3 +360,25 @@ def test_the_load_of_a_video_against_1080p_at_24_fps() -> None:
     assert prepare.load_factor(video(3840, 2160, 48)) == 8.0
     assert prepare.load_factor(video(1920, 1080, 24, hdr=True)) == pytest.approx(1 / 0.35)
     assert prepare.load_factor(MediaInfo("", "", 1, 1, None)) == 1.0
+
+
+def test_a_version_whose_playlist_names_a_missing_file_is_not_installed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As before the fix: the burned-in version's playlist named "%v_init.mp4".
+    real = ffargs.rendition_output_args
+    monkeypatch.setattr(
+        ffargs,
+        "rendition_output_args",
+        lambda out, stream_map: [
+            "%v_init.mp4" if a == "video_init.mp4" else a for a in real(out, stream_map)
+        ],
+    )
+    rig.submit("3")
+    rig.preparer.wait()
+    states = rig.states()
+    assert states["base version (copy)"] == "done"
+    assert states["subtitle 3 (burned in)"] == "failed"
+    error = next(j["error"] for j in rig.preparer.status() if j["kind"] == BURN)
+    assert "not whole" in error and "%v_init.mp4" in error
+    assert prepared.versions(rig.entry).burn == []  # nothing a player would choose

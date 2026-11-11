@@ -206,3 +206,14 @@ def test_burn_from_the_start_or_with_text_uses_one_input() -> None:
         "in.mkv", "/out", sub_number=1, image=False, filter_src="/t/s.mkv", window=Window(100)
     )
     assert text.count("-i") == 1  # libass reads the whole file by name
+
+
+def test_a_video_alone_gets_its_init_segment_name_written_out() -> None:
+    # ffmpeg fills in %v of the init name only for two renditions or more: a burned-in
+    # version (video alone) got a playlist naming "%v_init.mp4", which no browser fetches.
+    burn = ffargs.burn_hls("in.mkv", "/o", sub_number=1, image=True, filter_src="")
+    assert _after(burn, "-hls_fmp4_init_filename") == "video_init.mp4"
+    silent = ffargs.base_hls("in.mkv", "/o", copy=True, video_codec="h264")
+    assert _after(silent, "-hls_fmp4_init_filename") == "video_init.mp4"
+    loud = ffargs.base_hls("in.mkv", "/o", copy=True, video_codec="h264", audio=["eng"])
+    assert _after(loud, "-hls_fmp4_init_filename") == "%v_init.mp4"
