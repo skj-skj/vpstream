@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.9.0 (2026-11-11)
+
+### Features
+
+- Browser mode with prepared HLS versions, prepare, ls and track-info
+  ([#16](https://github.com/skj-skj/vpstream/pull/16),
+  [`a0176ae`](https://github.com/skj-skj/vpstream/commit/a0176ae2bc1225fdcc63f5fb7305be10317d6704))
+
+
 ## v0.8.4 (2026-11-11)
 
 ### Bug Fixes
