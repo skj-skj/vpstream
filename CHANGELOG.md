@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.8.1 (2026-11-11)
+
+### Bug Fixes
+
+- Vpstream start gives the service access to the caller's own videos
+  ([#12](https://github.com/skj-skj/vpstream/pull/12),
+  [`47935f5`](https://github.com/skj-skj/vpstream/commit/47935f5f80ebea18cf4da555d5a0424d3620e572))
+
+
 ## v0.8.0 (2026-11-11)
 
 ### Features
