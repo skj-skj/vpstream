@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import collections
 import shutil
 import subprocess
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -120,6 +122,67 @@ def require(runner: Runner, name: str, needed_for: str = "") -> str:
     if not path:
         raise ToolMissing(name, needed_for)
     return path
+
+
+class Cancelled(Exception):
+    """A long job was told to stop before it was done."""
+
+
+POLL_SECONDS = 0.5
+OUTPUT_LINES = 40  # lines of a program's output kept for an error message
+
+
+def run_cancellable(
+    args: Sequence[str],
+    cancel: threading.Event,
+    on_line: Callable[[str], None] | None = None,
+    poll: float = POLL_SECONDS,
+) -> tuple[int, str]:
+    """Run a long program until it ends or `cancel` is set.
+
+    Its output (standard output and errors together) is read line by line as it comes and
+    each line goes to `on_line`. Returns the exit code and the last lines of the output.
+    Raises Cancelled, after the program has ended, when `cancel` was set first.
+    """
+    proc = subprocess.Popen(
+        list(args),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+    )
+    last: collections.deque[str] = collections.deque(maxlen=OUTPUT_LINES)
+
+    def read() -> None:
+        assert proc.stdout is not None
+        failed = False
+        # Read to the end whatever happens: a pipe that is not drained stops the program.
+        for line in proc.stdout:
+            last.append(line.rstrip("\n"))
+            if on_line is not None and not failed:
+                try:
+                    on_line(last[-1])
+                except Exception:  # a broken report must not stop the job it reports on
+                    failed = True
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        while proc.poll() is None:
+            if cancel.wait(poll):
+                proc.terminate()
+                try:
+                    proc.wait(10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise Cancelled
+    finally:
+        reader.join(5)
+        if proc.stdout is not None:
+            proc.stdout.close()
+    return proc.returncode, "\n".join(last)
 
 
 def ffmpeg_names(runner: Runner, what: str) -> set[str]:

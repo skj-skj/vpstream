@@ -78,6 +78,9 @@ jobs:
           grep -q "vpstream/assets/caps.js" files.txt
           grep -q "vpstream/assets/dashboard.html" files.txt
           grep -q "vpstream/assets/dashboard.js" files.txt
+          grep -q "vpstream/assets/player.html" files.txt
+          grep -q "vpstream/assets/player.js" files.txt
+          grep -q "vpstream/assets/vtt.js" files.txt
       - name: Install the wheel and run selftest
         run: |
           python -m venv /tmp/venv

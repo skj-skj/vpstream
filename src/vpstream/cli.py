@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, stream
+from vpstream import __version__, gate, stream, text
 from vpstream.net import url_host
 
 
@@ -138,35 +138,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return doctor.exit_code(checks)
 
 
-def _duration(seconds: float) -> str:
-    """A short human duration: 45s, 3m 12s, 2h 05m, 3d 4h."""
-    total = int(seconds)
-    days, rest = divmod(total, 86400)
-    hours, rest = divmod(rest, 3600)
-    minutes, secs = divmod(rest, 60)
-    if days:
-        return f"{days}d {hours}h"
-    if hours:
-        return f"{hours}h {minutes:02d}m"
-    if minutes:
-        return f"{minutes}m {secs:02d}s"
-    return f"{secs}s"
-
-
 def _dashboard_line(dash: dict[str, Any]) -> str:
     if dash.get("url"):
         return f"{dash['url']} (Tailscale only)"
     if dash.get("address"):
         return f"http://{dash['address']}/ on this host only; {dash.get('problem')}"
     return str(dash.get("problem"))
-
-
-def _size(count: float) -> str:
-    for unit in ("B", "kB", "MB", "GB"):
-        if count < 1000 or unit == "GB":
-            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
-        count /= 1000
-    raise AssertionError("unreachable")
 
 
 def device_state(device: dict[str, Any]) -> str:
@@ -183,33 +160,28 @@ def format_devices(stream: dict[str, Any], now: float) -> str:
     devices = stream.get("devices") or []
     if not devices:
         return "No device has asked for the stream yet."
-    rows = [("ADDRESS", "STATE", "REQUESTS", "BLOCKED", "SENT", "LAST SEEN", "PLAYER")]
+    rows = [["ADDRESS", "STATE", "CODE", "REQUESTS", "BLOCKED", "SENT", "LAST SEEN", "PLAYER"]]
     for d in devices:
         seen = d.get("last_seen") or 0
         rows.append(
-            (
+            [
                 str(d.get("ip")),
                 device_state(d),
+                str(d.get("code") or "-"),
                 str(d.get("requests", 0)),
                 str(d.get("blocked", 0)),
-                _size(float(d.get("bytes") or 0)),
-                f"{_duration(max(0.0, now - seen))} ago" if seen else "never",
+                text.size(float(d.get("bytes") or 0)),
+                f"{text.duration(max(0.0, now - seen))} ago" if seen else "never",
                 str(d.get("user_agent") or "-")[:60],
-            )
+            ]
         )
-    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
-    return "\n".join(
-        "  ".join(
-            [*(cell.ljust(w) for cell, w in zip(row, widths, strict=False)), row[-1]]
-        ).rstrip()
-        for row in rows
-    )
+    return "\n".join(text.table(rows))
 
 
 def format_stream(stream: dict[str, Any]) -> str:
     """The running stream: what it is and the address of every video."""
     left = stream.get("seconds_left")
-    limit = "no time limit" if left is None else f"stops in {_duration(float(left))}"
+    limit = "no time limit" if left is None else f"stops in {text.duration(float(left))}"
     lines = [
         f"Stream:       /{stream.get('alias')} ({stream.get('mode')}, policy "
         f"{stream.get('policy')}, {limit})",
@@ -238,7 +210,78 @@ def format_stream(stream: dict[str, Any]) -> str:
 
 
 def _video_state(video: dict[str, Any]) -> str:
-    return "  [preparing]" if video.get("preparing") else ""
+    job = video.get("job")
+    if job:
+        return "  [queued]" if job.get("state") == "queued" else f"  [{_percent(job)}]"
+    if video.get("preparing"):
+        return "  [preparing]"
+    return "  [not ready]" if video.get("ready") is False else ""
+
+
+def _percent(job: dict[str, Any]) -> str:
+    return f"{100 * float(job.get('progress') or 0):.0f}%"
+
+
+ACTIVE = ("queued", "running")  # prepare.ACTIVE; not imported, to keep the CLI start quick
+KEPT_ACCESS = (
+    "The vpstream service keeps its access to your files while they are prepared; take it "
+    "back when they are done with: vpstream revoke"
+)
+
+
+def format_job(job: dict[str, Any]) -> str:
+    """One prepare job on one line."""
+    state = str(job.get("state"))
+    left = job.get("seconds_left")
+    if state == "running":
+        about = f", about {text.duration(float(left))} left" if left is not None else ""
+        state = f"{_percent(job)}{about}"
+    elif state == "queued" and left is not None:
+        state = f"queued, about {text.duration(float(left))}"
+    line = f"{job.get('name')}: {job.get('task')}: {state}"
+    return f"{line}: {job['error']}" if job.get("error") else line
+
+
+def format_plans(plans: list[dict[str, Any]]) -> str:
+    """What a prepare will make for each video, and about how long it takes."""
+    lines = []
+    for plan in plans:
+        film = text.duration(float(plan.get("duration") or 0))
+        tasks = plan.get("tasks") or []
+        if tasks:
+            took = text.duration(float(plan.get("seconds") or 0))
+            warn = "  (longer than the film)" if plan.get("longer_than_film") else ""
+            lines.append(f"{plan.get('name')} ({film}): about {took}{warn}")
+            lines += [
+                f"  {t.get('task')}: about {text.duration(float(t.get('seconds') or 0))}"
+                for t in tasks
+            ]
+        else:
+            lines.append(f"{plan.get('name')} ({film}): nothing to make")
+        lines += [f"  note: {note}" for note in plan.get("notes") or []]
+    return "\n".join(lines)
+
+
+def format_prepared(rows: list[dict[str, Any]]) -> str:
+    """Every video in the cache: what of it is prepared, and the disk it takes."""
+    if not rows:
+        return "Nothing is prepared."
+    table = [["BASE", "SOFT", "BURNED IN", "SIZE", "SOURCE"]]
+    for row in rows:
+        marks = [m for m, on in (("stale", row.get("stale")), ("in use", row.get("in_use")),
+                                 ("preparing", row.get("busy"))) if on]  # fmt: skip
+        table.append(
+            [
+                str(row.get("base") or "-"),
+                ",".join(map(str, row.get("soft") or [])) or "-",
+                ",".join(map(str, row.get("burn") or [])) or "-",
+                text.size(float(row.get("bytes") or 0)),
+                str(row.get("source") or row.get("key"))
+                + (f"  ({', '.join(marks)})" if marks else ""),
+            ]
+        )
+    total = text.size(sum(float(row.get("bytes") or 0) for row in rows))
+    return "\n".join([*text.table(table), f"{len(rows)} videos, {total} in all"])
 
 
 def format_status(info: dict[str, Any], cli_version: str) -> str:
@@ -247,7 +290,7 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     stream = info.get("stream")
     lines = [
         f"vpstream daemon {info.get('version')}, "
-        f"up {_duration(float(info.get('uptime_seconds') or 0))} (pid {info.get('pid')})",
+        f"up {text.duration(float(info.get('uptime_seconds') or 0))} (pid {info.get('pid')})",
         format_stream(stream) if stream else "Stream:       none",
         f"Stream port:  {info.get('stream_port')} ({info.get('stream_port_state', 'unknown')})",
         "Dashboard:    " + _dashboard_line(dash),
@@ -255,6 +298,11 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     if stream:
         count = len(stream.get("devices") or [])
         lines.append(f"Devices:      {count} (see: vpstream devices)")
+    jobs = [j for j in info.get("prepare") or [] if j.get("state") in ACTIVE]
+    if jobs:
+        lines.append(f"Preparing:    {format_job(jobs[0])}")
+        if len(jobs) > 1:
+            lines.append(f"              and {len(jobs) - 1} more queued (see: vpstream prepared)")
     if info.get("firewall_problem"):
         lines.append(f"WARNING: {info['firewall_problem']}")
     if info.get("version") != cli_version:
@@ -312,59 +360,260 @@ def _show(info: dict[str, Any] | None, devices: bool = False) -> int:
     return 0
 
 
-def _start(kind: str, options: dict[str, Any]) -> dict[str, Any] | None:
-    """Ask for the stream. When the service cannot read the videos, give it access (an ACL
-    entry for its user alone) and ask once more."""
-    from vpstream import access, api, client, config
-    from vpstream.tools import SystemRunner, ToolMissing
+def _idle(info: dict[str, Any] | None) -> bool:
+    """Whether the daemon uses none of the caller's files: no stream and no prepare."""
+    if info is None:
+        return True
+    return not info.get("stream") and not any(
+        j.get("state") in ACTIVE for j in info.get("prepare") or []
+    )
 
-    socket = config.default_paths().socket
+
+def _quietly(route: str) -> dict[str, Any] | None:
+    """Ask the daemon; None when it does not answer, with nothing printed."""
+    from vpstream import client, config
+
     try:
-        if not client.call(socket, "GET", "status").get("stream"):
-            _revoke()  # what a stream that ended by itself left behind
-        try:
-            info: dict[str, Any] = client.call(socket, "POST", "stream/start", options)
-        except client.DaemonRefused as exc:
-            if exc.data.get("code") != api.UNREADABLE:
-                raise
-            user = str(exc.data.get("user"))
-            try:
-                changed = access.grant(SystemRunner(), user, kind, Path(options[kind]))
-            except (access.AccessError, ToolMissing) as problem:
-                _error(f"{exc}\n{problem}")
-                return None
-            if not changed:
-                raise
-            print(
-                f"Gave the vpstream service (user {user}) read access to {changed} of your "
-                "files and folders.",
-                file=sys.stderr,
-            )
-            info = client.call(socket, "POST", "stream/start", options)
-    except (client.DaemonUnavailable, client.DaemonRefused) as exc:
-        _error(str(exc))
+        info: dict[str, Any] = client.call(config.default_paths().socket, "GET", route)
+    except (client.DaemonUnavailable, client.DaemonRefused):
         return None
     return info
 
 
-def cmd_start(args: argparse.Namespace) -> int:
-    options: dict[str, Any] = {"mode": args.mode, "ttl": args.ttl}
+def _status_quietly() -> dict[str, Any] | None:
+    return _quietly("status")
+
+
+def _confirm(question: str, yes: bool) -> bool:
+    """Ask on the terminal; --yes answers for the caller, and without a terminal the answer
+    is no."""
+    if yes:
+        return True
+    if sys.stdin.isatty():
+        return _ask(question)
+    print(question, file=sys.stderr)
+    print("No terminal to answer on; pass --yes to proceed.", file=sys.stderr)
+    return False
+
+
+def _request(
+    route: str, kind: str, options: dict[str, Any], yes: bool = False
+) -> dict[str, Any] | None:
+    """Ask the daemon to start a stream or a prepare of a file or folder. When the service
+    cannot read the videos, give it access (an ACL entry for its user alone) and ask once
+    more; when it would take long, say what and ask whether to go ahead."""
+    from vpstream import access, api, client, config
+    from vpstream.tools import SystemRunner, ToolMissing
+
+    socket = config.default_paths().socket
+    granted = confirmed = False
+    try:
+        if _idle(client.call(socket, "GET", "status")):
+            _revoke()  # what a stream that ended by itself left behind
+        while True:
+            try:
+                info: dict[str, Any] = client.call(socket, "POST", route, options)
+                return info
+            except client.DaemonRefused as exc:
+                code = exc.data.get("code")
+                if code == api.UNREADABLE and not granted:
+                    granted = True
+                    user = str(exc.data.get("user"))
+                    try:
+                        changed = access.grant(SystemRunner(), user, kind, Path(options[kind]))
+                    except (access.AccessError, ToolMissing) as problem:
+                        _error(f"{exc}\n{problem}")
+                        return None
+                    if not changed:
+                        raise
+                    print(
+                        f"Gave the vpstream service (user {user}) read access to {changed} of "
+                        "your files and folders.",
+                        file=sys.stderr,
+                    )
+                elif code == api.CONFIRM and not confirmed:
+                    confirmed = True
+                    print(f"{exc.data.get('error')}\n{format_plans(exc.data.get('plans') or [])}")
+                    if not _confirm("Go ahead?", yes):
+                        print("Cancelled; nothing was changed.")
+                        return None
+                    options = {**options, "confirmed": True}
+                else:
+                    raise
+    except (client.DaemonUnavailable, client.DaemonRefused) as exc:
+        _error(str(exc))
+        return None
+
+
+def _source_options(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
+    """("file" or "dir", options naming its whole path), or None after saying what is wrong."""
     kind, path = ("file", args.file) if args.file is not None else ("dir", args.dir)
     if not path:
-        return _error(f"--{kind} needs a path", 2)
+        _error(f"--{kind} needs a path")
+        return None
     # The daemon runs elsewhere, so it is told the whole path.
-    options[kind] = os.path.abspath(path)
-    for name in ("alias", "policy"):
+    return kind, {kind: os.path.abspath(path)}
+
+
+def _follow(ids: set[int], run: Any) -> int:
+    """Show how the prepare jobs with these ids, of the daemon run `run`, get on until none
+    is queued or running. Fails when one failed, or when jobs were lost: the daemon was
+    restarted, or a job left its list unseen. Ctrl+C stops the showing, not the preparing."""
+    ended: dict[int, str] = {}  # id -> how it ended, as each is seen to end
+    live = sys.stdout.isatty()
+    line = ""
+    lost = ""
+    try:
+        while True:
+            info = _daemon("status")
+            if info is None:
+                return 1
+            if info.get("prepare_run") != run:
+                lost = "the daemon was restarted, and its prepares with it"
+                break
+            jobs = {j["id"]: j for j in info.get("prepare") or [] if j.get("id") in ids}
+            for job in jobs.values():
+                if job.get("state") not in ACTIVE and job["id"] not in ended:
+                    ended[job["id"]] = str(job.get("state"))
+                    print(("\r\x1b[K" if line else "") + format_job(job))
+                    line = ""
+            if not any(j.get("state") in ACTIVE for j in jobs.values()):
+                unseen = ids - set(ended)
+                if unseen:
+                    lost = f"{len(unseen)} prepares ended unseen; see: vpstream prepared"
+                break
+            running = [j for j in jobs.values() if j.get("state") == "running"]
+            if live and running:
+                line = format_job(running[0])
+                print(f"\r\x1b[K... {line}", end="", flush=True)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print(f"\nStill preparing in the background; see: vpstream prepared\n{KEPT_ACCESS}")
+        return 0
+    if lost:
+        _error(lost)
+    if _idle(_status_quietly()):
+        _revoke()
+    return 1 if lost or any(state != "done" for state in ended.values()) else 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    found = _source_options(args)
+    if found is None:
+        return 2
+    kind, options = found
+    options.update(mode=args.mode, ttl=args.ttl)
+    for name in ("alias", "policy", "audio", "sub"):
         if getattr(args, name):
             options[name] = getattr(args, name)
-    info = _start(kind, options)
-    if info is not None and info.get("stream"):
-        dash = info.get("dashboard") or {}
-        print(format_stream(info["stream"]))
-        print("Dashboard:    " + _dashboard_line(dash))
-        print("Stop it with: vpstream stop")
+    info = _request("stream/start", kind, options, args.yes)
+    if info is None or not info.get("stream"):
+        return _show(info) or 1
+    stream = info["stream"]
+    print(format_stream(stream))
+    print("Dashboard:    " + _dashboard_line(info.get("dashboard") or {}))
+    print("Stop it with: vpstream stop")
+    ids = set(info.get("jobs") or [])
+    if ids:
+        print("\nPreparing the videos for browsers; Ctrl+C stops showing it, not preparing:")
+        return _follow(ids, info.get("prepare_run"))
+    return 0
+
+
+def cmd_prepare(args: argparse.Namespace) -> int:
+    found = _source_options(args)
+    if found is None:
+        return 2
+    kind, options = found
+    if args.sub is not None:
+        options["sub"] = args.sub
+    info = _request("prepare", kind, options, args.yes)
+    if info is None:
+        return 1
+    plans = info.get("plans") or []
+    print(format_plans(plans))
+    ids = set(info.get("jobs") or [])
+    if not ids:
+        print("Nothing to make: what was asked for is prepared already or being prepared.")
         return 0
-    return _show(info) or 1
+    if args.no_wait:
+        print(f"Queued; see: vpstream prepared\n{KEPT_ACCESS}")
+        return 0
+    return _follow(ids, info.get("prepare_run"))
+
+
+def cmd_prepared(args: argparse.Namespace) -> int:
+    action = args.action or "list"
+    path = os.path.realpath(args.path) if args.path else None
+    if action == "list":
+        listed = _daemon("prepared")
+        info = _daemon("status")
+        if listed is None or info is None:
+            return 1
+        print(format_prepared(listed.get("prepared") or []))
+        jobs = [j for j in info.get("prepare") or [] if j.get("state") in (*ACTIVE, "failed")]
+        if jobs:
+            print("\nPrepares:")
+            print("\n".join(f"  {format_job(j)}" for j in jobs))
+        return 0
+    if action == "cancel":
+        done = _daemon("prepare/cancel", {"path": path})
+        if done is None:
+            return 1
+        print(f"Cancelled {done.get('cancelled', 0)} prepares.")
+        return 0
+    payload: dict[str, Any] = {"path": path} if path else {"stale": args.stale, "all": args.all}
+    if not path and args.stale == args.all:
+        return _error("give a file or folder, or --stale, or --all", 2)
+    if args.all and not _confirm("Remove every prepared video?", args.yes):
+        print("Cancelled; nothing was changed.")
+        return 1
+    done = _daemon("prepared/rm", payload)
+    if done is None:
+        return 1
+    print(f"Removed the prepared versions of {done.get('removed', 0)} videos.")
+    kept = done.get("kept") or []
+    if kept:
+        print("Kept, in use by the stream or a prepare: " + ", ".join(map(str, kept)))
+    return 0
+
+
+def cmd_ls(args: argparse.Namespace) -> int:
+    from vpstream import config, listing
+    from vpstream.tools import SystemRunner, ToolMissing
+
+    if args.folder:
+        folder = Path(args.folder)
+    else:
+        try:
+            folder = Path(config.load(config.default_paths().config_file).media_folder)
+        except config.ConfigError as exc:
+            return _error(str(exc))
+    if not folder.is_dir():
+        return _error(f"not a folder: {folder}", 2)
+    answer = _quietly("prepared")
+    cache = None
+    if answer is not None:
+        rows = answer.get("prepared") or []
+        cache = {str(row.get("key")): row for row in rows if isinstance(row, dict)}
+    try:
+        found = listing.listing(SystemRunner(), folder, cache)
+    except (OSError, ToolMissing) as exc:
+        return _error(f"cannot list {folder}: {exc}")
+    print(listing.format_listing(found, asked=cache is not None))
+    return 0
+
+
+def cmd_track_info(args: argparse.Namespace) -> int:
+    from vpstream import probe, tracks
+    from vpstream.tools import SystemRunner, ToolMissing
+
+    try:
+        info = probe.probe(SystemRunner(), Path(args.file).resolve())
+    except (probe.ProbeError, ToolMissing, OSError) as exc:
+        return _error(str(exc))
+    print(tracks.format_track_info(info))
+    return 0
 
 
 def _revoke() -> int:
@@ -387,13 +636,19 @@ def cmd_revoke(args: argparse.Namespace) -> int:
         return 1
     if info.get("stream"):
         return _error("a stream is running; stop it first: vpstream stop")
+    if not _idle(info):
+        return _error("videos are being prepared; wait, or cancel: vpstream prepared cancel")
     return _revoke()
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
     info = _daemon("stream/stop", {})
     # Also after "no stream is running": one that ended by itself left its access behind.
-    _revoke()
+    # Not while prepares still read the files: `revoke`, a later stop or start take it back.
+    if _idle(info if info is not None else _status_quietly()):
+        _revoke()
+    else:
+        print(KEPT_ACCESS)
     if info is not None:
         print(f"Stopped. Stream port {info.get('stream_port')}: {info.get('stream_port_state')}")
     return _show(info) if info is None or info.get("firewall_problem") else 0
@@ -485,21 +740,10 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     if args.tmp and not Path(args.tmp).is_dir():
         return _error(f"--tmp folder does not exist: {args.tmp}", 2)
-    if args.yes:
-        confirm = lambda question: True  # noqa: E731
-    elif sys.stdin.isatty():
-        confirm = _ask
-    else:
-
-        def confirm(question: str) -> bool:
-            print(question, file=sys.stderr)
-            print("No terminal to answer on; pass --yes to proceed.", file=sys.stderr)
-            return False
-
     setup = ffmpeg_install.Setup(
         runner=SystemRunner(),
         http=ffmpeg_install.UrlHttp(),
-        confirm=confirm,
+        confirm=lambda question: _confirm(question, args.yes),
         progress=_progress,
         tmp_dir=args.tmp,
     )
@@ -560,9 +804,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop by itself after this many minutes (default 180; 0 = no limit)",
     )
     go.add_argument(
-        "--policy", choices=gate.POLICIES, help="who gets in (default for direct mode: open)"
+        "--policy",
+        choices=gate.POLICIES,
+        help="who gets in (default: open in direct mode, approval in browser mode)",
     )
+    go.add_argument(
+        "--audio",
+        metavar="TRACK",
+        help="browser mode: the audio track to start with (number or language)",
+    )
+    go.add_argument(
+        "--sub",
+        metavar="TRACK",
+        help="browser mode: the prepared subtitles to start with (number, language or off)",
+    )
+    go.add_argument("--yes", action="store_true", help="do not ask before a long transcode")
     go.set_defaults(func=cmd_start)
+
+    pr = sub.add_parser("prepare", help="make the versions browser mode plays, ahead of time")
+    pick = pr.add_mutually_exclusive_group(required=True)
+    pick.add_argument("--file", metavar="PATH", help="the video to prepare")
+    pick.add_argument("--dir", metavar="PATH", help="a folder; every video at its top level")
+    pr.add_argument(
+        "--sub",
+        metavar="TRACKS",
+        help="subtitle tracks: numbers from track-info or language codes, such as 1,3 or eng, "
+        "or none (default: every plain text track, as soft subtitles)",
+    )
+    pr.add_argument("--yes", action="store_true", help="do not ask when it takes long")
+    pr.add_argument("--no-wait", action="store_true", help="queue it and return at once")
+    pr.set_defaults(func=cmd_prepare)
+
+    pd = sub.add_parser("prepared", help="list or remove prepared videos, or cancel prepares")
+    pd.add_argument("action", nargs="?", choices=["list", "rm", "cancel"], help="(default list)")
+    pd.add_argument("path", nargs="?", help="for rm and cancel: a file or a folder")
+    pd.add_argument("--stale", action="store_true", help="rm: those of changed or gone files")
+    pd.add_argument("--all", action="store_true", help="rm: every prepared video")
+    pd.add_argument("--yes", action="store_true", help="rm --all: do not ask first")
+    pd.set_defaults(func=cmd_prepared)
+
+    ls = sub.add_parser("ls", help="list a folder's videos, their tracks and what is prepared")
+    ls.add_argument("folder", nargs="?", help="(default: [media] folder in the configuration)")
+    ls.set_defaults(func=cmd_ls)
+
+    ti = sub.add_parser("track-info", help="list a file's tracks with the numbers --sub takes")
+    ti.add_argument("file")
+    ti.set_defaults(func=cmd_track_info)
     sub.add_parser("stop", help="stop the stream and close its port").set_defaults(func=cmd_stop)
     sub.add_parser(
         "revoke", help="take back the file access `start` gave the service (stop does it too)"
@@ -623,11 +910,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--regen", action="store_true", help="make the test clips again")
     c.set_defaults(func=cmd_caps)
 
-    for name, text in (
+    for name, about in (
         ("install", "install a program vpstream needs (ffmpeg: the newest stable static build)"),
         ("update", "update a program installed by `vpstream install`"),
     ):
-        i = sub.add_parser(name, help=text)
+        i = sub.add_parser(name, help=about)
         i.add_argument("program", choices=["ffmpeg"], help="what to install (ffmpeg)")
         i.add_argument(
             "--yes", action="store_true", help="do not ask before replacing an existing ffmpeg"

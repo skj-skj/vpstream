@@ -121,7 +121,12 @@ def test_a_folder_that_cannot_be_listed_is_unreadable(show: Path) -> None:
 @pytest.mark.parametrize(
     ("options", "message"),
     [
-        ({"mode": "browser"}, "not a mode"),
+        ({"mode": "tv"}, "not a mode"),
+        ({"audio": "eng"}, "for browser mode"),
+        ({"sub": "1"}, "for browser mode"),
+        ({"mode": "browser", "sub": "1,2"}, "sub: give one track"),
+        ({"mode": "browser", "audio": "english"}, "audio: not a track number"),
+        ({"mode": "browser", "audio": 2}, "audio: not a track choice"),
         ({"policy": "everyone"}, "not a policy"),
         ({"alias": "caps"}, "reserved"),
         ({"alias": "a/b"}, "not a usable alias"),
@@ -269,6 +274,7 @@ def test_describe(show: Path) -> None:
         "number": 3,
         "name": "e10.mkv",
         "url": "http://192.0.2.9:1337/aaa/3",
+        "ready": True,
         "preparing": False,
         "note": None,
     }

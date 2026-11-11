@@ -49,8 +49,17 @@
         autocomplete="off" spellcheck="false"></label>
       <label>Stop after <input id="ttl" class="short" type="number" min="0" step="any"
         value="180" required> minutes (0 = no limit)</label>
-      <label>Policy <select id="policy"><option value="open">open: everyone</option>
+      <label>Mode <select id="mode"><option value="direct">direct: the file as it is, for VLC
+        and other players</option><option value="browser">browser: a player page for TV
+        browsers (prepared versions)</option></select></label>
+      <label>Policy <select id="policy"><option value="">the mode's default</option>
+        <option value="open">open: everyone</option>
         <option value="approval">approval: only devices you approve</option></select></label>
+      <label class="browser">Audio <input id="audio" class="short" type="text"
+        placeholder="default" autocomplete="off" spellcheck="false"></label>
+      <label class="browser">Subtitles <input id="sub" class="short" type="text"
+        placeholder="off" autocomplete="off" spellcheck="false"> (a number or language,
+        prepared already)</label>
       <button type="submit">Start</button>
     </form>
   </section>
@@ -72,6 +81,31 @@
       <span id="policytext" class="muted"></span>
     </p>
     <div class="scroll"><table id="devices"></table></div>
+  </section>
+
+  <section id="prepare">
+    <h2>Prepare for browsers</h2>
+    <form id="prepareform">
+      <label>
+        <select id="pkind"><option value="file">One video</option>
+          <option value="dir">A folder of videos</option></select>
+        <input id="ppath" type="text" placeholder="/full/path/on/the/server" required
+          autocomplete="off" spellcheck="false">
+      </label>
+      <label>Subtitles <input id="psub" class="short" type="text" placeholder="text tracks"
+        autocomplete="off" spellcheck="false"> (numbers from track-info, languages such as
+        eng, or none)</label>
+      <button type="submit">Show the plan</button>
+    </form>
+    <div id="plan" hidden>
+      <div class="scroll"><table id="plantable"></table></div>
+      <p><button id="queue">Prepare it</button> <button id="dropplan">Never mind</button></p>
+    </div>
+    <div class="scroll"><table id="jobs"></table></div>
+    <h2>Prepared videos</h2>
+    <p><button id="reload">Show the prepared videos</button>
+      <button id="rmstale" class="danger">Remove the stale ones</button></p>
+    <div class="scroll"><table id="cache"></table></div>
   </section>
 </main>
 <script src="/assets/dashboard.js"></script>

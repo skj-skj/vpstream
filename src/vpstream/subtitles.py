@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
-from vpstream.ffargs import base_args
+from vpstream import probe
+from vpstream.ffargs import base_args, escape_filter_path
 from vpstream.probe import MKVEXTRACT, SubtitleTrack
 from vpstream.tools import Runner, require, tail
 
@@ -72,7 +74,7 @@ def extract_webvtt(runner: Runner, src: str, track: SubtitleTrack, out: Path) ->
     Raises ValueError for a track that cannot be soft, ToolMissing when the reader is not
     installed, and SubtitleError when extraction fails.
     """
-    if track.treatment != "soft":
+    if track.treatment != probe.SOFT:
         raise ValueError(f"subtitle {track.number} ({track.codec or 'unknown'}) cannot be soft")
     needed = f"subtitle {track.number} ({track.codec})"
     # Written under another name and renamed when complete, so `out` is never half a file.
@@ -99,3 +101,50 @@ def extract_webvtt(runner: Runner, src: str, track: SubtitleTrack, out: Path) ->
         why = tail(res, default="no file written", stdout=errors_on_stdout)
         raise SubtitleError(f"subtitle {track.number}: {why}")
     os.replace(part, out)
+
+
+def filter_source(work: Path, path: Path) -> Path:
+    """Link the source to a plain name in `work`, because ffmpeg's subtitles filter reads
+    the file by a name that goes into the filter graph (see `ffargs.escape_filter_path`).
+
+    Raises ValueError or OSError when `work` cannot be used for this.
+    """
+    link = work / ("source" + path.suffix.lower())
+    if not re.fullmatch(r"\.[a-z0-9]+", link.suffix):
+        link = work / "source"
+    escape_filter_path(link)
+    link.unlink(missing_ok=True)
+    os.symlink(path.resolve(), link)
+    return link
+
+
+_CUE_TIME = re.compile(r"(?:(\d+):)?([0-5]\d):([0-5]\d)\.(\d{3})")
+
+
+def _vtt_time(seconds: float) -> str:
+    ms = max(0, round(seconds * 1000))
+    h, rest = divmod(ms, 3_600_000)
+    m, rest = divmod(rest, 60_000)
+    s, ms = divmod(rest, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def shift_webvtt(text: str, seconds: float) -> str:
+    """WebVTT with every cue `seconds` earlier (a cue cannot start before 0). Only cue timing
+    lines change. Pure, so it is unit tested."""
+
+    def shift(m: re.Match[str]) -> str:
+        h, mm, ss, ms = (int(g or 0) for g in m.groups())
+        return _vtt_time(h * 3600 + mm * 60 + ss + ms / 1000 - seconds)
+
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        start, arrow, rest = line.partition("-->")
+        if arrow and _CUE_TIME.fullmatch(start.strip()):
+            end, space, settings = rest.strip().partition(" ")
+            if _CUE_TIME.fullmatch(end):
+                lines[i] = (
+                    f"{_CUE_TIME.sub(shift, start.strip())} --> {_CUE_TIME.sub(shift, end)}"
+                    f"{space}{settings}"
+                )
+    return "\n".join(lines)

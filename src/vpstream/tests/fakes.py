@@ -159,3 +159,87 @@ class FakeMkvmerge(SystemRunner):
         if not args or args[0] != "mkvmerge":
             return Result(127, "", f"{args[0] if args else ''}: not here")
         return super().run([str(self.program), *args[1:]], timeout=timeout)
+
+
+FAKE_FFMPEG = """\
+#!{python}
+import json, sys, time
+from pathlib import Path
+here = Path(sys.argv[0])
+mode = Path(str(here) + ".mode").read_text().strip()
+args = sys.argv[1:]
+Path(str(here) + ".calls").open("a").write(json.dumps(args) + "\\n")
+if mode == "fail":
+    print("Error while decoding stream #0:0: Invalid data found", file=sys.stderr)
+    sys.exit(1)
+out = Path(args[-1])
+if out.suffix == ".vtt":
+    out.write_text("WEBVTT\\n\\n00:00:01.000 --> 00:00:02.000\\nHello\\n")
+    sys.exit(0)
+folder = out.parent
+names = [p.split("name:")[1].split(",")[0] for p in args[args.index("-var_stream_map") + 1].split()]
+for name in names:
+    (folder / f"{{name}}.m3u8").write_text("#EXTM3U\\n")
+    (folder / f"{{name}}_00000.m4s").write_bytes(b"seg")
+audio = [n for n in names if n != "video"]
+media = "".join(
+    f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="group_aud",NAME="audio_{{i}}",URI="{{n}}.m3u8"\\n'
+    for i, n in enumerate(audio)
+)
+group = ',AUDIO="group_aud"' if audio else ""
+codecs = "avc1.640028,mp4a.40.2" if audio else "avc1.640028"
+(folder / "master.m3u8").write_text(
+    f"#EXTM3U\\n#EXT-X-VERSION:7\\n{{media}}"
+    f'#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=320x180,CODECS="{{codecs}}"{{group}}\\nvideo.m3u8\\n'
+)
+for step in range(1, 4):
+    print(f"out_time_us={{step * 1000000}}", flush=True)
+    if mode == "slow":
+        time.sleep(30)
+print("progress=end")
+"""
+
+
+class FakeFfmpeg(SystemRunner):
+    """A host whose ffmpeg is a stand-in script and whose ffprobe answers `probe` (JSON).
+    `mode` is "ok", "slow" (hangs after the first progress line) or "fail". It writes the
+    playlists a prepare looks for, and a WebVTT file for a subtitle extraction."""
+
+    def __init__(self, folder: Path, probe: dict[str, Any], mode: str = "ok") -> None:
+        import json
+        import sys
+
+        self.program = folder / "ffmpeg"
+        self.program.write_text(FAKE_FFMPEG.format(python=sys.executable))
+        self.program.chmod(0o755)
+        self.mode = mode
+        self.probe_json = json.dumps(probe)
+        self.filters = "subtitles zscale tonemap overlay"
+
+    @property
+    def mode(self) -> str:
+        return Path(f"{self.program}.mode").read_text()
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        Path(f"{self.program}.mode").write_text(value)
+
+    def calls(self) -> list[list[str]]:
+        import json
+
+        record = Path(f"{self.program}.calls")
+        lines = record.read_text().splitlines() if record.exists() else []
+        return [json.loads(line) for line in lines]
+
+    def which(self, name: str) -> str | None:
+        return str(self.program) if name in ("ffmpeg", "ffprobe") else None
+
+    def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result:
+        if args[0] == "ffprobe":
+            return Result(0, self.probe_json, "")
+        if args[0] == "ffmpeg" and "-filters" in args:
+            lines = "".join(f" T.. {name}  V->V  x\n" for name in self.filters.split())
+            return Result(0, lines, "")
+        if args[0] == "ffmpeg":
+            return super().run([str(self.program), *args[1:]], timeout=timeout)
+        return Result(127, "", f"{args[0]}: not here")

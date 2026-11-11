@@ -4,6 +4,7 @@ host, no firewall helper. Nothing outside the temporary folder is touched."""
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import shutil
 import socket
@@ -282,3 +283,96 @@ def test_an_mkv_without_audio_in_its_index_is_sent_with_a_full_one(
     assert live.api("status")["stream"]["videos"][0]["preparing"] is False
     copies = list((live.paths.cache_dir / "index").iterdir())
     assert len(copies) == 1 and copies[0].read_bytes() == body
+
+
+# --- browser mode: prepared HLS versions through the real ffmpeg and Caddy
+
+
+def _wait_prepared(live: Live, timeout: float = 120) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        jobs = live.api("status")["prepare"]
+        if not any(j["state"] in ("queued", "running") for j in jobs):
+            return list(jobs)
+        time.sleep(0.2)
+    raise AssertionError("the prepare did not finish")
+
+
+HTML = {"Accept": "text/html"}
+
+
+def test_a_prepared_video_plays_through_caddy(live: Live, sample: Path) -> None:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed on this host")
+    answer = live.api("prepare", {"file": str(sample), "sub": "1,2", "confirmed": True})
+    assert [t["task"] for t in answer["plans"][0]["tasks"]] == [
+        "base version (copy)",
+        "subtitle 1 (soft)",
+        "subtitle 2 (burned in)",
+    ]
+    jobs = _wait_prepared(live)
+    assert {j["state"] for j in jobs} == {"done"}, jobs
+
+    live.api("stream/start", {"file": str(sample), "alias": "aaa", "mode": "browser",
+                              "policy": "open", "sub": "1"})  # fmt: skip
+    status, headers, body = live.get("/aaa", headers=HTML)
+    assert status == 200 and headers["content-type"].startswith("text/html")
+    page = body.decode()
+    settings = json.loads(page.split('type="application/json">')[1].split("</script>")[0])
+    assert [a["label"] for a in settings["audio"]] == ["English", "Japanese"]
+    assert [(s["number"], s["kind"]) for s in settings["subs"]] == [(1, "soft"), (2, "burn")]
+    assert settings["start_sub"] == 0 and settings["subs"][1]["url"].endswith("burn/2/master.m3u8")
+
+    # A player that is not a browser is sent to the playlist, which Caddy follows to files.
+    status, headers, _ = live.get("/aaa")
+    assert status == 302 and headers["location"] == "/aaa/1/hls/base/master.m3u8"
+    status, headers, body = live.get("/aaa/1/hls/base/master.m3u8")
+    assert status == 200 and headers["content-type"] == "application/vnd.apple.mpegurl"
+    assert b'URI="a1.m3u8"' in body and b'URI="a2.m3u8"' in body
+    status, _, body = live.get("/aaa/1/hls/base/video.m3u8")
+    segment = next(line for line in body.decode().splitlines() if line.endswith(".m4s"))
+    status, headers, part = live.get(f"/aaa/1/hls/base/{segment}", headers={"Range": "bytes=0-99"})
+    assert status == 206 and len(part) == 100 and headers["content-type"] == "video/iso.segment"
+    status, headers, body = live.get("/aaa/1/hls/subs/1.vtt")
+    assert status == 200 and headers["content-type"].startswith("text/vtt") and b"Hello" in body
+    status, _, body = live.get("/aaa/1/hls/burn/2/master.m3u8")
+    assert status == 200 and b'URI="../../base/a1.m3u8"' in body
+    status, headers, body = live.get("/aaa/assets/hls.min.js")
+    assert status == 200 and headers["content-type"].startswith("text/javascript") and body
+
+    # Only the files of the versions: not the record of the source, nothing outside.
+    for target in (
+        "/aaa/1/hls/meta.json",
+        "/aaa/1/hls/base/../meta.json",
+        "/aaa/1/hls/base",
+        "/aaa/1/hls/subs/1.vtt/x",
+        "/aaa/assets/dashboard.js",
+        "/aaa/2/hls/base/master.m3u8",
+    ):
+        assert live.get(target)[0] == 404, target
+
+
+def test_a_browser_stream_makes_its_copy_and_says_so_meanwhile(
+    live: Live, sample: Path, tmp_path: Path
+) -> None:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed on this host")
+    film = tmp_path / "copy of sample.mkv"
+    shutil.copy(sample, film)
+    info = live.api("stream/start", {"file": str(film), "alias": "aaa", "mode": "browser"})
+    assert info["stream"]["policy"] == "approval"
+    # Approval mode: a browser waits with a code, which the dashboard shows.
+    status, _, body = live.get("/aaa", headers=HTML)
+    code = live.api("status")["stream"]["devices"][0]["code"]
+    assert status == 403 and code.encode() in body
+    live.api("devices", {"ip": "127.0.0.1", "allowed": True})
+    status, _, body = live.get("/aaa", headers=HTML)
+    assert status in (200, 503)  # done already on a fast host
+    jobs = _wait_prepared(live)
+    assert {j["task"] for j in jobs} == {"base version (copy)", "subtitle 1 (soft)"}
+    assert live.get("/aaa", headers=HTML)[0] == 200
+    listed = live.api("prepared")["prepared"]
+    assert [(e["source"], e["in_use"]) for e in listed if e["source"] == str(film)] == [
+        (str(film), True)
+    ]
+    assert live.api("prepared/rm", {"path": str(film)})["kept"] == [str(film)]

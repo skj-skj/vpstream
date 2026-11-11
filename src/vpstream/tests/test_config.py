@@ -79,3 +79,21 @@ def test_paths_for_caddy_live_under_the_root(tmp_path: Path) -> None:
     paths = config.Paths.under(tmp_path)
     assert paths.gate_socket == tmp_path / "run/vpstream/gate.sock"
     assert paths.access_log == tmp_path / "var/lib/vpstream/caddy/access.log"
+
+
+def test_prepare_speeds_from_bench() -> None:
+    cfg = config.parse("[prepare]\ncopy_speed = 14.5\nencode_speed = 2\n")
+    assert (cfg.copy_speed, cfg.encode_speed) == (14.5, 2)
+    assert (config.Config().copy_speed, config.Config().encode_speed) == (11.0, 1.6)
+    for bad in ("0", "-1", "true", '"fast"', "5000"):
+        with pytest.raises(config.ConfigError, match="times real time"):
+            config.parse(f"[prepare]\nencode_speed = {bad}\n")
+    assert config.parse(config.DEFAULT_TEXT) == config.Config()
+
+
+def test_media_folder() -> None:
+    assert config.Config().media_folder == "/srv/media"
+    assert config.parse('[media]\nfolder = "/data/films"\n').media_folder == "/data/films"
+    for bad in ('"films"', "3", '""'):
+        with pytest.raises(config.ConfigError, match="full path"):
+            config.parse(f"[media]\nfolder = {bad}\n")

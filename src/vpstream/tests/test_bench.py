@@ -108,12 +108,6 @@ def test_low_priority_prefix_when_available(tmp_path: Path) -> None:
     assert encodes and all(c[:6] == ["nice", "-n", "19", "ionice", "-c", "3"] for c in encodes)
 
 
-def test_fmt_duration() -> None:
-    assert bench.fmt_duration(7380) == "2h 03m"
-    assert bench.fmt_duration(95) == "1m 35s"
-    assert bench.fmt_duration(7) == "7s"
-
-
 def test_burn_in_is_skipped_when_the_tmp_folder_is_unusable(tmp_path: Path) -> None:
     tmp = tmp_path / "my disk"
     tmp.mkdir()
@@ -140,16 +134,6 @@ def test_burn_in_is_skipped_when_links_fail(
     assert report.steps[-1].skipped and "links not allowed" in report.steps[-1].note
 
 
-def test_filter_source_keeps_only_plain_suffixes(tmp_path: Path) -> None:
-    for name, linked in (("a.MKV", "source.mkv"), ("a.mkvé", "source"), ("noext", "source")):
-        src = tmp_path / name
-        src.write_bytes(b"x")
-        work = tmp_path / f"work-{linked}-{len(name)}"
-        work.mkdir()
-        link = bench.filter_source(work, src)
-        assert link.name == linked and link.is_symlink() and link.resolve() == src.resolve()
-
-
 @pytest.mark.parametrize("name", ["-dash.mkv", "a:b.mkv"])
 def test_ffmpeg_is_given_an_absolute_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
@@ -163,3 +147,26 @@ def test_ffmpeg_is_given_an_absolute_path(
     assert inputs and set(inputs) == {str(tmp_path.resolve() / name)}
     assert r.calls[0][-1] == str(tmp_path.resolve() / name)  # ffprobe
     assert report.file == name  # shown as it was given
+
+
+def _report(steps: list[bench.StepResult], load: float = 1.0) -> bench.BenchReport:
+    return bench.BenchReport("f.mkv", 600.0, 1, "v", 0.0, 60.0, {}, steps, load)
+
+
+def step(name: str, speed: float, ok: bool = True) -> bench.StepResult:
+    return bench.StepResult(name, ok, media_seconds=60.0 * speed, wall_seconds=60.0)
+
+
+def test_bench_says_what_prepare_should_expect_of_this_host() -> None:
+    # A 4K file (4x 1080p): its veryfast encode at 0.5x is 2x for 1080p at 24 fps.
+    steps = [step("copy", 14.0), step("transcode veryfast", 0.5)]
+    steps += [step("transcode medium", 0.2), step("burn-in veryfast", 0.4)]
+    r = _report(steps, load=4.0)
+    assert bench.speeds(r) == {"copy_speed": 14.0, "encode_speed": 2.0}
+    text = bench.format_report(r)
+    assert "[prepare]\n  copy_speed = 14\n  encode_speed = 2" in text
+
+
+def test_bench_suggests_only_what_it_measured() -> None:
+    r = _report([step("copy", 14.0, ok=False), step("transcode medium", 0.5)])
+    assert bench.speeds(r) == {} and "[prepare]" not in bench.format_report(r)

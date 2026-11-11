@@ -10,11 +10,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import mkv, net, reindex, state
+from vpstream import mkv, net, prepare, prepared, reindex, state, text, tracks
 from vpstream.caddy import CaddyError, Server, link_video, link_videos, unlink_videos
 from vpstream.config import Config, Paths
+from vpstream.files import under
 from vpstream.firewall import Firewall, FirewallError
-from vpstream.stream import MISSING, Answer, Stream, StreamError, check_alias
+from vpstream.media import shown
+from vpstream.stream import (
+    BROWSER,
+    DIRECT,
+    MISSING,
+    Answer,
+    NeedsConfirm,
+    Stream,
+    StreamError,
+    check_alias,
+    check_choice,
+    source_of,
+    videos_of,
+)
 from vpstream.tools import NO_PROGRAMS, Runner, ToolMissing
 from vpstream.traffic import Traffic
 
@@ -51,7 +65,8 @@ class Control:
     # stream record is read or changed.
     _op: threading.RLock = field(default_factory=threading.RLock)
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    runner: Runner | None = None  # for `ss`; without one, the access log alone counts bytes
+    runner: Runner | None = None  # for `ss`, mkvmerge and ffprobe
+    preparer: prepare.Preparer | None = None  # makes the versions browser mode plays
     _traffic: Traffic | None = None
     _indexer: threading.Thread | None = None
     _cancel: threading.Event = field(default_factory=threading.Event)
@@ -95,11 +110,12 @@ class Control:
         that asks the gate. Called with `_op` held; viewers get a 404 until it is done."""
         if self.server is None:
             raise ControlError("this daemon has no public server to start")
+        if stream.mode == BROWSER:
+            links: list[str | None] = list(stream.entries)  # folders; Caddy sends files in them
+        else:
+            links = [None if n in stream.indexing else v for n, v in enumerate(stream.served, 1)]
         try:
-            link_videos(
-                self.paths.videos_dir,
-                [None if n in stream.indexing else v for n, v in enumerate(stream.served, 1)],
-            )
+            link_videos(self.paths.videos_dir, links)
             self.server.start()
         except (CaddyError, ToolMissing, OSError) as exc:
             unlink_videos(self.paths.videos_dir)
@@ -148,7 +164,7 @@ class Control:
 
     def _end(self, why: str) -> None:
         """Forget the stream and its approvals, so the gate refuses at once; then close the
-        port and stop Caddy. Called with `_op` held."""
+        port and stop Caddy. Called with `_op` held. Prepares go on: what they make is kept."""
         self._stop_indexing()
         self._undo()
         port = self.config.stream_port
@@ -264,21 +280,26 @@ class Control:
         if stream.expires is not None and stream.expires <= self.clock():
             self.log("the recorded stream's time limit is over; it is not started again")
             return False
-        self._plan_index(stream, sorted(stream.indexing))
+        if stream.mode == DIRECT:
+            self._plan_index(stream, sorted(stream.indexing))
         try:
+            plans = self._resumed_plans(stream)
             self._serve(stream)
-        except ControlError as exc:
+        except (ControlError, StreamError) as exc:
             self.log(f"WARNING: the recorded stream could not be started again: {exc}")
             return False
+        self._submit(plans)
         self._start_indexing(stream)
         self.log(f"the stream /{stream.alias} is running again after a restart of the daemon")
         return True
 
     def shutdown(self) -> None:
-        """The daemon is told to stop: the stream stops with it."""
+        """The daemon is told to stop: the stream and the prepares stop with it."""
         with self._op:
             if self.stream is not None:
                 self._end("the daemon is stopping")
+        if self.preparer is not None:
+            self.preparer.shutdown()
 
     def tick(self) -> None:
         """Called every second or so: count the bytes sent, and stop the stream when its
@@ -311,11 +332,16 @@ class Control:
                     f"a stream is already running (/{self.stream.alias}); stop it first"
                 )
             stream = Stream.create(options, self.clock())
-            self._plan_index(stream, range(1, len(stream.videos) + 1))
+            plans: list[prepare.VideoPlan] = []
+            if stream.mode == BROWSER:
+                plans = self._browser(stream, options.get("confirmed") is True)
+            else:
+                self._plan_index(stream, range(1, len(stream.videos) + 1))
             self._serve(stream)
             self.log(f"stream /{stream.alias} started: {stream.source} ({stream.policy})")
+            jobs = self._submit(plans)
             self._start_indexing(stream)
-            return self.status()
+            return {**self.status(), "jobs": jobs}
 
     def stop(self) -> dict[str, Any]:
         with self._op:
@@ -348,18 +374,223 @@ class Control:
 
     def visit(self, path: str, ip: str, user_agent: str, wants_html: bool) -> Answer:
         with self._lock:
-            if self.stream is None:
+            stream = self.stream
+            if stream is None:
                 return MISSING
-            return self.stream.visit(path, ip, user_agent, wants_html, self.clock())
+            answer = stream.visit(path, ip, user_agent, wants_html, self.clock())
+        if answer.kind == "notready" and self.preparer is not None:
+            job = self.preparer.job_for(Path(stream.entries[answer.number - 1]))
+            if job is not None:
+                return Answer(503, "preparing", number=answer.number, data=job)
+        return answer
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             now = self.clock()
             stream = self.stream
-            return {
+            described = None if stream is None else stream.describe(self.base_url(), now)
+            info = {
                 "now": now,
-                "stream": None if stream is None else stream.describe(self.base_url(), now),
+                "stream": described,
                 "stream_port": self.config.stream_port,
                 "stream_port_state": self.port_state,
                 "firewall_problem": self.firewall_problem,
+                "prepare": [] if self.preparer is None else self.preparer.status(),
+                "prepare_run": None if self.preparer is None else self.preparer.run,
             }
+        if described is not None and stream is not None and stream.mode == BROWSER:
+            for video, entry in zip(described["videos"], stream.entries, strict=True):
+                video["job"] = self.preparer.job_for(Path(entry)) if self.preparer else None
+        return info
+
+    # --- browser mode and its prepared versions (see `prepare`)
+
+    def _preparer(self) -> prepare.Preparer:
+        if self.preparer is None or self.runner is None:
+            raise ControlError("this daemon cannot prepare videos")
+        return self.preparer
+
+    def _plans(self, videos: list[str], spec: str | None) -> list[prepare.VideoPlan]:
+        preparer = self._preparer()
+        assert self.runner is not None
+        plans = []
+        for video in videos:
+            try:
+                entry = prepared.entry_dir(self.paths.cache_dir, video)
+                plan = prepare.plan_video(
+                    self.runner,
+                    self.paths.cache_dir,
+                    video,
+                    spec,
+                    preparer.pending(entry),
+                    preparer.speeds,
+                )
+            except ToolMissing as exc:
+                raise ControlError(str(exc)) from exc
+            except OSError as exc:
+                raise StreamError(f"cannot look at {shown(video)}: {exc}") from exc
+            plans.append(plan)
+        return plans
+
+    def _submit(self, plans: list[prepare.VideoPlan]) -> list[int]:
+        """Queue what the plans still need. Returns the ids of the new jobs."""
+        ids = []
+        for plan in plans:
+            if plan.info is not None and plan.tasks:
+                added = self._preparer().submit(plan.source, plan.entry, plan.info, plan.tasks)
+                ids += [job.id for job in added]
+        return ids
+
+    def _missing_bases(self, stream: Stream) -> list[prepare.VideoPlan]:
+        """Plans for the videos of a browser stream that have no base version yet: the base
+        and every plain text subtitle track (seconds of work)."""
+        if stream.mode != BROWSER:
+            return []
+        missing = [v for n, v in enumerate(stream.videos, 1) if not stream.ready(n)]
+        return self._plans(missing, None) if missing else []
+
+    def _place(self, stream: Stream) -> None:
+        """Where each video's versions are: found again after a restart, because a video
+        that was changed since has a new folder."""
+        try:
+            stream.entries = [
+                str(prepared.entry_dir(self.paths.cache_dir, v)) for v in stream.videos
+            ]
+        except OSError as exc:
+            raise StreamError(f"cannot look at the videos: {exc}") from exc
+
+    def _resumed_plans(self, stream: Stream) -> list[prepare.VideoPlan]:
+        """What a browser stream taken up after a restart still needs. The jobs were lost
+        with the daemon; only copies are queued again, since a transcode may have been
+        cancelled on purpose."""
+        if stream.mode != BROWSER:
+            return []
+        self._place(stream)
+        plans = self._missing_bases(stream)
+        for plan in plans:
+            if plan.transcodes:
+                self.log(
+                    f"{shown(Path(plan.source).name)} is not transcoded yet; make it with "
+                    f"vpstream prepare --file {shown(plan.source)}"
+                )
+        return [p for p in plans if not p.transcodes]
+
+    def _browser(self, stream: Stream, confirmed: bool) -> list[prepare.VideoPlan]:
+        """Get a browser stream ready to start: where each video's versions go, and what is
+        still to make. A copy is made by itself; a transcode only once it is confirmed."""
+        self._place(stream)
+        plans = self._missing_bases(stream)
+        slow = [p for p in plans if p.transcodes]
+        if slow and not confirmed:
+            names = ", ".join(
+                f"{shown(Path(p.source).name)} (about {text.duration(p.seconds)})" for p in slow[:5]
+            )
+            more = f" and {len(slow) - 5} more" if len(slow) > 5 else ""
+            raise NeedsConfirm(
+                f"{len(slow)} of the videos must be transcoded to H.264 before a browser can "
+                f"play them, a full encode each: {names}{more}",
+                [p.to_dict() for p in slow],
+            )
+        if stream.sub:
+            self._check_sub(stream, plans)
+        return plans
+
+    def _check_sub(self, stream: Stream, plans: list[prepare.VideoPlan]) -> None:
+        """The starting subtitles must be prepared, or about to be, for the video, or for at
+        least one video of a folder (episodes differ; the others start without)."""
+        choice = tracks.parse_choice(stream.sub or tracks.OFF)
+        if choice is None:
+            return
+        planned = {p.source: p for p in plans}
+        for video, folder in zip(stream.videos, stream.entries, strict=True):
+            entry = Path(folder)
+            have = prepared.versions(entry)
+            plan = planned.get(video)
+            soon = {t.sub for t in plan.tasks if t.kind == prepare.SOFT} if plan else set()
+            made = set(have.soft) | set(have.burn) | soon
+            info = plan.info if plan else None
+            known: list[tracks.Numbered] = list(
+                info.subtitles if info else prepared.meta_tracks(entry, "subtitles")
+            )
+            if any(t.number in made for t in tracks.matching(known, choice)):
+                return
+        which = "this video" if stream.kind == "file" else "any video in the folder"
+        raise StreamError(
+            f"subtitle {stream.sub} is not prepared for {which}. Prepare it first: "
+            f"vpstream prepare --{stream.kind} {shown(stream.source)} --sub {stream.sub}"
+        )
+
+    def prepare(self, options: dict[str, Any]) -> dict[str, Any]:
+        """Plan and queue the versions of a file or a folder's videos. A plan that takes
+        longer than the film, or whose time cannot be told, is refused until it is sent again
+        with `confirmed`. With `dry_run` it is only planned."""
+        if extra := sorted(set(options) - {"file", "dir", "sub", "confirmed", "dry_run"}):
+            raise StreamError(f"unknown option: {', '.join(extra)}")
+        kind, source = source_of(options)
+        spec = check_choice("sub", options.get("sub"), many=True)
+        plans = self._plans(videos_of(kind, Path(source)), spec)
+        shown_plans = [p.to_dict() for p in plans]
+        if options.get("dry_run") is True:
+            return {"plans": shown_plans, "jobs": []}
+        long = [p for p in plans if p.needs_asking]
+        if long and options.get("confirmed") is not True:
+            raise NeedsConfirm(
+                f"preparing takes longer than the film itself, or a time that cannot be "
+                f"told, for {len(long)} of the videos",
+                shown_plans,
+            )
+        return {"plans": shown_plans, "jobs": self._submit(plans)}
+
+    def cancel_prepare(self, options: dict[str, Any]) -> dict[str, Any]:
+        """Cancel the prepares of a file or of the files in a folder (`path`), or all."""
+        return {"cancelled": self._preparer().cancel(_path_option(options))}
+
+    def prepared(self) -> list[dict[str, Any]]:
+        """Every video in the cache, and whether a stream or a prepare uses it now."""
+        with self._lock:
+            stream = self.stream
+            used = set(stream.entries) if stream is not None else set()
+        rows = []
+        for entry in prepared.entries(self.paths.cache_dir):
+            folder = prepared.root(self.paths.cache_dir) / entry.key
+            busy = self.preparer is not None and self.preparer.active(folder)
+            rows.append({**entry.to_dict(), "in_use": str(folder) in used, "busy": busy})
+        return rows
+
+    def remove_prepared(self, options: dict[str, Any]) -> dict[str, Any]:
+        """Remove the prepared versions of a file or a folder's files (`path`), the stale
+        ones (`stale`, made from files that are gone or changed) or all of them (`all`). A
+        video the running stream plays, or one being prepared, is kept."""
+        path = _path_option(options)
+        stale, every = options.get("stale") is True, options.get("all") is True
+        if (path is not None) + stale + every != 1:
+            raise StreamError("give one of: a path, stale or all")
+        removed, kept = 0, []
+        # `_op` keeps a start from taking a folder up meanwhile, and `take` a prepare.
+        with self._op:
+            for row in self.prepared():
+                wanted = every or (stale and row["stale"]) or (path and under(row["source"], path))
+                if not wanted:
+                    continue
+                folder = prepared.root(self.paths.cache_dir) / row["key"]
+                trash = None if row["in_use"] else self._take(folder)
+                if trash is None:
+                    kept.append(row["source"])
+                    continue
+                prepared.remove(trash)
+                removed += 1
+        return {"removed": removed, "kept": kept}
+
+    def _take(self, folder: Path) -> Path | None:
+        """Move a video's folder out of the way to remove it, unless a prepare uses it."""
+        if self.preparer is not None:
+            return self.preparer.take(folder)
+        return prepared.take(folder)
+
+
+def _path_option(options: dict[str, Any]) -> str | None:
+    """The `path` of a request about prepares, which must be a full path, or None."""
+    path = options.get("path")
+    if path is not None and not (isinstance(path, str) and path.startswith("/")):
+        raise StreamError(f"give the full path of a file or a folder: {path!r}")
+    return path

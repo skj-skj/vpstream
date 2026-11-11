@@ -4,13 +4,14 @@ On-demand video streaming from a VPS. The public port is open only while a strea
 everything is controlled over SSH or a dashboard on your tailnet.
 
 Status: early development. Streams a file or a folder as it is, for players such as VLC and
-mpv (direct mode). Playing in a TV browser comes next.
+mpv (direct mode), or as prepared HLS versions with a player page for TV browsers (browser
+mode).
 
 ## Install
 
 Needs Linux, Python 3.12+, Caddy, ufw, Tailscale (with HTTPS certificates) and systemd.
-ffmpeg is used by `bench` and `caps`; mkvtoolnix and the `acl` package are optional (see
-below). `vpstream doctor` checks all of it and prints the fix for anything missing.
+ffmpeg is used by browser mode, `bench` and `caps`; mkvtoolnix and the `acl` package are
+optional (see below). `vpstream doctor` checks all of it and prints the fix for anything missing.
 
 ```text
 sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "vpstream[dev]"
@@ -26,6 +27,10 @@ prefix and `pipx upgrade vpstream`, then `sudo vpstream init` again.
 | Command | What it does |
 | --- | --- |
 | `vpstream start --file F` / `--dir D` | Starts a stream of one video, or of a folder's videos |
+| `vpstream ls [FOLDER]` | Lists a folder's videos (default `[media] folder`, `/srv/media`), their tracks and what is prepared |
+| `vpstream track-info FILE` | Lists a file's tracks with the numbers `--sub` and `--audio` take |
+| `vpstream prepare --file F` / `--dir D` | Makes the versions browser mode plays (`--sub 1,3`, `eng`, `none`) |
+| `vpstream prepared [rm PATH \| --stale \| --all \| cancel [PATH]]` | Lists, removes or cancels prepared versions |
 | `vpstream stop` / `status` | Stops the stream, or shows its addresses and state |
 | `vpstream devices [enable\|disable ADDRESS \| lock \| unlock]` | Who asked for the stream, and who gets in |
 | `vpstream alias NAME` | Changes the short name in the address |
@@ -63,10 +68,39 @@ vpstream stop
   Stop, the time limit and stopping the service close the port; after a crash the stream is
   taken up again, never after a reboot. The stream is plain HTTP.
 
+## Browser mode
+
+```text
+vpstream track-info /srv/media/film.mkv                   # tracks, and how each is prepared
+vpstream prepare --file /srv/media/film.mkv --sub 1,3     # base version and two subtitle tracks
+vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
+```
+
+- **Versions:** the base copies the video when browsers play it (H.264 8-bit, HEVC, AV1),
+  else transcodes it to H.264 at its own size; every audio track becomes an AAC alternate.
+  Plain text subtitles (SRT, mov_text, WebVTT) become soft WebVTT; image, ASS and SSA tracks
+  get a burned-in version, one full encode each. Without `--sub`, every plain text track is
+  prepared and nothing is burned in. A prepare runs in the service at low priority, one job
+  after the other, and asks first when it would take longer than the film (`--yes`).
+- **Start:** a missing base version is made by `start` itself when it is a copy (minutes);
+  a transcode is asked about first. Until it is ready the address says how far it got.
+- **Dashboard:** shows the plan of a prepare (what it makes, how long, the tracks it found)
+  before it is queued, then its progress.
+- **Player:** large buttons for a TV remote that works as a pointer: play, ±10 s, audio
+  (each track, then Off), subtitles (Off, then each prepared one), episodes and next. Other
+  players get the HLS playlist at the same address.
+- **Who gets in:** approval by default; a waiting browser shows a 4-digit code, which
+  `vpstream devices` and the dashboard show next to its address.
+- **Cache:** `/var/cache/vpstream/prepared`, kept until `vpstream prepared rm`. A changed
+  file is prepared again; its old versions are listed as stale.
+
 ## Configuration
 
 `/etc/vpstream/config.toml`: `port` (1337) and `host` (the address shown in URLs) under
-`[stream]`, `port` (1338) under `[dashboard]`. Restart the service after a change.
+`[stream]`, `port` (1338) under `[dashboard]`, and `copy_speed` and `encode_speed` under
+`[prepare]` for the time estimates (`vpstream bench FILE` prints the values for this host), and
+`folder` under `[media]`, the folder `vpstream ls` lists by default (`/srv/media`).
+Restart the service after a change.
 
 The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale serve` at
 `https://<tailnet name>:1338/`. The stream port is opened and closed by a small root helper,

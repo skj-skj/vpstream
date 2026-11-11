@@ -177,3 +177,42 @@ def test_ffmpeg_failure_is_an_error(tmp_path: Path) -> None:
 def test_no_file_written_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(subtitles.SubtitleError, match="no file written"):
         subtitles.extract_webvtt(FakeRunner(), "in.mkv", _track("subrip"), tmp_path / "s.vtt")
+
+
+def test_filter_source_keeps_only_plain_suffixes(tmp_path: Path) -> None:
+    for name, linked in (("a.MKV", "source.mkv"), ("a.mkvé", "source"), ("noext", "source")):
+        src = tmp_path / name
+        src.write_bytes(b"x")
+        work = tmp_path / f"work-{linked}-{len(name)}"
+        work.mkdir()
+        link = subtitles.filter_source(work, src)
+        assert link.name == linked and link.is_symlink() and link.resolve() == src.resolve()
+
+
+def test_filter_source_replaces_a_link_left_by_an_earlier_run(tmp_path: Path) -> None:
+    old, new = tmp_path / "old.mkv", tmp_path / "new.mkv"
+    old.write_bytes(b"o")
+    new.write_bytes(b"n")
+    subtitles.filter_source(tmp_path, old)
+    assert subtitles.filter_source(tmp_path, new).resolve() == new.resolve()
+
+
+def test_cues_are_moved_earlier_and_nothing_else_changes() -> None:
+    vtt = (
+        "WEBVTT\n\n"
+        "1\n00:00:10.500 --> 00:00:12.000 line:85% align:center\nA --> B\n\n"
+        "01:00.000 --> 01:01.250\nshort form\n\n"
+        "NOTE 00:00:01.000 --> 00:00:02.000 is not a cue\n\n"
+        "00:00:00.200 --> 00:00:01.000\nbefore the start\n"
+    )
+    out = subtitles.shift_webvtt(vtt, 0.5).split("\n")
+    assert out[3] == "00:00:10.000 --> 00:00:11.500 line:85% align:center"
+    assert out[4] == "A --> B"
+    assert out[6] == "00:00:59.500 --> 00:01:00.750"
+    assert out[9] == "NOTE 00:00:01.000 --> 00:00:02.000 is not a cue"
+    assert out[11] == "00:00:00.000 --> 00:00:00.500"  # cannot start before 0
+
+
+def test_a_shift_of_hours() -> None:
+    out = subtitles.shift_webvtt("WEBVTT\n\n10:00:00.000 --> 10:00:01.000\nx\n", 3600.25)
+    assert "08:59:59.750 --> 09:00:00.750" in out

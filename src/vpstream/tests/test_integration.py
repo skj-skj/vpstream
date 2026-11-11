@@ -9,8 +9,9 @@ import pytest
 
 from vpstream import bench
 from vpstream.caps import clips
-from vpstream.ffargs import base_args
+from vpstream.ffargs import VIDEO, base_args
 from vpstream.probe import SubtitleTrack, probe
+from vpstream.tests.media import ffmpeg
 from vpstream.tools import SystemRunner
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("need_ffmpeg")]
@@ -19,72 +20,6 @@ DATA = Path(__file__).parent / "data"
 # The bundled fixture's three PGS cues (0-2.5, 3-5.5 and 6-8.5 s) are moved this far into
 # the sample, so a seek to a cue is past ffargs.SUBTITLE_PREROLL_SECONDS.
 CUES_AT = 30
-
-
-def _ffmpeg(*args: str | Path, timeout: float = 120) -> None:
-    res = SystemRunner().run([*base_args(), *map(str, args)], timeout=timeout)
-    assert res.returncode == 0, res.stderr
-
-
-@pytest.fixture(scope="module")
-def sample(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A 12 s H.264 file with two audio tracks, an SRT and an ASS subtitle track."""
-    d = tmp_path_factory.mktemp("media")
-    srt = d / "a.srt"
-    srt.write_text("1\n00:00:01,000 --> 00:00:05,000\nHello\n\n")
-    ass = d / "a.ass"
-    ass.write_text(
-        "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 360\n\n"
-        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, Alignment\n"
-        "Style: Default,DejaVu Sans,24,&H00FFFFFF,2\n\n"
-        "[Events]\nFormat: Layer, Start, End, Style, Text\n"
-        "Dialogue: 0,0:00:01.00,0:00:11.00,Default,Styled line\n"
-    )
-    out = d / "sample.mkv"
-    _ffmpeg(
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=320x180:rate=25:duration=12",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=12",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=880:duration=12",
-        "-i",
-        str(srt),
-        "-i",
-        str(ass),
-        "-map",
-        "0:v",
-        "-map",
-        "1:a",
-        "-map",
-        "2:a",
-        "-map",
-        "3:s",
-        "-map",
-        "4:s",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-c:a",
-        "aac",
-        "-c:s:0",
-        "srt",
-        "-c:s:1",
-        "ass",
-        "-metadata:s:a:0",
-        "language=eng",
-        "-metadata:s:a:1",
-        "language=jpn",
-        out,
-    )
-    return out
 
 
 def test_probe_real_file(sample: Path) -> None:
@@ -127,7 +62,7 @@ def _first_frame_peak(hls_dir: Path) -> int:
         [
             *base_args("info"),
             "-i",
-            str(hls_dir / "index.m3u8"),
+            str(hls_dir / f"{VIDEO}.m3u8"),
             "-frames:v",
             "1",
             "-vf",
@@ -152,9 +87,9 @@ def image_sample(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPa
     if request.param != "pgs":
         # -fix_sub_duration turns the PGS clear events into cue end times.
         cues = d / "cues.mks"
-        _ffmpeg("-fix_sub_duration", "-i", sup, "-c:s", request.param, "-f", "matroska", cues)
+        ffmpeg("-fix_sub_duration", "-i", sup, "-c:s", request.param, "-f", "matroska", cues)
     out = d / "sample.mkv"
-    _ffmpeg(
+    ffmpeg(
         "-f",
         "lavfi",
         "-i",
@@ -219,7 +154,7 @@ def mkvmerge_webvtt(tmp_path_factory: pytest.TempPathFactory) -> Path:
     spa.write_text("WEBVTT\n\n00:00:00.500 --> 00:00:02.000 line:85% align:center\nHola\n")
     fre.write_text("WEBVTT\n\n00:00:00.500 --> 00:00:02.000\nBonjour\n")
     video = d / "v.mkv"
-    _ffmpeg("-f", "lavfi", "-i", "color=black:size=320x180:duration=3", "-c:v", "libx264", video)
+    ffmpeg("-f", "lavfi", "-i", "color=black:size=320x180:duration=3", "-c:v", "libx264", video)
     out = d / "vtt.mkv"
     args = ["mkvmerge", "-q", "-o", out, video, "--language", "0:spa", spa]
     res = runner.run([*map(str, args), "--language", "0:fre", str(fre)])
