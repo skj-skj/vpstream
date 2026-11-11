@@ -23,6 +23,7 @@ from typing import Any, Protocol
 
 from vpstream.config import Paths
 from vpstream.files import write_atomic
+from vpstream.net import normal_ip
 from vpstream.tools import Runner, require
 
 # Set by Caddy on the way in, whatever the viewer sent: the address the request came from.
@@ -118,18 +119,21 @@ def config(port: int, gate_socket: Path, access_log: Path, videos_dir: Path) -> 
 # --- the access log
 
 
-def log_entry(line: str) -> tuple[str, int] | None:
-    """The viewer's address and the bytes sent, from one line of the access log."""
+def log_entry(line: str) -> tuple[str, str, int] | None:
+    """The viewer's address and port, and the bytes sent, from one line of the access log.
+    Caddy 2.6.2 logs about 512 bytes for a transfer the viewer cut off (see `traffic`)."""
     try:
         data = json.loads(line)
         request = data["request"]
-        ip = request.get("remote_ip") or request["remote_addr"].rsplit(":", 1)[0].strip("[]")
+        host, _, port = str(request.get("remote_addr") or "").rpartition(":")
+        ip = normal_ip(request.get("remote_ip") or host.strip("[]"))
+        port = str(request.get("remote_port") or port)
         size = data["size"]
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
-    if not isinstance(ip, str) or isinstance(size, bool) or not isinstance(size, int):
+    if ip is None or isinstance(size, bool) or not isinstance(size, int):
         return None
-    return ip, size
+    return ip, port, size
 
 
 class LogTail:
@@ -141,7 +145,7 @@ class LogTail:
         self._offset = 0
         self._rest = b""
 
-    def read(self) -> Iterator[tuple[str, int]]:
+    def read(self) -> Iterator[tuple[str, str, int]]:
         try:
             with self.path.open("rb") as fh:
                 st = os.fstat(fh.fileno())

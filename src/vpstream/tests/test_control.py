@@ -246,6 +246,21 @@ def test_a_caddy_that_died_ends_the_stream_and_closes_the_port(rig: Rig) -> None
     assert "Caddy stopped unexpectedly" in rig.log[-1]
 
 
+def test_tick_counts_what_the_kernel_says_was_sent(tmp_path: Path) -> None:
+    from vpstream.tests.fakes import FakeRunner
+    from vpstream.tests.test_traffic import ss
+
+    rig = Rig(tmp_path, FakeFirewall(), FakeServer())
+    runner = FakeRunner(("ss",))
+    rig.control.runner = runner
+    rig.start()
+    rig.control.visit("aaa", "192.0.2.1", "vlc", False)
+    runner.on("ss", stdout=ss(("[::ffff:192.0.2.1]", 2898, 470_000_000)))
+    rig.control.tick()
+    (device,) = rig.control.status()["stream"]["devices"]
+    assert device["bytes"] == 470_000_000
+
+
 def test_tick_counts_the_bytes_from_the_access_log(rig: Rig) -> None:
     rig.start()
     rig.control.visit("aaa", "192.0.2.1", "vlc", False)

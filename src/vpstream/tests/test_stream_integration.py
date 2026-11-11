@@ -4,9 +4,11 @@ host, no firewall helper. Nothing outside the temporary folder is touched."""
 from __future__ import annotations
 
 import http.client
+import os
 import shutil
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -158,7 +160,7 @@ def test_policies_and_alias_apply_on_the_next_request(live: Live, show: Path) ->
     assert live.get("/aaa")[0] == 404 and live.get("/bbb")[0] == 200
 
 
-def test_bytes_sent_are_counted_from_the_access_log(live: Live, show: Path) -> None:
+def test_bytes_sent_are_counted(live: Live, show: Path) -> None:
     live.api("stream/start", {"file": str(show / "e1.mp4"), "alias": "aaa"})
     live.get("/aaa")
     live.get("/aaa", headers={"Range": "bytes=0-99"})
@@ -167,7 +169,37 @@ def test_bytes_sent_are_counted_from_the_access_log(live: Live, show: Path) -> N
         if device["bytes"] >= len(BODY) + 100:
             break
         live.stop.wait(0.1)
-    assert device["bytes"] == len(BODY) + 100 and device["requests"] == 2
+    # From the access log, or from the kernel when it saw a connection open, which counts
+    # the response headers too.
+    assert len(BODY) + 100 <= device["bytes"] <= len(BODY) + 100 + 2000
+    assert device["requests"] == 2
+
+
+def test_a_transfer_the_player_cuts_off_is_counted_by_what_was_sent(
+    live: Live, tmp_path: Path
+) -> None:
+    """Caddy 2.6.2 logs about 512 bytes for this; the kernel knows better."""
+    if not shutil.which("ss"):
+        pytest.skip("ss is not installed on this host")
+    film = tmp_path / "big.mkv"
+    film.write_bytes(os.urandom(48 * 1024 * 1024))
+    live.api("stream/start", {"file": str(film), "alias": "aaa"})
+    with socket.create_connection(("127.0.0.1", live.cfg.stream_port), timeout=10) as conn:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+        conn.sendall(b"GET /aaa HTTP/1.1\r\nHost: x\r\nRange: bytes=0-\r\n\r\n")
+        got, started = 0, time.monotonic()
+        while got < 8 * 1024 * 1024 or time.monotonic() - started < 2.5:  # seen at least twice
+            chunk = conn.recv(65536)
+            assert chunk
+            got += len(chunk)
+            time.sleep(0.005)
+    # Hung up like a player that seeks: far from the whole 48 MB was sent.
+    for _ in range(50):
+        (device,) = live.api("status")["stream"]["devices"]
+        if device["bytes"] >= got * 0.9:
+            break
+        live.stop.wait(0.2)
+    assert got * 0.9 <= device["bytes"] <= got + 8 * 1024 * 1024, (got, device["bytes"])
 
 
 def test_caddy_runs_only_while_a_stream_does_and_opens_no_admin_port(

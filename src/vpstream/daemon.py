@@ -124,7 +124,9 @@ class Daemon:
     _published: tuple[float, str | None, str | None] | None = None
 
     def __post_init__(self) -> None:
-        self.control = Control(self.config, self.paths, self.firewall, self.server, self.log)
+        self.control = Control(
+            self.config, self.paths, self.firewall, self.server, self.log, runner=self.runner
+        )
 
     def published(self) -> tuple[str | None, str | None]:
         """The dashboard's tailnet URL, or why it has none. Asked from Tailscale, then

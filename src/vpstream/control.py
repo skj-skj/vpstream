@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from vpstream import net, state
-from vpstream.caddy import CaddyError, LogTail, Server, link_videos, unlink_videos
+from vpstream.caddy import CaddyError, Server, link_videos, unlink_videos
 from vpstream.config import Config, Paths
 from vpstream.firewall import Firewall, FirewallError
 from vpstream.stream import MISSING, Answer, Stream, StreamError, check_alias
-from vpstream.tools import ToolMissing
+from vpstream.tools import NO_PROGRAMS, Runner, ToolMissing
+from vpstream.traffic import Traffic
 
 BOOT_ID = "/proc/sys/kernel/random/boot_id"
 
@@ -50,7 +51,8 @@ class Control:
     # stream record is read or changed.
     _op: threading.RLock = field(default_factory=threading.RLock)
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    _tail: LogTail | None = None
+    runner: Runner | None = None  # for `ss`; without one, the access log alone counts bytes
+    _traffic: Traffic | None = None
     _host: str = ""
 
     # --- the pieces
@@ -101,7 +103,9 @@ class Control:
             self._port("open")
             with self._lock:
                 self.stream = stream
-                self._tail = LogTail(self.paths.access_log)
+                self._traffic = Traffic(
+                    self.runner or NO_PROGRAMS, self.config.stream_port, self.paths.access_log
+                )
                 self._save()
         except (FirewallError, OSError) as exc:
             # A helper that was cut off may have opened the port all the same.
@@ -111,7 +115,7 @@ class Control:
     def _undo(self) -> None:
         """Take back whatever a start or a stop left: nothing of it may fail the caller."""
         with self._lock:
-            self.stream = self._tail = None
+            self.stream = self._traffic = None
         steps: tuple[tuple[str, Callable[[], None]], ...] = (
             ("closing the stream port", lambda: self._port("close")),
             ("stopping Caddy", self._stop_server),
@@ -209,8 +213,8 @@ class Control:
             stream = self.stream
             if stream is None:
                 return
-            if self._tail is not None:
-                for ip, size in self._tail.read():
+            if self._traffic is not None:
+                for ip, size in self._traffic.read():
                     stream.devices.add_bytes(ip, size)
             # The wall clock, because the time limit must hold across a restart of the
             # daemon; a clock that is set while a stream runs moves its end with it.
