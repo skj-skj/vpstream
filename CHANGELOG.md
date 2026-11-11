@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.10.0 (2026-11-11)
+
+### Features
+
+- A dashboard that works on a phone: tabs, cards, progress and codes
+  ([#18](https://github.com/skj-skj/vpstream/pull/18),
+  [`06731cb`](https://github.com/skj-skj/vpstream/commit/06731cbe1c9a6ded8bba0d020615becb1649d390))
+
+
 ## v0.9.1 (2026-11-11)
 
 ### Bug Fixes
