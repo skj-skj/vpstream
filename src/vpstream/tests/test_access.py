@@ -31,6 +31,14 @@ def library(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def own_record(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The list of what was given is kept under a temporary folder, not the real home."""
+    state = tmp_path_factory.mktemp("state")
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    return state / "vpstream" / "grants.json"
+
+
+@pytest.fixture(autouse=True)
 def only_the_tests_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The folders above the test's own are the host's, and differ from host to host (in
     Termux they are private to the app). The tests look at what is below."""
@@ -201,10 +209,17 @@ def test_the_refusal_says_what_and_for_whom(tmp_path: Path, library: Path) -> No
 class Daemon:
     """Stands in for the daemon: refuses as unreadable until access was given."""
 
-    def __init__(self, refusals: int, code: str = api.UNREADABLE) -> None:
-        self.refusals, self.code, self.asked = refusals, code, 0
+    def __init__(self, refusals: int, code: str = api.UNREADABLE, running: bool = False) -> None:
+        self.refusals, self.code, self.asked, self.running = refusals, code, 0, running
 
     def __call__(self, socket: Path, method: str, route: str, payload: Any = None) -> Any:
+        if route == "status":
+            return {"stream": {"alias": "aaa"} if self.running else None}
+        if route == "stream/stop":
+            if not self.running:
+                raise client.DaemonRefused("the daemon refused: no stream is running", {})
+            self.running = False
+            return {"stream": None, "stream_port": 1337, "stream_port_state": "closed"}
         self.asked += 1
         if self.asked <= self.refusals:
             data = {"error": "cannot read it", "code": self.code, "user": "vpstream"}
@@ -307,3 +322,170 @@ def test_doctor_checks_for_the_acl_package() -> None:
     check = doctor.check_tool(FakeRunner(()), tool)
     assert check.status == "warning" and check.fix == "sudo apt install acl"
     assert doctor.check_tool(FakeRunner(("setfacl",)), tool).status == "ok"
+
+
+# --- taking it back
+
+
+def _acl(path: Path) -> str:
+    return subprocess.run(["getfacl", "-c", str(path)], capture_output=True, text=True).stdout
+
+
+@pytest.fixture
+def real(library: Path) -> Any:
+    """The real setfacl, on a file system that has ACLs."""
+    from vpstream.tools import SystemRunner
+
+    if not shutil.which("setfacl") or not shutil.which("getfacl"):
+        pytest.skip("the acl tools are not installed on this host")
+    probe = subprocess.run(["setfacl", "-m", f"u:{ME}:r", str(library / "show/notes.txt")])
+    if probe.returncode != 0:
+        pytest.skip("this file system has no ACLs")
+    return SystemRunner()
+
+
+def test_what_is_given_is_written_down_first(library: Path, own_record: Path) -> None:
+    seen: list[dict[str, list[str]]] = []
+
+    class Looking(FakeRunner):
+        def run(self, args, *, timeout=None):  # type: ignore[no-untyped-def]
+            seen.append(access.recorded(own_record))
+            return super().run(args, timeout=timeout)
+
+    access.grant(Looking(("setfacl",)), "vpstream", "file", library / "film.mkv")
+    expected = {"vpstream": [str(library / "film.mkv"), str(library)]}
+    assert seen[0] == expected and access.recorded(own_record) == expected
+    assert own_record.parent.stat().st_mode & 0o077 == 0  # the caller's alone
+    access.grant(FakeRunner(("setfacl",)), "vpstream", "dir", library / "show")
+    assert len(access.recorded(own_record)["vpstream"]) == 5  # added to, nothing twice
+
+
+def test_entry_reads_the_acl_of_a_file(library: Path, real: Any) -> None:
+    film = library / "film.mkv"
+    assert access.entry(real, film, ME) is None
+    assert access.entry(real, library / "nope", ME) is None
+    subprocess.run(["setfacl", "-m", f"u:{ME}:r", str(film)], check=True)
+    assert access.entry(real, film, ME) == 4 and access.entry(real, film, ME + 1) is None
+    subprocess.run(["setfacl", "-m", f"u:{ME}:rx", str(film)], check=True)
+    assert access.entry(real, film, ME) == 5
+    assert access.entry(FakeRunner(()), film, ME) is None  # no getfacl: nothing is known
+
+
+def test_entry_reads_what_getfacl_prints() -> None:
+    runner = FakeRunner(("getfacl",))
+    printed = "user::rw-\nuser:999:r-x\nuser:1001:rwx\ngroup::---\nmask::r-x\nother::---\n"
+    runner.on("getfacl", stdout=printed)
+    assert access.entry(runner, "/x", 999) == 5 and access.entry(runner, "/x", 1001) == 7
+    assert access.entry(runner, "/x", 99) is None  # not 999: the whole number counts
+    assert runner.calls[0] == ["getfacl", "-c", "-n", "-p", "--", "/x"]
+    runner.on("getfacl", returncode=1, stdout=printed)
+    assert access.entry(runner, "/x", 999) is None
+
+
+def test_grant_and_revoke_with_the_real_setfacl(library: Path, real: Any, own_record: Path) -> None:
+    me = access.service_user()
+    film = library / "film.mkv"
+    assert access.grant(real, me, "file", film) == 2
+    assert f"user:{me}:r--" in _acl(film) and "other::---" in _acl(film)
+    assert f"user:{me}:--x" in _acl(library)
+    assert access.grant(real, me, "file", film) == 0  # it is there: nothing more to do
+    assert access.revoke(real) == 2
+    assert f"user:{me}" not in _acl(film) + _acl(library)
+    assert not own_record.exists()
+    assert access.revoke(real) == 0  # nothing left to take back
+
+
+def test_an_entry_that_was_there_before_is_never_removed(
+    library: Path, real: Any, own_record: Path
+) -> None:
+    me = access.service_user()
+    film = library / "film.mkv"
+    subprocess.run(["setfacl", "-m", f"u:{me}:r", str(film)], check=True)  # by hand, earlier
+    assert access.grant(real, me, "file", film) == 1  # only the folder lacked something
+    assert access.recorded(own_record) == {me: [str(library)]}
+    assert access.revoke(real) == 1
+    assert f"user:{me}:r--" in _acl(film) and f"user:{me}" not in _acl(library)
+
+
+def test_revoke_skips_what_is_gone_or_already_taken_back(
+    library: Path, real: Any, own_record: Path
+) -> None:
+    me = access.service_user()
+    access.grant(real, me, "dir", library / "show")
+    (library / "show/e1.mkv").unlink()
+    subprocess.run(["setfacl", "-x", f"u:{me}", str(library / "show/e2.mkv")], check=True)
+    assert access.revoke(real) == 2  # the two folders
+    assert not own_record.exists()
+
+
+def test_revoke_keeps_what_it_could_not_take_back(
+    library: Path, real: Any, own_record: Path
+) -> None:
+    me = access.service_user()
+    access.grant(real, me, "file", library / "film.mkv")
+    failing = FakeRunner(("setfacl", "getfacl"))
+    failing.on("getfacl", stdout=f"user:{ME}:r--\n")
+    failing.on("setfacl", returncode=1, stderr="setfacl: Operation not permitted")
+    with pytest.raises(access.AccessError, match="Operation not permitted"):
+        access.revoke(failing)
+    assert access.recorded(own_record) == {me: [str(library / "film.mkv"), str(library)]}
+    assert access.revoke(real) == 2
+
+
+def test_a_damaged_record_is_empty(own_record: Path) -> None:
+    own_record.parent.mkdir(parents=True)
+    for text in ("{", "[]", '{"root; rm": ["/x"]}', '{"vpstream": "x"}'):
+        own_record.write_text(text)
+        assert access.recorded(own_record) == {}
+    own_record.write_text('{"vpstream": ["/a", 5]}')
+    assert access.recorded(own_record) == {"vpstream": ["/a"]}
+    assert access.revoke(FakeRunner(())) == 0  # the user is not on this host: nothing is run
+
+
+def test_stop_takes_the_access_back(
+    library: Path, real: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    me = access.service_user()
+    access.grant(real, me, "file", library / "film.mkv")
+    monkeypatch.setattr(client, "call", Daemon(refusals=0, running=True))
+    assert cli.main(["stop"]) == 0
+    assert "Took back the vpstream service's access to 2 of your" in capsys.readouterr().out
+    assert f"user:{me}" not in _acl(library / "film.mkv")
+
+
+def test_stop_takes_back_what_a_stream_that_ended_by_itself_left(
+    library: Path, real: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    me = access.service_user()
+    access.grant(real, me, "file", library / "film.mkv")
+    monkeypatch.setattr(client, "call", Daemon(refusals=0, running=False))
+    assert cli.main(["stop"]) == 1  # there was nothing to stop
+    out = capsys.readouterr()
+    assert "no stream is running" in out.err and "Took back" in out.out
+    assert f"user:{me}" not in _acl(library / "film.mkv")
+
+
+def test_the_next_start_takes_back_what_the_last_stream_left(
+    library: Path, real: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    me = access.service_user()
+    access.grant(real, me, "dir", library / "show")
+    monkeypatch.setattr(client, "call", Daemon(refusals=0))
+    assert cli.main(["start", "--file", str(library / "film.mkv")]) == 0
+    assert "Took back the vpstream service's access to 4 of your" in capsys.readouterr().out
+    assert f"user:{me}" not in _acl(library / "show/e1.mkv")
+
+
+def test_revoke_command(
+    library: Path, real: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    me = access.service_user()
+    access.grant(real, me, "file", library / "film.mkv")
+    monkeypatch.setattr(client, "call", Daemon(refusals=0, running=True))
+    assert cli.main(["revoke"]) == 1  # not under a running stream
+    assert "stop it first" in capsys.readouterr().err
+    assert f"user:{me}:r--" in _acl(library / "film.mkv")
+    monkeypatch.setattr(client, "call", Daemon(refusals=0))
+    assert cli.main(["revoke"]) == 0
+    assert "Took back" in capsys.readouterr().out
+    assert cli.main(["revoke"]) == 0 and capsys.readouterr().out == ""

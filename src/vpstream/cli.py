@@ -306,6 +306,8 @@ def _start(kind: str, options: dict[str, Any]) -> dict[str, Any] | None:
 
     socket = config.default_paths().socket
     try:
+        if not client.call(socket, "GET", "status").get("stream"):
+            _revoke()  # what a stream that ended by itself left behind
         try:
             info: dict[str, Any] = client.call(socket, "POST", "stream/start", options)
         except client.DaemonRefused as exc:
@@ -351,8 +353,33 @@ def cmd_start(args: argparse.Namespace) -> int:
     return _show(info) or 1
 
 
+def _revoke() -> int:
+    """Take back the file access `start` gave the service. Says so when it did."""
+    from vpstream import access
+    from vpstream.tools import SystemRunner, ToolMissing
+
+    try:
+        count = access.revoke(SystemRunner())
+    except (access.AccessError, ToolMissing) as exc:
+        return _error(str(exc))
+    if count:
+        print(f"Took back the vpstream service's access to {count} of your files and folders.")
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace) -> int:
+    info = _daemon("status")
+    if info is None:
+        return 1
+    if info.get("stream"):
+        return _error("a stream is running; stop it first: vpstream stop")
+    return _revoke()
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
     info = _daemon("stream/stop", {})
+    # Also after "no stream is running": one that ended by itself left its access behind.
+    _revoke()
     if info is not None:
         print(f"Stopped. Stream port {info.get('stream_port')}: {info.get('stream_port_state')}")
     return _show(info) if info is None or info.get("firewall_problem") else 0
@@ -523,6 +550,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     go.set_defaults(func=cmd_start)
     sub.add_parser("stop", help="stop the stream and close its port").set_defaults(func=cmd_stop)
+    sub.add_parser(
+        "revoke", help="take back the file access `start` gave the service (stop does it too)"
+    ).set_defaults(func=cmd_revoke)
     al = sub.add_parser("alias", help="change the short name of the running stream")
     al.add_argument("name")
     al.set_defaults(func=cmd_alias)

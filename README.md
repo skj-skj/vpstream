@@ -118,8 +118,10 @@ followed once, when the stream starts.
 - **Access to your files:** the service has its own user, which reads the videos. When it
   cannot, `vpstream start` gives it access by itself: an ACL entry for that one user, read on
   the videos and enter on your folders above them (`setfacl`, from the `acl` package). You
-  need to own the files, not to be root, and they stay closed to every other user. The entry
-  stays after the stream; `setfacl -x u:vpstream FILE` takes it away. Files of another owner
+  need to own the files, not to be root, and they stay closed to every other user.
+  `vpstream stop` takes that access back. After a stream that ended another way (its time
+  limit, the dashboard, a restart), the next `vpstream start` or `vpstream revoke` does. Only
+  what `start` added is removed, never an entry that was there before. Files of another owner
   are refused with the command their owner or root can run. A stream started from the
   dashboard has nobody's access to pass on, so its files must be readable already.
 
