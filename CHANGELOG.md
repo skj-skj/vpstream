@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.8.0 (2026-11-11)
+
+### Features
+
+- Stream a file or a folder in direct mode, behind the gate
+  ([#11](https://github.com/skj-skj/vpstream/pull/11),
+  [`48597c0`](https://github.com/skj-skj/vpstream/commit/48597c0825d6852cf7720bde54fa7f772fcc5e97))
+
+
 ## v0.7.1 (2026-11-10)
 
 ### Bug Fixes
