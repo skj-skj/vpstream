@@ -43,13 +43,23 @@ def service_user() -> str:
         return str(os.geteuid())
 
 
-def entry(runner: Runner, path: Path | str, uid: int) -> int | None:
-    """The permission bits of the ACL entry for the user `uid` on a file, or None when it
-    has none. Asked from `getfacl`, with numbers for users, so no name needs reading."""
+def _acl(runner: Runner, path: Path | str) -> list[str] | None:
+    """A file's ACL as `getfacl` prints it, with numbers for users; None when unknown."""
     if not runner.which(READ_TOOL):
         return None
     res = runner.run([READ_TOOL, "-c", "-n", "-p", "--", str(path)], timeout=30)
-    for line in res.stdout.splitlines() if res.returncode == 0 else []:
+    return res.stdout.splitlines() if res.returncode == 0 else None
+
+
+# What every file has, ACL or not. The mask comes with the first extra entry and stays when
+# the last one is removed, so a file that has only these and a mask carries nothing else.
+_BASE = ("user::", "group::", "other::")
+
+
+def entry(runner: Runner, path: Path | str, uid: int) -> int | None:
+    """The permission bits of the ACL entry for the user `uid` on a file, or None when it
+    has none. Asked from `getfacl`, with numbers for users, so no name needs reading."""
+    for line in _acl(runner, path) or []:
         kind, _, rest = line.partition(":")
         owner, _, perms = rest.partition(":")
         if kind == "user" and owner == str(uid):
@@ -207,6 +217,23 @@ def _mine(runner: Runner, path: str, service_uid: int, me: int) -> bool:
         return False
 
 
+def _drop_bare_masks(runner: Runner, paths: list[str]) -> None:
+    """Remove the mask setfacl leaves behind when the last extra entry goes, so the file is
+    as it was (`ls -l` shows no `+`). Only where nothing else is left: `setfacl -x` has just
+    made the mask equal to the group's own bits, so removing it changes no access."""
+    bare = []
+    for path in paths:
+        lines = _acl(runner, path)
+        if (
+            lines
+            and any(line.startswith("mask::") for line in lines)
+            and all(line.startswith((*_BASE, "mask::")) for line in lines if line.strip())
+        ):
+            bare.append(path)
+    if bare:
+        runner.run([TOOL, "-b", "--", *bare], timeout=60)  # a failure leaves only the mask
+
+
 def revoke(runner: Runner, record: Path | None = None, uid: int | None = None) -> int:
     """Take back every entry that was written down. Returns how many were removed; raises
     AccessError when some could not be, and keeps those written down."""
@@ -229,6 +256,7 @@ def revoke(runner: Runner, record: Path | None = None, uid: int | None = None) -
             res = runner.run([TOOL, "-x", f"u:{user}", "--", *batch], timeout=60)
             if res.returncode == 0:
                 removed += len(batch)
+                _drop_bare_masks(runner, batch)
             else:
                 left.setdefault(user, []).extend(batch)
                 problem = tail(res, stdout=True)

@@ -107,6 +107,7 @@ step "stop closes the port, ends Caddy and takes the file access back"
 as_group "$BIN/vpstream stop" | tee /tmp/stopped.txt
 grep -q "Took back the vpstream service's access to 2 of your" /tmp/stopped.txt
 no grep -q vpstream <(getfacl -c "$MEDIA/film.mkv" "$MEDIA")
+no grep -q '^mask::' <(getfacl -c "$MEDIA/film.mkv" "$MEDIA")   # no ACL left at all
 no sudo -u vpstream cat "$MEDIA/film.mkv" > /dev/null
 no has_rule 1337
 no pgrep -x caddy
