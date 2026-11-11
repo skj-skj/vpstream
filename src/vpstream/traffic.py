@@ -3,9 +3,10 @@
 Caddy's access log is not enough on its own: Caddy 2.6.2, the version in Ubuntu 24.04, logs
 about 512 bytes for a transfer the player hangs up on, and a player hangs up on every seek
 and every close. The kernel knows what each connection really delivered, so it is asked
-once a second with `ss` (no root needed). A connection that opened and closed between two
-looks is never seen there; for those the access log's count is taken, matched by the
-viewer's port. Where `ss` cannot be used (Termux), the access log is all there is, and Caddy
+once a second with `ss` (no root needed). What a connection sends after the last look before
+it closes is missed there: at most a second of its speed. A connection that opened and closed
+between two looks is never seen at all. In both cases the access log fills in what it can,
+matched by the viewer's port. Where `ss` cannot be used (Termux), the access log is all there is, and Caddy
 versions that count a cut-off transfer correctly make that enough.
 """
 
@@ -67,6 +68,8 @@ class Traffic:
         self._acked: dict[Connection, int] = {}  # open connections, as at the last look
         self._seen: dict[Connection, float] = {}  # connections the kernel counts
         self._logged: dict[Connection, int] = {}  # counted from the log before they were seen
+        self._counted: dict[Connection, int] = {}  # counted in all, for the ones seen
+        self._in_log: dict[Connection, int] = {}  # what the log says, for the ones seen
         self.kernel = bool(runner.which(TOOL))
 
     def _sample(self) -> dict[Connection, int] | None:
@@ -86,17 +89,28 @@ class Traffic:
                 if conn in self._acked and acked >= self._acked[conn]:
                     sent = acked - self._acked[conn]
                 else:  # new, or a new connection on a port used before: all of it is new
-                    sent = acked - self._logged.pop(conn, 0)
+                    logged = self._logged.pop(conn, 0)
+                    sent = acked - logged
+                    self._counted[conn], self._in_log[conn] = logged, logged
                 if sent > 0:
+                    self._counted[conn] += sent
                     yield conn[0], sent
                 self._seen[conn] = now
             self._acked = current
             for conn, when in list(self._seen.items()):
                 if now - when > SEEN_SECONDS:
-                    del self._seen[conn]
+                    for known in (self._seen, self._counted, self._in_log):
+                        known.pop(conn, None)
         for ip, port, size in self.log.read():
             conn = (ip, port)
             if conn in self._seen:
-                continue  # the kernel has counted it, and correctly
+                # Counted by the kernel, but perhaps not its last second. A log that says
+                # more (Caddy versions that count a cut-off transfer) makes up the rest.
+                self._in_log[conn] = self._in_log.get(conn, 0) + size
+                more = self._in_log[conn] - self._counted.get(conn, 0)
+                if more > 0:
+                    self._counted[conn] = self._counted.get(conn, 0) + more
+                    yield ip, more
+                continue
             self._logged[conn] = self._logged.get(conn, 0) + size
             yield ip, size

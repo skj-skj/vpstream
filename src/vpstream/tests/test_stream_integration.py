@@ -187,19 +187,22 @@ def test_a_transfer_the_player_cuts_off_is_counted_by_what_was_sent(
     with socket.create_connection(("127.0.0.1", live.cfg.stream_port), timeout=10) as conn:
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
         conn.sendall(b"GET /aaa HTTP/1.1\r\nHost: x\r\nRange: bytes=0-\r\n\r\n")
+        # About 4 MB/s, a fast phone, for long enough to be seen a few times.
         got, started = 0, time.monotonic()
-        while got < 8 * 1024 * 1024 or time.monotonic() - started < 2.5:  # seen at least twice
+        while time.monotonic() - started < 3.5:
             chunk = conn.recv(65536)
             assert chunk
             got += len(chunk)
-            time.sleep(0.005)
-    # Hung up like a player that seeks: far from the whole 48 MB was sent.
+            time.sleep(0.016)
+    # Hung up like a player that seeks: far from the whole 48 MB was sent. What was sent
+    # after the last look may be missed (Caddy 2.6.2 logs 512 bytes): about a second of it.
     for _ in range(50):
         (device,) = live.api("status")["stream"]["devices"]
-        if device["bytes"] >= got * 0.9:
+        if device["bytes"] >= got - 6 * 1024 * 1024:
             break
         live.stop.wait(0.2)
-    assert got * 0.9 <= device["bytes"] <= got + 8 * 1024 * 1024, (got, device["bytes"])
+    window = 8 * 1024 * 1024  # what the kernel's buffers can hold past what was read
+    assert got - 6 * 1024 * 1024 <= device["bytes"] <= got + window, (got, device["bytes"])
 
 
 def test_caddy_runs_only_while_a_stream_does_and_opens_no_admin_port(

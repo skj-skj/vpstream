@@ -96,6 +96,28 @@ def test_a_request_logged_before_its_connection_was_seen_is_not_counted_twice(
     assert rig.read() == {}
 
 
+def test_the_last_second_of_a_connection_comes_from_the_log_when_it_says_more(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.kernel(("192.0.2.1", 9, 3_000_000))
+    assert rig.read() == {"192.0.2.1": 3_000_000}
+    rig.kernel()  # it closed after sending 1 MB more, between two looks
+    rig.logged("192.0.2.1", 9, 3_999_500)  # Caddy 2.11: the right count, without headers
+    assert rig.read() == {"192.0.2.1": 999_500}
+    rig.logged("192.0.2.1", 9, 512)  # and a 2.6.2-style line adds nothing wrong
+    assert rig.read() == {"192.0.2.1": 512}
+
+
+def test_a_log_that_says_less_than_the_kernel_adds_nothing(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.kernel(("192.0.2.1", 9, 470_000_000))
+    rig.read()
+    rig.kernel()
+    rig.logged("192.0.2.1", 9, 512)  # Caddy 2.6.2
+    assert rig.read() == {}
+
+
 def test_a_port_used_again_by_a_new_connection_starts_from_zero(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.kernel(("192.0.2.1", 2894, 9_000_000))
