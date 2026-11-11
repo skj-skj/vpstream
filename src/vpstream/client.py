@@ -11,6 +11,7 @@ from typing import Any
 from vpstream import api
 
 TIMEOUT = 10.0
+CHANGE_TIMEOUT = 90.0  # a start or a stop waits for Caddy and for the firewall helper
 
 
 class DaemonUnavailable(RuntimeError):
@@ -37,13 +38,25 @@ class _UnixConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
-def call(socket_path: Path, method: str, route: str, timeout: float = TIMEOUT) -> Any:
-    """Send one request to the daemon and return the decoded JSON answer."""
-    conn = _UnixConnection(socket_path, timeout)
+def call(
+    socket_path: Path,
+    method: str,
+    route: str,
+    payload: dict[str, Any] | None = None,
+    timeout: float | None = None,
+) -> Any:
+    """Send one request to the daemon and return the decoded JSON answer. A `payload` is
+    sent as JSON, and makes the request a change, which may take longer."""
+    headers = {"Connection": "close"}
+    body = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload)
+    conn = _UnixConnection(socket_path, timeout or (TIMEOUT if body is None else CHANGE_TIMEOUT))
     try:
-        conn.request(method, f"{api.API}/{route}", headers={"Connection": "close"})
+        conn.request(method, f"{api.API}/{route}", body=body, headers=headers)
         response = conn.getresponse()
-        body = response.read()
+        answer = response.read()
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         raise DaemonUnavailable(
             f"the vpstream daemon is not running (no answer on {socket_path}). "
@@ -59,7 +72,7 @@ def call(socket_path: Path, method: str, route: str, timeout: float = TIMEOUT) -
     finally:
         conn.close()
     try:
-        data = json.loads(body)
+        data = json.loads(answer)
     except ValueError as exc:
         raise DaemonRefused(
             f"the daemon sent an answer that is not JSON ({response.status})"

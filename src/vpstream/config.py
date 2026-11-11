@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,25 @@ class Paths:
     @property
     def socket(self) -> Path:
         return self.run_dir / "daemon.sock"
+
+    @property
+    def gate_socket(self) -> Path:
+        """Where Caddy asks about every request to the stream port."""
+        return self.run_dir / "gate.sock"
+
+    @property
+    def caddy_dir(self) -> Path:
+        """Caddy's configuration, its own files and its logs."""
+        return self.state_dir / "caddy"
+
+    @property
+    def videos_dir(self) -> Path:
+        """One link per video of the running stream, named by its number."""
+        return self.caddy_dir / "videos"
+
+    @property
+    def access_log(self) -> Path:
+        return self.caddy_dir / "access.log"
 
     @property
     def open_ports_file(self) -> Path:
@@ -58,10 +78,15 @@ def default_paths() -> Paths:
 class Config:
     stream_port: int = 1337
     dashboard_port: int = 1338
+    stream_host: str = ""  # the address in the URLs shown; "" means: find it
 
 
 # Section and key in the file -> field of Config.
-_KEYS = {("stream", "port"): "stream_port", ("dashboard", "port"): "dashboard_port"}
+_KEYS = {
+    ("stream", "port"): "stream_port",
+    ("stream", "host"): "stream_host",
+    ("dashboard", "port"): "dashboard_port",
+}
 
 DEFAULT_TEXT = """\
 # vpstream configuration. Restart the service after a change:
@@ -70,6 +95,9 @@ DEFAULT_TEXT = """\
 [stream]
 # The public port viewers connect to. It is open in the firewall only while a stream runs.
 port = 1337
+# The address or name in the URLs vpstream shows. Left out, it is the address this host
+# uses to reach the internet.
+# host = "203.0.113.5"
 
 [dashboard]
 # The dashboard port. It listens on this host only (127.0.0.1); `vpstream init` publishes it
@@ -87,6 +115,15 @@ def _port_problem(name: str, value: Any) -> str | None:
     return None
 
 
+def _host_problem(name: str, value: Any) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9.:-]*", value):
+        return f"{name} must be an address or a host name, not {value!r}"
+    return None
+
+
+_CHECKS = {"stream_host": _host_problem}
+
+
 def parse(text: str) -> Config:
     """Read configuration text. Missing keys take their defaults; unknown keys are errors."""
     try:
@@ -94,7 +131,7 @@ def parse(text: str) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"not valid TOML: {exc}") from exc
     problems: list[str] = []
-    values: dict[str, int] = {}
+    values: dict[str, Any] = {}
     for section, body in data.items():
         if not isinstance(body, dict):
             problems.append(f"unknown setting {section!r}")
@@ -104,7 +141,7 @@ def parse(text: str) -> Config:
             name = f"{section}.{key}"
             if field is None:
                 problems.append(f"unknown setting {name!r}")
-            elif problem := _port_problem(name, value):
+            elif problem := _CHECKS.get(field, _port_problem)(name, value):
                 problems.append(problem)
             else:
                 values[field] = value

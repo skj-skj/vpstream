@@ -15,13 +15,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, api, state, tailscale
+from vpstream import __version__, api, public, tailscale
+from vpstream.caddy import CaddyServer, Server
 from vpstream.config import Config, Paths
-from vpstream.firewall import Firewall, FirewallError
+from vpstream.control import Control
+from vpstream.firewall import Firewall
 from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out
 RETRY_SECONDS = 10.0
+TICK_SECONDS = 1.0  # how often the stream's time limit, Caddy and the access log are looked at
 LOOPBACK = "127.0.0.1"
 URL_SECONDS = 30.0  # how long the tailnet address is remembered between status requests
 # A status request asks Tailscale two things. Both waits together stay well under the time
@@ -88,22 +91,40 @@ def bind_tcp(host: str, port: int) -> socket.socket:
     return sock
 
 
+def _make_server(host: str, port: int, app: Any, listener: socket.socket) -> Any:
+    """A threaded server on a socket that is already listening. Requests that only read (a
+    viewer's, a status poll) are not logged one by one: there is one for every piece of a
+    video. Changes are."""
+    from werkzeug.serving import WSGIRequestHandler, make_server
+
+    class Handler(WSGIRequestHandler):
+        def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+            if self.command not in ("GET", "HEAD"):
+                super().log_request(code, size)
+
+    return make_server(
+        host, port, app, threaded=True, request_handler=Handler, fd=listener.fileno()
+    )
+
+
 @dataclass
 class Daemon:
     config: Config
     paths: Paths
     runner: Runner
     firewall: Firewall | None = None
+    server: Server | None = None  # the public server; None means streams cannot be started
     log: Callable[[str], None] = print
     retry_seconds: float = RETRY_SECONDS
     started: float = field(default_factory=time.time)
     dashboard_address: str | None = None
     dashboard_problem: str = "starting"
     ready: threading.Event = field(default_factory=threading.Event)
-    stream: dict[str, Any] | None = None
-    stream_port_state: str = "unknown"  # "closed", "open" or "unknown"
-    firewall_problem: str | None = None
+    control: Control = field(init=False)
     _published: tuple[float, str | None, str | None] | None = None
+
+    def __post_init__(self) -> None:
+        self.control = Control(self.config, self.paths, self.firewall, self.server, self.log)
 
     def published(self) -> tuple[str | None, str | None]:
         """The dashboard's tailnet URL, or why it has none. Asked from Tailscale, then
@@ -126,41 +147,12 @@ class Daemon:
         self._published = (now, url, problem)
         return url, problem
 
-    def reconcile(self) -> None:
-        """Bring the firewall in line with the recorded state when the daemon starts.
-
-        An open rule survives a crash or a reboot, so the stream port is closed here unless
-        a running stream is recorded.
-        """
-        recorded, problem = state.load(self.paths.state_dir / state.FILE_NAME)
-        if problem:
-            self.log(f"{problem}; treating it as no stream running")
-        self.stream = recorded.stream
-        port = self.config.stream_port
-        if self.stream is not None:
-            self.log(f"a running stream is recorded; leaving stream port {port} as it is")
-            return
-        if self.firewall is None:
-            self.log(f"no firewall helper; stream port {port} was not checked")
-            return
-        try:
-            self.firewall.close()
-        except FirewallError as exc:
-            self.firewall_problem = str(exc)
-            self.log(f"WARNING: {exc}")
-            return
-        self.stream_port_state = "closed"
-        self.log(f"stream port {port} is closed (no stream is running)")
-
     def status(self) -> dict[str, Any]:
         return {
             "version": __version__,
             "pid": os.getpid(),
             "uptime_seconds": round(time.time() - self.started, 1),
-            "stream": self.stream,
-            "stream_port": self.config.stream_port,
-            "stream_port_state": self.stream_port_state,
-            "firewall_problem": self.firewall_problem,
+            **self.control.status(),
             "dashboard": self._dashboard_status(),
         }
 
@@ -177,41 +169,69 @@ class Daemon:
             info["url"], info["problem"] = self.published()
         return info
 
-    def serve(self, stop: threading.Event) -> None:
-        """Serve until `stop` is set. The socket file is removed on the way out."""
-        from werkzeug.serving import make_server
+    def _unix_server(self, path: Path, app: Any) -> tuple[socket.socket, Any]:
+        listener = bind_unix(path)
+        return listener, _make_server(f"unix://{path}", 0, app, listener)
 
-        self.reconcile()
-        app = api.create_app(self.status)
+    def _tick(self, stop: threading.Event) -> None:
+        while not stop.wait(TICK_SECONDS):
+            try:
+                self.control.tick()
+            except Exception as exc:  # one bad look must not end the looking
+                self.log(f"WARNING: checking the stream failed: {exc!r}")
+
+    def serve(self, stop: threading.Event) -> None:
+        """Serve until `stop` is set. On the way out a running stream is stopped and the
+        socket files are removed."""
+        apps = {
+            self.paths.socket: api.create_app(self.status, self.control),
+            self.paths.gate_socket: public.create_app(self.control),
+        }
         self.paths.run_dir.mkdir(parents=True, exist_ok=True)
-        listener = bind_unix(self.paths.socket)
-        server = make_server(
-            f"unix://{self.paths.socket}", 0, app, threaded=True, fd=listener.fileno()
-        )
+        # Both sockets first: a second daemon is refused here, before it touches the firewall
+        # or the state, and the gate is there before Caddy can be started.
+        servers: list[tuple[Path, socket.socket, Any]] = []
+        try:
+            for path, app in apps.items():
+                servers.append((path, *self._unix_server(path, app)))
+        except DaemonError:
+            _close(servers)
+            raise
+        try:
+            self.control.reconcile()
+        except BaseException:
+            _close(servers)
+            raise
         threads = [
-            threading.Thread(target=server.serve_forever, name="socket", daemon=True),
-            threading.Thread(target=self._dashboard, args=(app, stop), name="dash", daemon=True),
+            threading.Thread(target=server.serve_forever, name=path.name, daemon=True)
+            for path, _, server in servers
         ]
+        dash = apps[self.paths.socket]
+        threads.append(threading.Thread(target=self._dashboard, args=(dash, stop), name="dash"))
+        threads.append(threading.Thread(target=self._tick, args=(stop,), name="tick"))
         for thread in threads:
+            thread.daemon = True
             thread.start()
         self.log(f"vpstream {__version__} daemon listening on {self.paths.socket}")
         self.ready.set()
         try:
             stop.wait()
         finally:
-            server.shutdown()
+            stop.set()
+            try:
+                self.control.shutdown()
+            except Exception as exc:  # the sockets are still closed and removed
+                self.log(f"WARNING: stopping the stream failed: {exc!r}")
+            for _, _, server in servers:
+                server.shutdown()
             for thread in threads:
                 thread.join(timeout=5)
-            server.server_close()
-            listener.close()
-            self.paths.socket.unlink(missing_ok=True)
+            _close(servers)
             self.log("vpstream daemon stopped")
 
     def _dashboard(self, app: Any, stop: threading.Event) -> None:
         """Keep the dashboard up on the loopback address; wait and retry while the port is
         taken."""
-        from werkzeug.serving import make_server
-
         port = self.config.dashboard_port
         while not stop.is_set():
             host = LOOPBACK
@@ -225,7 +245,7 @@ class Daemon:
                 stop.wait(self.retry_seconds)
                 continue
             bound_port = listener.getsockname()[1]
-            server = make_server(host, bound_port, app, threaded=True, fd=listener.fileno())
+            server = _make_server(host, bound_port, app, listener)
             self.dashboard_address = f"{host}:{bound_port}"
             self.log(f"dashboard on http://{self.dashboard_address}/ (this host only)")
             closer = threading.Thread(
@@ -241,6 +261,13 @@ class Daemon:
                 listener.close()
 
 
+def _close(servers: list[tuple[Path, socket.socket, Any]]) -> None:
+    for path, listener, server in servers:
+        server.server_close()
+        listener.close()
+        path.unlink(missing_ok=True)
+
+
 def run(config: Config, paths: Paths, runner: Runner, firewall: Firewall | None = None) -> int:
     """Run the daemon in the foreground until SIGTERM or Ctrl+C."""
     import signal
@@ -248,5 +275,7 @@ def run(config: Config, paths: Paths, runner: Runner, firewall: Firewall | None 
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
-    Daemon(config, paths, runner, firewall, log=lambda m: print(m, flush=True)).serve(stop)
+    server = CaddyServer(runner, config.stream_port, paths)
+    log = lambda m: print(m, flush=True)  # noqa: E731
+    Daemon(config, paths, runner, firewall, server, log=log).serve(stop)
     return 0

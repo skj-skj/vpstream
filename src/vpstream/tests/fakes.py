@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from vpstream.caddy import CaddyError
 from vpstream.firewall import FirewallError
 from vpstream.tools import Result
 
@@ -70,3 +71,25 @@ class FakeFirewall:
 
     def close(self) -> None:
         self._call("close")
+
+
+class FakeServer:
+    """Stands in for Caddy: records start and stop; `fail` makes every start raise."""
+
+    def __init__(self, fail: str = "") -> None:
+        self.calls: list[str] = []
+        self.fail = fail
+        self.up = False
+
+    def start(self) -> None:
+        self.calls.append("start")
+        if self.fail:
+            raise CaddyError(self.fail)
+        self.up = True
+
+    def stop(self) -> None:
+        self.calls.append("stop")
+        self.up = False
+
+    def running(self) -> bool:
+        return self.up

@@ -71,6 +71,19 @@ def check_tool(runner: Runner, tool: Tool) -> Check:
     return Check(tool.name, status, f"not found; needed for {tool.needed_for}", fix)
 
 
+def check_caddy_service(runner: Runner) -> Check | None:
+    """The caddy package brings a service of its own, a web server on port 80. vpstream
+    starts its own Caddy for each stream and never uses that one."""
+    if runner.run(["systemctl", "is-active", "--quiet", "caddy"], timeout=30).returncode != 0:
+        return None
+    return Check(
+        "caddy service",
+        "warning",
+        "the caddy package's own web server is running; vpstream does not use it",
+        "sudo systemctl disable --now caddy",
+    )
+
+
 def check_systemd(marker: Path) -> Check:
     """systemd is the running init system when it has made its runtime folder."""
     if marker.is_dir():
@@ -266,6 +279,8 @@ def run_checks(
     found = {c.name for c in checks if c.status == "ok"}
     if "systemctl" in found:
         checks.append(check_systemd(systemd_marker))
+        if "caddy" in found and (extra := check_caddy_service(runner)):
+            checks.append(extra)
     if "ufw" in found:
         checks.append(check_ufw_enabled(ufw_conf))
     if "tailscale" in found:

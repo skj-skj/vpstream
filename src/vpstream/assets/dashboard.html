@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vpstream</title>
+<style>
+  html, body { margin: 0; background: #111; color: #eee; font: 16px/1.45 sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 12px 16px 40px; }
+  h1 { font-size: 22px; margin: 8px 0; }
+  h2 { font-size: 18px; margin: 22px 0 8px; }
+  .muted { color: #aaa; }
+  .warn { color: #fc6; }
+  .error { color: #f77; min-height: 1.4em; }
+  button, input, select { font: inherit; padding: 8px 12px; margin: 4px 6px 4px 0;
+    background: #2a2a2a; color: #fff; border: 2px solid #555; border-radius: 8px; }
+  button { cursor: pointer; }
+  button:focus, input:focus, select:focus { outline: none; border-color: #ffd400; }
+  button[disabled] { opacity: .4; cursor: default; }
+  button.on { border-color: #ffd400; background: #3a3a10; }
+  button.danger { border-color: #a44; }
+  input[type=text] { width: min(100%, 520px); box-sizing: border-box; }
+  input.short { width: 9em; }
+  label { display: block; margin: 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+  td, th { border-bottom: 1px solid #333; padding: 6px 8px; text-align: left;
+    vertical-align: middle; }
+  td.url { font-family: monospace; font-size: 17px; word-break: break-all; }
+  .scroll { overflow-x: auto; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>vpstream <span id="version" class="muted"></span></h1>
+  <div id="notes" class="warn"></div>
+  <div id="error" class="error" role="alert"></div>
+
+  <section id="idle" hidden>
+    <h2>Start a stream</h2>
+    <form id="start">
+      <label>
+        <select id="kind"><option value="file">One video</option>
+          <option value="dir">A folder of videos</option></select>
+        <input id="path" type="text" placeholder="/full/path/on/the/server" required
+          autocomplete="off" spellcheck="false">
+      </label>
+      <label>Alias <input id="alias" class="short" type="text" placeholder="random"
+        autocomplete="off" spellcheck="false"></label>
+      <label>Stop after <input id="ttl" class="short" type="number" min="0" step="any"
+        value="180" required> minutes (0 = no limit)</label>
+      <label>Policy <select id="policy"><option value="open">open: everyone</option>
+        <option value="approval">approval: only devices you approve</option></select></label>
+      <button type="submit">Start</button>
+    </form>
+  </section>
+
+  <section id="live" hidden>
+    <h2>Stream <span id="summary" class="muted"></span></h2>
+    <div class="scroll"><table id="videos"></table></div>
+    <p>
+      <button id="stop" class="danger">Stop the stream</button>
+      <input id="newalias" class="short" type="text" placeholder="new alias" autocomplete="off"
+        spellcheck="false"><button id="setalias">Change alias</button>
+    </p>
+
+    <h2>Who gets in</h2>
+    <p id="policies">
+      <button data-policy="open">Open</button>
+      <button data-policy="approval">Approval</button>
+      <button data-policy="locked">Lock</button>
+      <span id="policytext" class="muted"></span>
+    </p>
+    <div class="scroll"><table id="devices"></table></div>
+  </section>
+</main>
+<script src="/assets/dashboard.js"></script>
+</body>
+</html>

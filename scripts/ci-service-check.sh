@@ -53,6 +53,57 @@ grep -q '"url": "https://ci-host.example.ts.net:1338/"' /tmp/status.json
 no sudo -u nobody "$BIN/vpstream" status
 vpstream doctor || true
 
+step "a stream: the real Caddy serves the file, and the port is open only while it runs"
+MEDIA=/srv/vpstream-ci-media
+status_code() { curl -s -m 10 -o /dev/null -w '%{http_code}' "$1"; }
+sudo mkdir -p "$MEDIA"
+head -c 300000 /dev/urandom | sudo tee "$MEDIA/film.mkv" > /dev/null
+sudo chmod 600 "$MEDIA/film.mkv"
+no as_group "$BIN/vpstream start --file $MEDIA/film.mkv"   # the service user cannot read it
+no has_rule 1337
+sudo chmod 644 "$MEDIA/film.mkv"
+as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci"
+has_rule "ufw allow 1337/tcp"
+[ "$(ps -o user= -C caddy | sort -u | tr -d ' ')" = vpstream ]
+curl -sS -m 10 -D /tmp/film.headers -o /tmp/film.out http://127.0.0.1:1337/ci
+sudo cmp /tmp/film.out "$MEDIA/film.mkv"
+grep -qi '^content-type: video/x-matroska' /tmp/film.headers
+[ "$(curl -sS -m 10 -r 10-19 http://127.0.0.1:1337/ci/1 | wc -c)" = 10 ]
+[ "$(status_code http://127.0.0.1:1337/)" = 404 ]
+[ "$(status_code http://127.0.0.1:1337/ci/2)" = 404 ]
+no curl -s -m 3 -o /dev/null http://127.0.0.1:2019/config/   # Caddy's admin port stays shut
+as_group "$BIN/vpstream devices lock"
+as_group "$BIN/vpstream devices disable 127.0.0.1"
+[ "$(status_code http://127.0.0.1:1337/ci)" = 403 ]
+as_group "$BIN/vpstream devices" | tee /tmp/devices.txt
+grep -q "127.0.0.1  disabled" /tmp/devices.txt
+as_group "$BIN/vpstream status"
+
+step "a crash: the stream, its port and its devices come back"
+sudo systemctl kill -s KILL vpstream
+sleep 10
+systemctl is-active vpstream
+has_rule "ufw allow 1337/tcp"
+[ "$(status_code http://127.0.0.1:1337/ci)" = 403 ]
+as_group "$BIN/vpstream devices enable 127.0.0.1"
+[ "$(status_code http://127.0.0.1:1337/ci)" = 200 ]
+
+step "stop closes the port and ends Caddy"
+as_group "$BIN/vpstream stop"
+no has_rule 1337
+no pgrep -x caddy
+no curl -s -m 3 -o /dev/null http://127.0.0.1:1337/ci
+
+step "a restart of the service ends the stream"
+as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci"
+has_rule "ufw allow 1337/tcp"
+sudo systemctl restart vpstream
+sleep 3
+no has_rule 1337
+no pgrep -x caddy
+as_group "$BIN/vpstream status --json" | grep -q '"stream": null'
+sudo rm -r "$MEDIA"
+
 step "the helper opens and closes only the configured port"
 sudo -u vpstream sudo -n "$FW" open
 has_rule "ufw allow 1337/tcp"

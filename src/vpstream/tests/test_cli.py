@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import cli, selftest
+from vpstream import cli, net, selftest
 
 
 def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -76,4 +76,4 @@ def test_caps_checks_the_results_path(tmp_path: Path, capsys: pytest.CaptureFixt
     [("0.0.0.0", "<server-ip>"), ("::", "<server-ip>"), ("::1", "[::1]"), ("10.0.0.2", "10.0.0.2")],
 )
 def test_url_host(host: str, shown: str) -> None:
-    assert cli._url_host(host) == shown
+    assert net.url_host(host) == shown
