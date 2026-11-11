@@ -11,7 +11,7 @@ import pytest
 from vpstream import access, api, cli, client, config, doctor
 from vpstream.control import Control
 from vpstream.tests.fakes import FakeFirewall, FakeRunner, FakeServer
-from vpstream.tools import ToolMissing
+from vpstream.tools import Result, ToolMissing
 
 ME = os.geteuid()
 
@@ -391,6 +391,8 @@ def test_grant_and_revoke_with_the_real_setfacl(library: Path, real: Any, own_re
     assert access.grant(real, me, "file", film) == 0  # it is there: nothing more to do
     assert access.revoke(real) == 2
     assert f"user:{me}" not in _acl(film) + _acl(library)
+    assert "mask::" not in _acl(film) + _acl(library)  # as it was before: no `+` in ls -l
+    assert oct(film.stat().st_mode & 0o777) == oct(0o660)
     assert not own_record.exists()
     assert access.revoke(real) == 0  # nothing left to take back
 
@@ -405,6 +407,7 @@ def test_an_entry_that_was_there_before_is_never_removed(
     assert access.recorded(own_record) == {me: [str(library)]}
     assert access.revoke(real) == 1
     assert f"user:{me}:r--" in _acl(film) and f"user:{me}" not in _acl(library)
+    assert "mask::" in _acl(film)  # still needed by the entry that stays
 
 
 def test_revoke_skips_what_is_gone_or_already_taken_back(
@@ -489,3 +492,23 @@ def test_revoke_command(
     assert cli.main(["revoke"]) == 0
     assert "Took back" in capsys.readouterr().out
     assert cli.main(["revoke"]) == 0 and capsys.readouterr().out == ""
+
+
+def test_a_mask_is_dropped_only_when_nothing_else_is_left() -> None:
+    acls = {
+        "/bare": "user::rw-\ngroup::rw-\nmask::rw-\nother::---\n",
+        "/named": "user::rw-\nuser:1001:r--\ngroup::rw-\nmask::rw-\nother::---\n",
+        "/default": "user::rwx\ngroup::r-x\nmask::r-x\nother::---\ndefault:user::rwx\n",
+        "/plain": "user::rw-\ngroup::rw-\nother::---\n",
+    }
+
+    class Acls(FakeRunner):
+        def run(self, args, *, timeout=None):  # type: ignore[no-untyped-def]
+            self.calls.append(list(args))
+            if args[0] == "getfacl":
+                return Result(0, acls[args[-1]], "")
+            return Result(0, "", "")
+
+    runner = Acls(("setfacl", "getfacl"))
+    access._drop_bare_masks(runner, list(acls))
+    assert [c for c in runner.calls if c[0] == "setfacl"] == [["setfacl", "-b", "--", "/bare"]]
