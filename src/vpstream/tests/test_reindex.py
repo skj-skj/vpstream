@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import mkv, reindex
+from vpstream import files, mkv, reindex
 from vpstream.tests import mkvdata
 from vpstream.tests.fakes import FakeMkvmerge, FakeRunner
 from vpstream.tools import ToolMissing
@@ -93,7 +93,7 @@ def test_no_copy_without_room_for_it(
     import shutil
 
     usage = shutil.disk_usage(tmp_path)
-    monkeypatch.setattr(reindex.shutil, "disk_usage", lambda p: usage._replace(free=1000))
+    monkeypatch.setattr(files.shutil, "disk_usage", lambda p: usage._replace(free=1000))
     with pytest.raises(reindex.ReindexError, match="not enough free space"):
         reindex.make(FakeMkvmerge(tmp_path), str(film), tmp_path / "c" / "x.mkv", threading.Event())
 

@@ -14,10 +14,13 @@ from werkzeug.exceptions import HTTPException
 
 from vpstream.control import Control, ControlError
 from vpstream.gate import GateError
-from vpstream.stream import StreamError, Unreadable
+from vpstream.stream import NeedsConfirm, StreamError, Unreadable
 
 API = "/api/v1"
-UNREADABLE = "unreadable"  # the `code` of a refusal the command line can put right
+# The `code` of a refusal the command line can put right: by giving the service access to
+# the files, or by asking whether a long prepare should go ahead.
+UNREADABLE = Unreadable.CODE
+CONFIRM = NeedsConfirm.CODE
 # Route -> (file in vpstream.assets, content type).
 ASSETS = {
     "/": ("dashboard.html", "text/html; charset=utf-8"),
@@ -60,6 +63,11 @@ def create_app(status: Callable[[], dict[str, Any]], control: Control | None = N
         app.add_url_rule(route, endpoint=name, view_func=asset(name, ctype))
 
     if control is not None:
+
+        @app.get(f"{API}/prepared")
+        def api_prepared() -> Response:
+            return jsonify(prepared=control.prepared())
+
         # Each change answers with the new status, so the caller shows it without asking again.
         changes: dict[str, Callable[[dict[str, Any]], Any]] = {
             "stream/start": control.start,
@@ -68,12 +76,16 @@ def create_app(status: Callable[[], dict[str, Any]], control: Control | None = N
             "stream/policy": lambda body: control.set_policy(body.get("policy")),
             "stream/unlock": lambda body: control.unlock(),
             "devices": lambda body: control.set_device(body.get("ip"), body.get("allowed")),
+            "prepare": control.prepare,
+            "prepare/cancel": control.cancel_prepare,
+            "prepared/rm": control.remove_prepared,
         }
 
         def change(action: Callable[[dict[str, Any]], Any]) -> Callable[[], Response]:
             def run() -> Response:
-                action(_body())
-                return jsonify(status())
+                extra = action(_body())
+                # The new status, and what the change itself answers (a plan, a count).
+                return jsonify({**(extra if isinstance(extra, dict) else {}), **status()})
 
             return run
 
@@ -85,9 +97,8 @@ def create_app(status: Callable[[], dict[str, Any]], control: Control | None = N
     @app.errorhandler(StreamError)
     @app.errorhandler(GateError)
     def refused(exc: ValueError) -> tuple[Response, int]:
-        if isinstance(exc, Unreadable):
-            return jsonify(error=str(exc), code=UNREADABLE, path=exc.path, user=exc.user), 400
-        return jsonify(error=str(exc)), 400
+        details = exc.details if isinstance(exc, StreamError) else {}
+        return jsonify(error=str(exc), **details), 400
 
     @app.errorhandler(ControlError)
     def failed(exc: ControlError) -> tuple[Response, int]:

@@ -7,38 +7,30 @@ size and change time, so it is made once and found again by the next stream of t
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import shutil
-import subprocess
 import threading
 from pathlib import Path
 from typing import Any
 
 from vpstream import mkv
-from vpstream.tools import Runner, low_priority_prefix, require, tail
+from vpstream.files import has_room, source_key
+from vpstream.tools import Cancelled, Runner, low_priority_prefix, require, run_cancellable, tail
 
 TOOL = "mkvmerge"
 FOLDER = "index"  # under the cache folder
 IDENTIFY_TIMEOUT = 120
-SPARE_BYTES = 512 * 1024 * 1024  # left free on the disk after the copy
-POLL_SECONDS = 0.5
+
+__all__ = ["Cancelled", "ReindexError", "copy_path", "make", "ready"]
 
 
 class ReindexError(RuntimeError):
     """The copy could not be made; the message says why."""
 
 
-class Cancelled(Exception):
-    pass
-
-
 def copy_path(cache_dir: Path, source: str) -> Path:
     """Where the copy of `source` goes. A changed original gets a new name."""
-    st = os.stat(source)
-    key = f"{source}\0{st.st_size}\0{st.st_mtime_ns}".encode("utf-8", "surrogateescape")
-    return cache_dir / FOLDER / f"{hashlib.sha256(key).hexdigest()[:32]}.mkv"
+    return cache_dir / FOLDER / f"{source_key(source)}.mkv"
 
 
 def ready(cache_dir: Path, source: str) -> Path | None:
@@ -82,29 +74,15 @@ def make(runner: Runner, source: str, out: Path, cancel: threading.Event) -> Non
     program = require(runner, TOOL, "a proper seek index in MKV files")
     ids = track_ids(_identify(runner, source))
     out.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-    need = os.stat(source).st_size + SPARE_BYTES
-    if shutil.disk_usage(out.parent).free < need:
+    if not has_room(out.parent, os.stat(source).st_size):
         raise ReindexError(f"not enough free space in {out.parent} for a copy")
     part = out.with_name(out.name + ".part")
     args = mkvmerge_args(source, part, ids)
     args[0] = program
     try:
-        proc = subprocess.Popen(
-            [*low_priority_prefix(runner), *args],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-        )
-        while proc.poll() is None:
-            if cancel.wait(POLL_SECONDS):
-                proc.terminate()
-                proc.wait()
-                raise Cancelled
-        said = proc.stdout.read() if proc.stdout else ""
-        if proc.returncode not in (0, 1):  # 1: done, with warnings
-            raise ReindexError(f"mkvmerge failed: {said.strip()[-300:] or proc.returncode}")
+        code, said = run_cancellable([*low_priority_prefix(runner), *args], cancel)
+        if code not in (0, 1):  # 1: done, with warnings
+            raise ReindexError(f"mkvmerge failed: {said.strip()[-300:] or code}")
         problem = mkv.index_problem(part)
         if problem:
             raise ReindexError(f"the copy is no better: {problem}")

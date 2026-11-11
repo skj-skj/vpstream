@@ -209,13 +209,6 @@ def test_status_notes_a_version_mismatch() -> None:
     assert "restart" not in cli.format_status(info, "0.3.0")
 
 
-@pytest.mark.parametrize(
-    ("seconds", "text"), [(5, "5s"), (192, "3m 12s"), (7500, "2h 05m"), (273600, "3d 4h")]
-)
-def test_duration(seconds: float, text: str) -> None:
-    assert cli._duration(seconds) == text
-
-
 # --- the dashboard port
 
 
@@ -663,6 +656,7 @@ def test_format_devices_and_states() -> None:
                 "bytes": 0,
                 "last_seen": 0,
                 "user_agent": "",
+                "code": "0420",
             },
             {"ip": "192.0.2.3", "allowed": True, "passes": True, "wl": True},
             {"ip": "192.0.2.4", "allowed": False, "passes": False, "wl": False},
@@ -672,6 +666,7 @@ def test_format_devices_and_states() -> None:
     assert lines[0].split() == [
         "ADDRESS",
         "STATE",
+        "CODE",
         "REQUESTS",
         "BLOCKED",
         "SENT",
@@ -682,6 +677,7 @@ def test_format_devices_and_states() -> None:
     assert lines[1].split() == [
         "192.0.2.1",
         "allowed",
+        "-",
         "3",
         "0",
         "1.5",
@@ -690,17 +686,20 @@ def test_format_devices_and_states() -> None:
         "ago",
         "VLC/3.0.20",
     ]
-    assert lines[2].split() == ["2001:db8::1", "waiting", "WL", "2", "2", "0", "B", "never", "-"]
+    assert lines[2].split() == [
+        "2001:db8::1",
+        "waiting",
+        "WL",
+        "0420",
+        "2",
+        "2",
+        "0",
+        "B",
+        "never",
+        "-",
+    ]
     assert "enabled WL" in lines[3] and "disabled" in lines[4]
     assert "No device" in cli.format_devices({"devices": []}, 1.0)
-
-
-@pytest.mark.parametrize(
-    ("count", "text"),
-    [(0, "0 B"), (999, "999 B"), (1000, "1.0 kB"), (2.5e9, "2.5 GB"), (5e12, "5000.0 GB")],
-)
-def test_size(count: float, text: str) -> None:
-    assert cli._size(count) == text
 
 
 def test_format_stream_of_one_file() -> None:

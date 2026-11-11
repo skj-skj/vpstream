@@ -16,17 +16,19 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__
+from vpstream import __version__, text
 from vpstream.ffargs import (
-    BROWSER_COPY_CODECS,
+    DEFAULT_SETTINGS,
     EncodeSettings,
     Window,
+    base_hls,
     burn_hls,
-    copy_hls,
-    escape_filter_path,
-    transcode_hls,
+    copy_ok,
 )
-from vpstream.probe import MediaInfo, SubtitleTrack, probe
+from vpstream.files import dir_size
+from vpstream.prepare import load_factor
+from vpstream.probe import BURNED_IN, MediaInfo, SubtitleTrack, probe
+from vpstream.subtitles import filter_source
 from vpstream.tools import Runner, ffmpeg_names, low_priority_prefix, require
 
 # Builds a step's ffmpeg command for the folder it should write into.
@@ -67,6 +69,7 @@ class BenchReport:
     window_length: float
     host: dict[str, Any]
     steps: list[StepResult]
+    load: float = 1.0  # an encode of this video as a share of 1080p at 24 fps (prepare)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -99,7 +102,7 @@ def pick_burn_track(info: MediaInfo, number: int | None) -> SubtitleTrack | None
                 return t
         raise ValueError(f"no subtitle track {number}; this file has {len(info.subtitles)}")
     for t in info.subtitles:
-        if t.treatment == "burned in":
+        if t.treatment == BURNED_IN:
             return t
     return None
 
@@ -163,10 +166,6 @@ def host_info(runner: Runner) -> dict[str, Any]:
     }
 
 
-def _dir_size(path: Path) -> int:
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-
-
 def _children_cpu() -> float:
     r = resource.getrusage(resource.RUSAGE_CHILDREN)
     return r.ru_utime + r.ru_stime
@@ -198,7 +197,7 @@ def run_step(
         media_seconds=media_seconds,
         wall_seconds=wall,
         cpu_seconds=round(_children_cpu() - cpu0, 3),
-        output_bytes=_dir_size(out),
+        output_bytes=dir_size(out),
         note=note,
     )
     if not step.ok:
@@ -207,19 +206,6 @@ def run_step(
         step.font_warnings = font_warnings(res.stderr)
     shutil.rmtree(out, ignore_errors=True)
     return step
-
-
-def filter_source(work: Path, path: Path) -> Path:
-    """Link the source to a plain name, because the subtitles filter reads it by name.
-
-    Raises ValueError or OSError when the temporary folder cannot be used for this.
-    """
-    link = work / ("source" + path.suffix.lower())
-    if not re.fullmatch(r"\.[a-z0-9]+", link.suffix):
-        link = work / "source"
-    escape_filter_path(link)
-    os.symlink(path.resolve(), link)
-    return link
 
 
 def benchmark(
@@ -258,9 +244,12 @@ def benchmark(
     with tempfile.TemporaryDirectory(prefix="vpstream-bench-", dir=tmp_dir) as tmp:
         work = Path(tmp)
 
+        languages = [a.language for a in info.audio]
+        base = partial(base_hls, src, video_codec=v.codec, audio=languages, window=window)
         progress("copy to HLS")
-        note = "" if v.codec in BROWSER_COPY_CODECS else f"{v.codec} copy is unlikely to play"
-        step("copy", lambda out: copy_hls(src, out, video_codec=v.codec, window=window), note)
+        playable = copy_ok(v.codec, v.pix_fmt, v.bit_depth)
+        note = "" if playable else f"{v.codec} {v.bit_depth}-bit copy is unlikely to play"
+        step("copy", partial(base, copy=True), note)
 
         hdr_note = ""
         if v.hdr:
@@ -268,12 +257,7 @@ def benchmark(
         for preset in presets:
             progress(f"transcode to H.264 ({preset})")
             build = partial(
-                transcode_hls,
-                src,
-                hdr=v.hdr,
-                tonemap=tonemap,
-                window=window,
-                settings=EncodeSettings(preset=preset),
+                base, copy=False, hdr=v.hdr, tonemap=tonemap, settings=EncodeSettings(preset=preset)
             )
             step(f"transcode {preset}", build, hdr_note)
 
@@ -333,26 +317,30 @@ def benchmark(
         window_length=media_seconds,
         host=host_info(runner),
         steps=steps,
+        load=load_factor(info),
     )
 
 
-def fmt_duration(seconds: float) -> str:
-    s = round(seconds)
-    h, rem = divmod(s, 3600)
-    m, sec = divmod(rem, 60)
-    if h:
-        return f"{h}h {m:02d}m"
-    if m:
-        return f"{m}m {sec:02d}s"
-    return f"{sec}s"
+def speeds(r: BenchReport) -> dict[str, float]:
+    """What the configuration's [prepare] settings would be from this run: the copy's speed,
+    and the speed of the transcode with vpstream's own preset, as if it were of 1080p at 24
+    fps. Only what was measured."""
+    found = {}
+    for step in r.steps:
+        if step.ok and step.speed > 0:
+            if step.name == "copy":
+                found["copy_speed"] = round(step.speed, 2)
+            elif step.name == f"transcode {DEFAULT_SETTINGS.preset}":
+                found["encode_speed"] = round(step.speed * r.load, 2)
+    return found
 
 
 def format_report(r: BenchReport) -> str:
     gb = r.size / 1e9
     lines = [
-        f"{Path(r.file).name} · {fmt_duration(r.duration)} · {gb:.1f} GB",
+        f"{Path(r.file).name} · {text.duration(r.duration)} · {gb:.1f} GB",
         f"Video: {r.video}",
-        f"Sample: {r.window_length:g} s from {fmt_duration(r.window_start)}"
+        f"Sample: {r.window_length:g} s from {text.duration(r.window_start)}"
         f" · {r.host.get('cpus')} CPUs · {r.host.get('cpu_model', '')}".rstrip(" ·"),
         "",
         f"{'Step':<20} {'Speed':>8} {'Full film':>11} {'Output':>13}  Note",
@@ -365,7 +353,7 @@ def format_report(r: BenchReport) -> str:
             lines.append(f"{s.name:<20} {'FAILED':>8} {'-':>11} {'-':>13}  {s.note}")
             lines += ["    " + e for e in s.error.splitlines()]
             continue
-        full = fmt_duration(r.duration / s.speed) if s.speed and r.duration else "-"
+        full = text.duration(r.duration / s.speed) if s.speed and r.duration else "-"
         lines.append(
             f"{s.name:<20} {s.speed:>7.2f}x {full:>11} {s.output_mbps:>8.1f} Mb/s  {s.note}"
         )
@@ -376,6 +364,14 @@ def format_report(r: BenchReport) -> str:
         lines += [
             "",
             "Steps below 1x take longer than the film itself: " + ", ".join(s.name for s in slow),
+        ]
+    found = speeds(r)
+    if found:
+        lines += [
+            "",
+            "For prepare's estimates, in /etc/vpstream/config.toml (then restart the service):",
+            "  [prepare]",
+            *(f"  {key} = {value:g}" for key, value in found.items()),
         ]
     return "\n".join(lines)
 

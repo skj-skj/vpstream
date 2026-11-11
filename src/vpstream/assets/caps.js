@@ -311,26 +311,6 @@
 
   /* ---------- subtitles: native WebVTT track and our own overlay ---------- */
 
-  function parseTime(t) {
-    var p = t.trim().split(":"), s = 0;
-    for (var i = 0; i < p.length; i++) s = s * 60 + parseFloat(p[i].replace(",", "."));
-    return s;
-  }
-
-  function parseVtt(text) {
-    var cues = [], lines = text.replace(/\r/g, "").split("\n");
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf("-->") > 0) {
-        var parts = lines[i].split("-->");
-        var start = parseTime(parts[0]), end = parseTime(parts[1].trim().split(" ")[0]);
-        var body = [];
-        for (i++; i < lines.length && lines[i] !== ""; i++) body.push(lines[i]);
-        cues.push({ start: start, end: end, text: body.join("\n") });
-      }
-    }
-    return cues;
-  }
-
   function subtitleTest(done) {
     var long = manifest.extras && manifest.extras.long;
     if (!long) { S.subtitles = { result: "skip", why: "no 20 s clip" }; done(); return; }
@@ -338,7 +318,7 @@
     var x = new XMLHttpRequest();
     x.open("GET", MEDIA + manifest.vtt, true);
     x.onload = function () {
-      var cues = parseVtt(x.responseText);
+      var cues = VpVtt.parse(x.responseText);
       var res = { parsedCues: cues.length, overlaySeen: [], nativeCues: null };
       var v = freshVideo(true);
       var tr = document.createElement("track");
@@ -349,10 +329,7 @@
       if (v.textTracks && v.textTracks[0]) v.textTracks[0].mode = "showing";
       var ov = $("overlay");
       var timer = setInterval(function () {
-        var t = v.currentTime, txt = "";
-        for (var i = 0; i < cues.length; i++) {
-          if (t >= cues[i].start && t < cues[i].end) { txt = cues[i].text; break; }
-        }
+        var txt = VpVtt.at(cues, v.currentTime);
         clear("overlay");
         if (txt) {
           var s = document.createElement("span"); s.textContent = txt; ov.appendChild(s);

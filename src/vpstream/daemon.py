@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, api, public, tailscale
+from vpstream import __version__, api, prepare, public, tailscale
 from vpstream.caddy import CaddyServer, Server
 from vpstream.config import Config, Paths
 from vpstream.control import Control
@@ -124,8 +124,16 @@ class Daemon:
     _published: tuple[float, str | None, str | None] | None = None
 
     def __post_init__(self) -> None:
+        speeds = prepare.Speeds(self.config.copy_speed, self.config.encode_speed)
+        preparer = prepare.Preparer(self.paths.cache_dir, self.runner, self.log, speeds=speeds)
         self.control = Control(
-            self.config, self.paths, self.firewall, self.server, self.log, runner=self.runner
+            self.config,
+            self.paths,
+            self.firewall,
+            self.server,
+            self.log,
+            runner=self.runner,
+            preparer=preparer,
         )
 
     def published(self) -> tuple[str | None, str | None]:

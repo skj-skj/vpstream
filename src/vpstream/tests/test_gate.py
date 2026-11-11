@@ -221,3 +221,33 @@ def test_a_name_that_is_not_utf8_can_be_shown() -> None:
     media.shown(name).encode("utf-8")  # does not raise
     assert media.shown("plain é.mkv") == "plain é.mkv"
     assert media.is_video(name) and not media.is_video("notes.txt")
+
+
+def test_a_device_that_waits_gets_a_code_it_keeps() -> None:
+    table = Devices()
+    table.visit(APPROVAL, "192.0.2.1", "TV", 1.0)
+    code = table.get("192.0.2.1").code  # type: ignore[union-attr]
+    assert len(code) == 4 and code.isdigit()
+    table.visit(APPROVAL, "192.0.2.1", "TV", 2.0)
+    assert table.get("192.0.2.1").code == code  # type: ignore[union-attr]
+    again = Devices.from_rows(table.rows())
+    assert again.get("192.0.2.1").code == code  # type: ignore[union-attr]
+
+
+def test_only_the_waiting_list_hands_out_codes() -> None:
+    table = Devices()
+    table.visit(OPEN, "192.0.2.1", "VLC", 1.0)
+    table.visit(LOCKED, "192.0.2.2", "VLC", 1.0)
+    table.decide("192.0.2.3", True, 1.0)
+    table.visit(APPROVAL, "192.0.2.3", "TV", 1.0)
+    assert {r["ip"]: r["code"] for r in table.rows()} == {
+        "192.0.2.1": "",
+        "192.0.2.2": "",
+        "192.0.2.3": "",
+    }
+
+
+@pytest.mark.parametrize("code", ["123", "12345", "abcd", 1234, None, "12 4"])
+def test_a_recorded_code_that_does_not_fit_is_dropped(code: object) -> None:
+    table = Devices.from_rows([{"ip": "192.0.2.1", "code": code}])
+    assert table.get("192.0.2.1").code == ""  # type: ignore[union-attr]

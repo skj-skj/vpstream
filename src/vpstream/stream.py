@@ -13,14 +13,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import access, gate, media
+from vpstream import access, gate, media, player, prepared, tracks
 
-DIRECT = "direct"
-MODES = (DIRECT,)  # browser mode comes with the prepare command
-DEFAULT_POLICY = {DIRECT: gate.OPEN}
+DIRECT = "direct"  # the files as they are, for players such as VLC
+BROWSER = "browser"  # prepared HLS versions and a player page, for TV browsers
+MODES = (DIRECT, BROWSER)
+DEFAULT_POLICY = {DIRECT: gate.OPEN, BROWSER: gate.APPROVAL}
 DEFAULT_TTL_MINUTES = 180.0
 MAX_TTL_MINUTES = 7 * 24 * 60.0
 PLAYLIST = "playlist.m3u"
+HLS = "hls"  # /ALIAS/N/hls/... are the files of a video's prepared versions
+ASSETS = "assets"  # /ALIAS/assets/NAME are the player's own files
 # Names a stream cannot take: they are, or will be, pages of vpstream itself.
 RESERVED = frozenset({"caps", "api", "assets", "static", "player", "hls", "wait", "index"})
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -28,6 +31,26 @@ _ALIAS = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 
 class StreamError(ValueError):
     """A stream cannot be started or changed as asked; the message says why."""
+
+    @property
+    def details(self) -> dict[str, Any]:
+        """What else the answer carries, for a caller that can act on it."""
+        return {}
+
+
+class NeedsConfirm(StreamError):
+    """It would take long (a transcode, or longer than the film). Sent again with
+    `confirmed`, it goes ahead."""
+
+    CODE = "confirm"
+
+    def __init__(self, message: str, plans: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.plans = plans
+
+    @property
+    def details(self) -> dict[str, Any]:
+        return {"code": self.CODE, "plans": self.plans}
 
 
 def check_alias(text: Any) -> str:
@@ -60,6 +83,8 @@ class Unreadable(StreamError):
     """The daemon's user cannot read what it was asked to stream. The command line can
     often put that right itself (see `access`), so the answer says what and for whom."""
 
+    CODE = "unreadable"
+
     def __init__(self, path: Path) -> None:
         self.path = str(path)
         self.user = access.service_user()
@@ -68,6 +93,10 @@ class Unreadable(StreamError):
             "by the owner of the files, gives it access by itself; anyone else can with: "
             f"sudo setfacl -m u:{self.user}:rX {path}"
         )
+
+    @property
+    def details(self) -> dict[str, Any]:
+        return {"code": self.CODE, "path": self.path, "user": self.user}
 
 
 def _is(path: Path, check: str) -> bool:
@@ -82,7 +111,34 @@ def _is(path: Path, check: str) -> bool:
     return bool(getattr(path, check)())
 
 
-def _videos(kind: str, path: Path) -> list[str]:
+def source_of(options: dict[str, Any]) -> tuple[str, str]:
+    """("file", path) or ("dir", path) from a request that names exactly one of them."""
+    file, folder = options.get("file"), options.get("dir")
+    if bool(file) == bool(folder):
+        raise StreamError("give exactly one of a file or a folder to stream")
+    source = file or folder
+    if not isinstance(source, str):
+        raise StreamError(f"not a path: {source!r}")
+    return ("file" if file else "dir"), source
+
+
+def check_choice(name: str, value: Any, many: bool = False) -> str | None:
+    """A track choice as given, after checking it reads: one track for `--audio` and the
+    `--sub` of start, several (`many`) for the `--sub` of prepare."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise StreamError(f"{name}: not a track choice: {value!r}")
+    try:
+        tracks.parse_choices(value) if many else tracks.parse_choice(value)
+    except tracks.SelectionError as exc:
+        raise StreamError(f"{name}: {exc}") from exc
+    return value
+
+
+def videos_of(kind: str, path: Path) -> list[str]:
+    """The videos a file or folder stream would serve, as full paths with links followed.
+    Raises StreamError (Unreadable when the daemon's user cannot read them)."""
     if not path.is_absolute():
         raise StreamError(f"give the full path, starting with /: {path}")
     if kind == "file":
@@ -132,15 +188,23 @@ class Answer:
     """What one request to the stream port gets."""
 
     status: int
-    kind: str  # "video", "index", "playlist", "denied" or "missing"
-    file: str = ""  # for a video: the file to send (the original, or its re-indexed copy)
-    number: int = 0  # and its number
+    # "video" or "file" (Caddy sends it), "index", "playlist", "player", "asset", "redirect",
+    # "preparing", "notready", "waiting", "denied" or "missing"
+    kind: str
+    file: str = ""  # a video or a prepared file: the full path of the file to send
+    number: int = 0  # the video's number
+    location: str = ""  # for a redirect: where to
+    asset: str = ""  # for an asset: its name in player.ASSETS
     alias: str = ""  # for an index or a playlist: what it lists
     names: list[str] = field(default_factory=list)
+    ready: list[bool] = field(default_factory=list)  # for an index: which videos play
+    rel: str = ""  # a prepared file, as Caddy finds it under the video's number
+    data: dict[str, Any] = field(default_factory=dict)  # the player's settings; the code
 
 
 MISSING = Answer(404, "missing")
 DENIED = Answer(403, "denied")
+NUMBER = re.compile(r"[1-9][0-9]{0,5}")
 
 
 @dataclass
@@ -159,6 +223,10 @@ class Stream:
     served: list[str] = field(default_factory=list)
     indexing: set[int] = field(default_factory=set)  # numbers whose copy is being made
     notes: dict[int, str] = field(default_factory=dict)  # number -> why it stays slow to seek
+    # Browser mode: each video's folder of prepared versions, and what players start with.
+    entries: list[str] = field(default_factory=list)
+    audio: str | None = None
+    sub: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.served) != len(self.videos):
@@ -167,30 +235,30 @@ class Stream:
     @classmethod
     def create(cls, options: dict[str, Any], now: float) -> Stream:
         """A new stream from what `start` was given. Raises StreamError for anything wrong."""
-        known = {"file", "dir", "mode", "alias", "ttl", "policy"}
+        known = {"file", "dir", "mode", "alias", "ttl", "policy", "audio", "sub", "confirmed"}
         if extra := sorted(set(options) - known):
             raise StreamError(f"unknown option: {', '.join(extra)}")
-        file, folder = options.get("file"), options.get("dir")
-        if bool(file) == bool(folder):
-            raise StreamError("give exactly one of a file or a folder to stream")
-        source = file or folder
-        if not isinstance(source, str):
-            raise StreamError(f"not a path: {source!r}")
+        kind, source = source_of(options)
         mode = options.get("mode") or DIRECT
         if mode not in MODES:
-            raise StreamError(f"not a mode: {mode!r}. This version has: {', '.join(MODES)}")
+            raise StreamError(f"not a mode: {mode!r}. Use one of: {', '.join(MODES)}")
         policy = check_policy(options.get("policy") or DEFAULT_POLICY[mode])
         alias = check_alias(options["alias"]) if options.get("alias") else random_alias()
         ttl = _ttl_seconds(options.get("ttl"))
-        kind = "file" if file else "dir"
+        audio = check_choice("audio", options.get("audio"))
+        sub = check_choice("sub", options.get("sub"))
+        if mode == DIRECT and (audio or sub):
+            raise StreamError("audio and subtitle choices are for browser mode (--mode browser)")
         stream = cls(
             kind=kind,
             source=source,
-            videos=_videos(kind, Path(source)),
+            videos=videos_of(kind, Path(source)),
             alias=alias,
             started=now,
             expires=now + ttl if ttl else None,
             mode=mode,
+            audio=audio,
+            sub=sub,
         )
         stream.set_policy(policy)
         return stream
@@ -232,27 +300,70 @@ class Stream:
         if not parts or parts[0].lower() != self.alias:
             return MISSING
         if not self.devices.visit(self.policy, ip, user_agent, now):
+            device = self.devices.get(ip)
+            waits = self.policy == gate.APPROVAL and device is not None and device.allowed is None
+            if wants_html and waits and device is not None and device.code:
+                return Answer(403, "waiting", data={"code": device.code})
             return DENIED
+        browser = self.mode == BROWSER
         if len(parts) == 1:
             if self.kind == "file":
-                return self._video(1)
+                return self._play(1, wants_html) if browser else self._video(1)
             return self._listing("index" if wants_html else "playlist")
+        head = parts[1].lower()
+        if len(parts) == 2 and head == PLAYLIST and self.kind == "dir":
+            return self._listing("playlist")
+        if browser and len(parts) == 3 and head == ASSETS:
+            return Answer(200, "asset", asset=parts[2]) if parts[2] in player.ASSETS else MISSING
+        if not NUMBER.fullmatch(parts[1]) or not 1 <= int(parts[1]) <= len(self.videos):
+            return MISSING
+        number = int(parts[1])
         if len(parts) == 2:
-            if parts[1].lower() == PLAYLIST and self.kind == "dir":
-                return self._listing("playlist")
-            if re.fullmatch(r"[1-9][0-9]{0,5}", parts[1]):
-                return self._video(int(parts[1]))
+            return self._play(number, wants_html) if browser else self._video(number)
+        if browser and len(parts) > 3 and parts[2] == HLS:
+            return self._prepared_file(number, "/".join(parts[3:]))
         return MISSING
 
+    def ready(self, number: int) -> bool:
+        """Whether a video can be played: in browser mode, once its base version is made."""
+        if self.mode != BROWSER:
+            return number not in self.indexing
+        return prepared.base_ready(Path(self.entries[number - 1]))
+
     def _listing(self, kind: str) -> Answer:
-        return Answer(200, kind, alias=self.alias, names=self.names())
+        ready = [self.ready(n) for n in range(1, len(self.videos) + 1)]
+        return Answer(200, kind, alias=self.alias, names=self.names(), ready=ready)
 
     def _video(self, number: int) -> Answer:
-        if not 1 <= number <= len(self.videos):
-            return MISSING
         if number in self.indexing:
             return Answer(503, "preparing", number=number)
         return Answer(200, "video", self.served[number - 1], number)
+
+    def master_url(self, number: int) -> str:
+        return f"/{self.alias}/{number}/{HLS}/{prepared.BASE}/{player.MASTER}"
+
+    def _play(self, number: int, wants_html: bool) -> Answer:
+        """A browser gets the player page, any other player the HLS master playlist."""
+        if not self.ready(number):
+            return Answer(503, "notready", number=number)
+        if not wants_html:
+            return Answer(302, "redirect", number=number, location=self.master_url(number))
+        settings = player.settings(
+            Path(self.entries[number - 1]),
+            alias=self.alias,
+            number=number,
+            names=self.names(),
+            folder=self.kind == "dir",
+            audio=self.audio,
+            sub=self.sub,
+        )
+        return Answer(200, "player", number=number, alias=self.alias, data=settings)
+
+    def _prepared_file(self, number: int, rel: str) -> Answer:
+        found = prepared.served_file(Path(self.entries[number - 1]), rel)
+        if found is None:
+            return MISSING
+        return Answer(200, "file", str(found), number, rel=f"{number}/{rel}")
 
     # --- as plain data
 
@@ -275,6 +386,9 @@ class Stream:
             "served": self.served,
             "indexing": sorted(self.indexing),
             "notes": {str(n): text for n, text in self.notes.items()},
+            "entries": self.entries,
+            "audio": self.audio,
+            "sub": self.sub,
         }
 
     @classmethod
@@ -297,15 +411,22 @@ class Stream:
             served = data.get("served", videos)  # a stream recorded before 0.9 has none
             indexing = data.get("indexing", [])
             notes = data.get("notes", {})
+            entries = data.get("entries", [])
             if (
                 not isinstance(served, list)
                 or len(served) != count
                 or not all(isinstance(v, str) and v.startswith("/") for v in served)
                 or not all(isinstance(n, int) and 0 < n <= count for n in indexing)
                 or not isinstance(notes, dict)
+                or not isinstance(entries, list)
+                or not all(isinstance(e, str) and e.startswith("/") for e in entries)
+                or len(entries) != (count if data["mode"] == BROWSER else 0)
             ):
                 raise StreamError("the recorded stream is not usable")
             return cls(
+                entries=entries,
+                audio=check_choice("audio", data.get("audio")),
+                sub=check_choice("sub", data.get("sub")),
                 served=served,
                 indexing=set(indexing),
                 notes={int(n): str(text) for n, text in notes.items()},
@@ -333,6 +454,8 @@ class Stream:
             "url": url,
             "guessers": self.devices.guessers(),
             "mode": self.mode,
+            "audio": self.audio,
+            "sub": self.sub,
             "policy": self.policy,
             "unlocked_policy": self.unlocked_policy,
             "started": self.started,
@@ -343,6 +466,7 @@ class Stream:
                     "number": n,
                     "name": name,
                     "url": f"{url}/{n}",
+                    "ready": self.ready(n),
                     "preparing": n in self.indexing,
                     "note": self.notes.get(n),
                 }

@@ -95,9 +95,15 @@ def test_playlist_entries_never_carry_a_made_up_host() -> None:
 def test_refusals(control: Control, viewer: FlaskClient, show: Path) -> None:
     assert viewer.get("/aaa", headers=IP).status_code == 404  # no stream
     control.start({"dir": str(show), "alias": "aaa", "policy": "approval"})
-    refused = viewer.get("/aaa/1", headers={**IP, "Accept": "text/html"})
+    refused = viewer.get("/aaa/1", headers=IP)
     assert refused.status_code == 403 and refused.mimetype == "text/plain"
     assert "X-Vpstream-File" not in refused.headers
+    # A browser waits on a page with the code the dashboard shows next to its address.
+    waiting = viewer.get("/aaa/1", headers={**IP, "Accept": "text/html"})
+    code = control.status()["stream"]["devices"][0]["code"]
+    assert waiting.status_code == 403 and waiting.mimetype == "text/html"
+    assert f'class="code">{code}<' in waiting.text and 'http-equiv="refresh"' in waiting.text
+    assert "X-Vpstream-File" not in waiting.headers
     assert viewer.get("/", headers=IP).status_code == 404
     assert viewer.get("/bbb", headers=IP).status_code == 404
     assert viewer.get("/aaa//1/", headers=IP).status_code == 403  # no redirect gives it away

@@ -14,7 +14,7 @@ from typing import Any
 from flask import Flask, Response, request
 from werkzeug.exceptions import HTTPException
 
-from vpstream import caddy, media
+from vpstream import caddy, media, player, text
 from vpstream.control import Control
 from vpstream.net import normal_ip
 from vpstream.stream import Answer
@@ -25,7 +25,7 @@ _HOST = re.compile(r"[A-Za-z0-9.:\[\]-]{1,255}")
 _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
+<title>{title}</title>{head}
 <style>
 html, body {{ margin: 0; background: #111; color: #eee; font: 26px/1.4 sans-serif; }}
 main {{ max-width: 1100px; margin: 0 auto; padding: 16px; }}
@@ -33,17 +33,61 @@ a {{ display: block; margin: 12px 0; padding: 16px 22px; background: #2a2a2a; co
      border: 3px solid #555; border-radius: 10px; text-decoration: none; }}
 a:focus {{ outline: none; border-color: #ffd400; background: #3a3a10; }}
 b {{ display: inline-block; min-width: 2.2em; color: #ffd400; }}
+i {{ color: #aaa; }}
+p {{ margin: 18px 0; }}
+.code {{ font-size: 64px; letter-spacing: 12px; color: #ffd400; }}
 </style></head><body><main>{body}</main></body></html>
 """
+REFRESH_SECONDS = 10
 
 
-def index_page(alias: str, names: list[str]) -> str:
-    """The episode list for a browser: one large link per video, for a TV remote."""
+def html_page(title: str, body: str, refresh: int = 0) -> str:
+    """A page in the style of the index. `body` is HTML; `refresh` reloads it."""
+    head = f'\n<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    return _PAGE.format(title=escape(title), head=head, body=body)
+
+
+def index_page(alias: str, names: list[str], ready: list[bool] | None = None) -> str:
+    """The episode list for a browser: one large link per video, for a TV remote. A video
+    that cannot be played yet says so."""
+    marks = ready or [True] * len(names)
     links = "".join(
-        f'<a href="/{escape(alias)}/{n}"><b>{n}</b> {escape(name)}</a>'
-        for n, name in enumerate(names, 1)
+        f'<a href="/{escape(alias)}/{n}"><b>{n}</b> {escape(name)}'
+        + ("" if ok else " <i>(not ready)</i>")
+        + "</a>"
+        for n, (name, ok) in enumerate(zip(names, marks, strict=True), 1)
     )
-    return _PAGE.format(title=escape(alias), body=links)
+    return html_page(alias, links)
+
+
+def waiting_page(code: str) -> str:
+    """What a browser the owner has not approved yet sees. It asks again by itself."""
+    return html_page(
+        "Waiting",
+        "<p>Waiting to be let in. Tell the person who sent the link this code:</p>"
+        f'<p class="code">{escape(code)}</p><p><i>This page reloads by itself.</i></p>',
+        REFRESH_SECONDS,
+    )
+
+
+def preparing_page(job: dict[str, Any] | None) -> str:
+    """A video whose base version is being made, or not made at all."""
+    if job is None:
+        return html_page(
+            "Not ready",
+            "<p>This video is not prepared for browsers yet.</p>"
+            "<p><i>Ask the person who sent the link to prepare it.</i></p>",
+        )
+    left = job.get("seconds_left")
+    when = f", about {text.duration(left)} left" if isinstance(left, int | float) else ""
+    done = round(100 * float(job.get("progress") or 0))
+    state = "waiting for its turn" if job.get("state") == "queued" else f"{done}% done{when}"
+    return html_page(
+        "Preparing",
+        f"<p>This video is being prepared for browsers: {escape(state)}.</p>"
+        "<p><i>This page reloads by itself and plays the video when it is ready.</i></p>",
+        REFRESH_SECONDS,
+    )
 
 
 def playlist(alias: str, names: list[str], host: str) -> str:
@@ -61,25 +105,41 @@ def _text(status: int, message: str) -> Response:
     return Response(message + "\n", status, mimetype="text/plain")
 
 
-def respond(answer: Answer, host: str) -> Response:
-    if answer.kind == "video":
+def _html(status: int, page: str) -> Response:
+    return Response(page, status, mimetype="text/html")
+
+
+def respond(answer: Answer, host: str, wants_html: bool = False) -> Response:
+    if answer.kind in ("video", "file"):
         # Looked at again on every request: a file that was swapped for a link or a folder
         # after the start is not followed to wherever it leads now.
         if os.path.realpath(answer.file) != answer.file or not os.path.isfile(answer.file):
             return _text(404, "Nothing here.")
         headers = {
-            caddy.HEADER_FILE: str(answer.number),
+            caddy.HEADER_FILE: answer.rel or str(answer.number),
             caddy.HEADER_TYPE: media.content_type(answer.file),
         }
         return Response(b"", 200, headers=headers)
     if answer.kind == "index":
-        return Response(index_page(answer.alias, answer.names), mimetype="text/html")
+        return _html(200, index_page(answer.alias, answer.names, answer.ready))
     if answer.kind == "playlist":
         return Response(playlist(answer.alias, answer.names, host), mimetype=M3U_TYPE)
-    if answer.kind == "preparing":
+    if answer.kind == "player":
+        return _html(200, player.page(answer.data))
+    if answer.kind == "asset":
+        return Response(player.asset(answer.asset), content_type=player.ASSETS[answer.asset])
+    if answer.kind == "redirect":
+        return Response(b"", 302, headers={"Location": answer.location})
+    if answer.kind == "waiting":
+        return _html(answer.status, waiting_page(str(answer.data.get("code", ""))))
+    if answer.kind in ("preparing", "notready"):
+        if wants_html and (answer.data or answer.kind == "notready"):
+            return _html(answer.status, preparing_page(answer.data or None))
         response = _text(
             answer.status,
-            "This video is being prepared so players can seek in it. Try again in a minute.",
+            "This video is being prepared. Try again in a minute."
+            if answer.kind == "preparing"
+            else "This video is not prepared for browsers yet.",
         )
         response.headers["Retry-After"] = "30"
         return response
@@ -102,13 +162,9 @@ def create_app(control: Control) -> Flask:
         ip = normal_ip(request.headers.get(caddy.HEADER_IP))
         if ip is None:  # not through Caddy
             return _text(400, "Bad request.")
-        answer = control.visit(
-            path,
-            ip,
-            request.headers.get("User-Agent", ""),
-            "text/html" in request.headers.get("Accept", "").lower(),
-        )
-        response = respond(answer, request.host)
+        wants_html = "text/html" in request.headers.get("Accept", "").lower()
+        answer = control.visit(path, ip, request.headers.get("User-Agent", ""), wants_html)
+        response = respond(answer, request.host, wants_html)
         response.headers["Cache-Control"] = "no-store"
         return response
 

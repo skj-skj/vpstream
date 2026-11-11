@@ -43,3 +43,14 @@ def short_tmp() -> Iterator[Path]:
     path = Path(tempfile.mkdtemp(prefix="vp"))
     yield path
     shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def sample(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A 12 s H.264 file with two audio tracks, an SRT and an ASS subtitle track."""
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            pytest.fail(f"{tool} is required for integration tests")
+    from vpstream.tests.media import make_sample
+
+    return make_sample(tmp_path_factory.mktemp("media"))

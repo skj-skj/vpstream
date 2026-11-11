@@ -1,7 +1,7 @@
 """Pure builders for ffmpeg command lines.
 
-Nothing here runs a program, so every builder is unit tested. The same settings will be
-used by `vpstream prepare` in a later milestone, which keeps `bench` numbers honest.
+Nothing here runs a program, so every builder is unit tested. `vpstream prepare` and
+`vpstream bench` use the same builders, which keeps the benchmark's numbers honest.
 """
 
 from __future__ import annotations
@@ -83,10 +83,6 @@ def subtitle_input_args(src: str, window: Window) -> list[str]:
     return input_args(src, Window(max(0.0, window.start - SUBTITLE_PREROLL_SECONDS)))
 
 
-def audio_args(s: EncodeSettings) -> list[str]:
-    return ["-map", "0:a?", *aac_args(s.audio_bitrate), "-ac", str(s.audio_channels)]
-
-
 def hls_output_args(
     out_dir: str | Path,
     *,
@@ -141,54 +137,115 @@ def h264_video_args(s: EncodeSettings) -> list[str]:
     ]
 
 
-def copy_hls(
+# The files of a prepared HLS version: one master playlist, one playlist for the video and
+# one per audio track ("a1", "a2" ... in file order), each with its own segments.
+MASTER = "master.m3u8"
+VIDEO = "video"
+_LANGUAGE = re.compile(r"[a-z]{2,3}")
+
+
+def audio_name(number: int) -> str:
+    """The rendition name of audio track `number` (1-based)."""
+    return f"a{number}"
+
+
+def hls_language(language: str) -> str:
+    """A track's language as it can go into -var_stream_map, which splits on spaces and
+    commas: a 2 or 3 letter code, else "und"."""
+    lang = language.strip().lower()
+    return lang if _LANGUAGE.fullmatch(lang) else "und"
+
+
+def variant_map(languages: Sequence[str], default: int = 0) -> str:
+    """-var_stream_map for one video and these audio tracks as alternates of it. `default`
+    is the 0-based audio track players start with."""
+    if not languages:
+        return f"v:0,name:{VIDEO}"
+    group = "agroup:aud"
+    parts = [f"v:0,{group},name:{VIDEO}"]
+    for i, lang in enumerate(languages):
+        flag = ",default:yes" if i == default else ""
+        parts.append(f"a:{i},{group},language:{hls_language(lang)},name:{audio_name(i + 1)}{flag}")
+    return " ".join(parts)
+
+
+def rendition_output_args(out_dir: str | Path, stream_map: str) -> list[str]:
+    """HLS output of named renditions (see MASTER) into `out_dir`."""
+    return hls_output_args(
+        out_dir,
+        segment="%v_%05d",
+        playlist="%v.m3u8",
+        extra=(
+            "-hls_fmp4_init_filename",
+            "%v_init.mp4",
+            "-master_pl_name",
+            MASTER,
+            "-var_stream_map",
+            stream_map,
+        ),
+    )
+
+
+def copy_ok(codec: str, pix_fmt: str, bit_depth: int) -> bool:
+    """Whether a browser can play this video as it is: H.264 in 8-bit 4:2:0 only (browsers
+    have no 10-bit or 4:2:2 H.264 decoder), HEVC and AV1 in 4:2:0 at 8 or 10 bits."""
+    if codec not in BROWSER_COPY_CODECS or "420" not in pix_fmt:
+        return False
+    return bit_depth <= (8 if codec == "h264" else 10)
+
+
+def base_hls(
     src: str,
     out_dir: str | Path,
     *,
+    copy: bool,
     video_codec: str,
-    window: Window = WHOLE_FILE,
-    settings: EncodeSettings = DEFAULT_SETTINGS,
-) -> list[str]:
-    """Copy the video into fMP4 HLS. Audio becomes AAC, as browser mode needs."""
-    tag = ["-tag:v", "hvc1"] if video_codec == "hevc" else []
-    return [
-        *base_args(),
-        *input_args(src, window),
-        "-map",
-        "0:v:0",
-        "-c:v",
-        "copy",
-        *tag,
-        *audio_args(settings),
-        "-sn",
-        "-dn",
-        *hls_output_args(out_dir),
-    ]
-
-
-def transcode_hls(
-    src: str,
-    out_dir: str | Path,
-    *,
+    audio: Sequence[str] = (),
+    default_audio: int = 0,
     hdr: bool = False,
     tonemap: bool = True,
     window: Window = WHOLE_FILE,
     settings: EncodeSettings = DEFAULT_SETTINGS,
 ) -> list[str]:
-    """Transcode to H.264 at the source's own resolution."""
-    vf = ["-vf", f"{TONEMAP_CHAIN},format=yuv420p"] if hdr and tonemap else []
+    """The base version: the video copied (`copy`) or transcoded to H.264 at the source's own
+    resolution, and every audio track as an AAC alternate. `audio` holds the language of
+    each audio track, in file order."""
+    if copy:
+        tag = ["-tag:v", "hvc1"] if video_codec == "hevc" else []
+        video = ["-c:v", "copy", *tag]
+    else:
+        vf = ["-vf", f"{TONEMAP_CHAIN},format=yuv420p"] if hdr and tonemap else []
+        video = [*vf, *h264_video_args(settings)]
+    audio_maps = [arg for i in range(len(audio)) for arg in ("-map", f"0:a:{i}")]
+    sound = [*aac_args(settings.audio_bitrate), "-ac", str(settings.audio_channels)]
     return [
         *base_args(),
         *input_args(src, window),
         "-map",
-        "0:v:0",
-        *vf,
-        *h264_video_args(settings),
-        *audio_args(settings),
+        "0:V:0",  # V: not cover art, which ffprobe lists as video too
+        *audio_maps,
+        *video,
+        *(sound if audio else []),
         "-sn",
         "-dn",
-        *hls_output_args(out_dir),
+        *rendition_output_args(out_dir, variant_map(audio, default_audio)),
     ]
+
+
+def with_progress(args: Sequence[str]) -> list[str]:
+    """An ffmpeg command that reports how far it got on standard output (out_time_us=...)."""
+    return [args[0], "-progress", "pipe:1", "-nostats", *args[1:]]
+
+
+def progress_seconds(line: str) -> float | None:
+    """The media time reached, from one line of -progress output, or None."""
+    key, _, value = line.partition("=")
+    if key != "out_time_us":
+        return None
+    try:
+        return max(0.0, int(value) / 1_000_000)
+    except ValueError:  # "N/A" before the first frame
+        return None
 
 
 def escape_filter_path(path: str | Path) -> str:
@@ -224,12 +281,12 @@ def burn_filter(
         # Image subtitles are drawn for their own canvas (often 1080p over a 4K video), so
         # they are scaled to the video's size before the overlay.
         return (
-            f"[0:v:0]{pre}null[base];"
+            f"[0:V:0]{pre}null[base];"
             f"[{sub_input}:s:{si}][base]scale2ref=w=rw:h=rh[sub][ref];"
             f"[ref][sub]overlay=eof_action=pass,{tail}"
         )
     path = escape_filter_path(filter_src)
-    return f"[0:v:0]{pre}subtitles=filename={path}:si={si},{tail}"
+    return f"[0:V:0]{pre}subtitles=filename={path}:si={si},{tail}"
 
 
 def burn_hls(
@@ -245,7 +302,8 @@ def burn_hls(
     settings: EncodeSettings = DEFAULT_SETTINGS,
     loglevel: str = "error",
 ) -> list[str]:
-    """Burn one subtitle track into an H.264 transcode. Video only, audio is left out."""
+    """Burn one subtitle track into an H.264 transcode. Video only: a player takes the audio
+    from the base version (see `prepared.burn_master`)."""
     inputs = input_args(src, window, copyts=True)
     sub_input = 0
     if image and window.start > 0:
@@ -270,7 +328,7 @@ def burn_hls(
         "-an",
         "-sn",
         "-dn",
-        *hls_output_args(out_dir),
+        *rendition_output_args(out_dir, variant_map(())),
     ]
 
 

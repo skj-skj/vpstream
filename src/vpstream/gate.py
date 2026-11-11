@@ -6,6 +6,8 @@ to tell them apart; the user agent is kept to show which player it was.
 
 from __future__ import annotations
 
+import re
+import secrets
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -45,6 +47,11 @@ class Device:
     requests: int = 0
     blocked: int = 0
     bytes: int = 0
+    code: str = ""  # shown on the waiting page, to tell this device apart on the list
+
+
+def new_code() -> str:
+    return f"{secrets.randbelow(10000):04d}"
 
 
 class Devices:
@@ -90,6 +97,7 @@ class Devices:
             row.blocked += 1
             if policy == APPROVAL and row.allowed is None:
                 row.wl = True
+                row.code = row.code or new_code()
         return ok
 
     def decide(self, ip: str, allowed: bool, now: float) -> Device:
@@ -152,6 +160,8 @@ class Devices:
             allowed = data.get("allowed")
             row = Device(ip, allowed if isinstance(allowed, bool) else None, data.get("wl") is True)
             row.user_agent = str(data.get("user_agent") or "")[:MAX_USER_AGENT]
+            code = data.get("code")
+            row.code = code if isinstance(code, str) and re.fullmatch(r"\d{4}", code) else ""
             for name in ("first_seen", "last_seen"):
                 value = data.get(name)
                 setattr(row, name, float(value) if _number(value) else 0.0)

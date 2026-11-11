@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,11 @@ SOFT_TEXT_CODECS = frozenset({"subrip", "srt", "mov_text", "webvtt", "text"})
 STYLED_TEXT_CODECS = frozenset({"ass", "ssa"})
 # Bitmap formats that can only be burned in.
 IMAGE_CODECS = frozenset({"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"})
+
+# How `prepare` handles a subtitle track (SubtitleTrack.treatment).
+SOFT = "soft"  # WebVTT, drawn by the player
+BURNED_IN = "burned in"  # a version of the video with it drawn in
+UNSUPPORTED = "unsupported"
 
 HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67"})
 
@@ -71,10 +77,10 @@ class SubtitleTrack:
     def treatment(self) -> str:
         """How `prepare` handles this track: 'soft', 'burned in' or 'unsupported'."""
         if self.codec in SOFT_TEXT_CODECS:
-            return "soft"
+            return SOFT
         if self.codec in STYLED_TEXT_CODECS or self.codec in IMAGE_CODECS:
-            return "burned in"
-        return "unsupported"
+            return BURNED_IN
+        return UNSUPPORTED
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ class MediaInfo:
     audio: list[AudioTrack] = field(default_factory=list)
     subtitles: list[SubtitleTrack] = field(default_factory=list)
     attachments: int = 0  # embedded fonts and other attachments
+    start_time: float = 0.0  # when the first packet plays; ffmpeg's output starts at 0
 
 
 def ffprobe_args(path: str, show: Sequence[str] = ("-show_format", "-show_streams")) -> list[str]:
@@ -248,9 +255,11 @@ def parse_probe(
             )
         elif kind == "attachment":
             attachments += 1
-    duration = 0.0
+    duration = start_time = 0.0
     with contextlib.suppress(TypeError, ValueError):
         duration = float(fmt.get("duration", 0.0))
+    with contextlib.suppress(TypeError, ValueError):
+        start_time = float(fmt.get("start_time", 0.0))
     return MediaInfo(
         path=path,
         format_name=str(fmt.get("format_name", "")),
@@ -261,6 +270,7 @@ def parse_probe(
         audio=audio,
         subtitles=subs,
         attachments=attachments,
+        start_time=start_time if math.isfinite(start_time) else 0.0,
     )
 
 

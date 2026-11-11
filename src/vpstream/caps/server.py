@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from vpstream.files import write_atomic
-from vpstream.media import VIDEO_TYPES
+from vpstream.media import HLS_TYPES
 
 MAX_SPEED_MB = 256
 MAX_REPORT_BYTES = 256 * 1024
@@ -39,17 +39,11 @@ ASSETS = {
     "/caps": ("caps.html", "text/html; charset=utf-8"),
     "/caps/": ("caps.html", "text/html; charset=utf-8"),
     "/caps/caps.js": ("caps.js", "text/javascript; charset=utf-8"),
+    "/caps/vtt.js": ("vtt.js", "text/javascript; charset=utf-8"),
     "/caps/hls.min.js": ("hls.min.js", "text/javascript; charset=utf-8"),
 }
 
-MIME = {
-    ".m3u8": "application/vnd.apple.mpegurl",
-    ".mp4": VIDEO_TYPES[".mp4"],
-    ".m4s": "video/iso.segment",
-    ".ts": VIDEO_TYPES[".ts"],
-    ".vtt": "text/vtt; charset=utf-8",
-    ".json": JSON,
-}
+MIME = {**HLS_TYPES, ".json": JSON}
 
 # Fields the server sets itself; a report cannot overwrite them.
 SERVER_FIELDS = frozenset({"client", "user_agent", "updated", "session"})

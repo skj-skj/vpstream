@@ -27,10 +27,23 @@ VIDEO_TYPES = {
 }
 
 
+# The files of an HLS version and of soft subtitles.
+HLS_TYPES = {
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".m4s": "video/iso.segment",
+    ".mp4": VIDEO_TYPES[".mp4"],
+    ".ts": VIDEO_TYPES[".ts"],
+    ".vtt": "text/vtt; charset=utf-8",
+}
+
+
 def content_type(path: str | Path) -> str:
     suffix = Path(path).suffix.lower()
     return (
-        VIDEO_TYPES.get(suffix) or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        VIDEO_TYPES.get(suffix)
+        or HLS_TYPES.get(suffix)
+        or mimetypes.guess_type(str(path))[0]
+        or "application/octet-stream"
     )
 
 

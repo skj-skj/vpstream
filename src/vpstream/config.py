@@ -79,6 +79,11 @@ class Config:
     stream_port: int = 1337
     dashboard_port: int = 1338
     stream_host: str = ""  # the address in the URLs shown; "" means: find it
+    # How fast this host prepares, in times real time (see prepare.Speeds): a copy, and an
+    # encode of 1080p at 24 fps. `vpstream bench` measures them.
+    copy_speed: float = 11.0
+    encode_speed: float = 1.6
+    media_folder: str = "/srv/media"  # what `vpstream ls` lists when it is given no folder
 
 
 # Section and key in the file -> field of Config.
@@ -86,6 +91,9 @@ _KEYS = {
     ("stream", "port"): "stream_port",
     ("stream", "host"): "stream_host",
     ("dashboard", "port"): "dashboard_port",
+    ("prepare", "copy_speed"): "copy_speed",
+    ("prepare", "encode_speed"): "encode_speed",
+    ("media", "folder"): "media_folder",
 }
 
 DEFAULT_TEXT = """\
@@ -103,6 +111,16 @@ port = 1337
 # The dashboard port. It listens on this host only (127.0.0.1); `vpstream init` publishes it
 # on your tailnet with `tailscale serve`, as https://<this host's tailnet name>:<port>/.
 port = 1338
+
+[prepare]
+# How fast this host prepares videos for browser mode, in times real time, for the time
+# estimates: a copy, and an encode of 1080p at 24 fps. `vpstream bench FILE` measures them.
+# copy_speed = 11.0
+# encode_speed = 1.6
+
+[media]
+# The folder `vpstream ls` lists when it is given none.
+# folder = "/srv/media"
 """
 
 
@@ -121,7 +139,24 @@ def _host_problem(name: str, value: Any) -> str | None:
     return None
 
 
-_CHECKS = {"stream_host": _host_problem}
+def _speed_problem(name: str, value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0.01 <= value <= 1000:
+        return f"{name} must be a number from 0.01 to 1000 (times real time), not {value!r}"
+    return None
+
+
+def _folder_problem(name: str, value: Any) -> str | None:
+    if not isinstance(value, str) or not value.startswith("/") or "\0" in value:
+        return f"{name} must be a full path, starting with /, not {value!r}"
+    return None
+
+
+_CHECKS = {
+    "stream_host": _host_problem,
+    "media_folder": _folder_problem,
+    "copy_speed": _speed_problem,
+    "encode_speed": _speed_problem,
+}
 
 
 def parse(text: str) -> Config:
