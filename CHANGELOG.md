@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.8.3 (2026-11-11)
+
+### Bug Fixes
+
+- Count the bytes each viewer got from the kernel, not only from Caddy's log
+  ([#14](https://github.com/skj-skj/vpstream/pull/14),
+  [`8605f3c`](https://github.com/skj-skj/vpstream/commit/8605f3c8e7383fed5fa60e1e2fdab41c467295c3))
+
+
 ## v0.8.2 (2026-11-11)
 
 ### Bug Fixes
