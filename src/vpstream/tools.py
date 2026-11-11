@@ -47,6 +47,18 @@ class SystemRunner:
         return Result(proc.returncode, proc.stdout, proc.stderr)
 
 
+class _NoPrograms:
+    """A runner on a host with no programs at all."""
+
+    def which(self, name: str) -> str | None:
+        return None
+
+    def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result:
+        return Result(127, "", f"{args[0]}: not available")
+
+
+NO_PROGRAMS: Runner = _NoPrograms()
+
 TIMEOUT_RETURNCODE = 124  # the same code as coreutils `timeout`
 
 

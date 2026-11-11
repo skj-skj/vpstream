@@ -150,6 +150,15 @@ followed once, when the stream starts.
 - **Guessing the alias:** an address that asks for 20 things that are not there, without
   being a device that gets in, gets a 404 for everything until the stream stops.
   `vpstream devices` lists such addresses, and `devices enable ADDRESS` lets one back in.
+- **Bytes sent:** the device list shows what each viewer was sent, as the kernel counts it
+  on each connection (`ss`, read once a second). Caddy's own log is used for connections too
+  short to be seen, and on its own where `ss` cannot be used (Termux). Caddy 2.6.2, the version
+  in Ubuntu 24.04, logs about 512 bytes for a transfer the player cuts off, which players do
+  on every seek, so its log alone would show almost nothing.
+- **Players:** any player that sends range requests can seek. mpv resumes a film by jumping
+  straight to where it stopped. VLC for Android was seen resuming an MKV by reading the file
+  from its start up to that point, which on a phone takes minutes and that much mobile data;
+  playing from the start and seeking by hand is quick in VLC too.
 - **Dashboard:** the same controls, on the tailnet address `vpstream status` shows.
 - **Stop, crash and reboot:** `vpstream stop`, the time limit and stopping the service all
   close the port. After a crash the service starts again and takes the stream up where it

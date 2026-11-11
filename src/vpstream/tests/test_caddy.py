@@ -129,21 +129,22 @@ def test_videos_are_linked_by_number(tmp_path: Path) -> None:
 def test_log_entry() -> None:
     new = {"request": {"remote_ip": "192.0.2.1", "remote_port": "5"}, "size": 1024, "status": 206}
     old = {"request": {"remote_addr": "[2001:db8::1]:4711"}, "size": 7}
-    assert caddy.log_entry(json.dumps(new)) == ("192.0.2.1", 1024)
-    assert caddy.log_entry(json.dumps(old)) == ("2001:db8::1", 7)
-    assert caddy.log_entry(json.dumps({"request": {"remote_addr": "192.0.2.1:9"}, "size": 1})) == (
-        "192.0.2.1",
-        1,
-    )
+    mapped = {"request": {"remote_ip": "::ffff:192.0.2.1", "remote_port": "8"}, "size": 2}
+    assert caddy.log_entry(json.dumps(new)) == ("192.0.2.1", "5", 1024)
+    assert caddy.log_entry(json.dumps(old)) == ("2001:db8::1", "4711", 7)
+    assert caddy.log_entry(json.dumps(mapped)) == ("192.0.2.1", "8", 2)
+    plain = {"request": {"remote_addr": "192.0.2.1:9"}, "size": 1}
+    assert caddy.log_entry(json.dumps(plain)) == ("192.0.2.1", "9", 1)
     for bad in ("", "{", "[]", "5", '{"size": 5}', '{"request": {"remote_ip": "x"}}'):
         assert caddy.log_entry(bad) is None, bad
-    assert caddy.log_entry('{"request": {"remote_ip": "x"}, "size": "big"}') is None
+    assert caddy.log_entry('{"request": {"remote_ip": "192.0.2.1"}, "size": "big"}') is None
     assert caddy.log_entry('{"request": {"remote_ip": 5}, "size": 1}') is None
+    assert caddy.log_entry('{"request": {"remote_ip": "nope"}, "size": 1}') is None
     assert caddy.log_entry('{"request": "x", "size": 1}') is None
 
 
 def _line(ip: str, size: int) -> str:
-    return json.dumps({"request": {"remote_ip": ip}, "size": size}) + "\n"
+    return json.dumps({"request": {"remote_ip": ip, "remote_port": "7"}, "size": size}) + "\n"
 
 
 def test_log_tail_reads_only_what_is_new(tmp_path: Path) -> None:
@@ -151,11 +152,11 @@ def test_log_tail_reads_only_what_is_new(tmp_path: Path) -> None:
     tail = caddy.LogTail(log)
     assert list(tail.read()) == []  # no file yet
     log.write_text(_line("192.0.2.1", 1))
-    assert list(tail.read()) == [("192.0.2.1", 1)]
+    assert list(tail.read()) == [("192.0.2.1", "7", 1)]
     assert list(tail.read()) == []
     with log.open("a") as fh:
         fh.write(_line("192.0.2.2", 2) + "not json\n" + _line("192.0.2.3", 3))
-    assert list(tail.read()) == [("192.0.2.2", 2), ("192.0.2.3", 3)]
+    assert list(tail.read()) == [("192.0.2.2", "7", 2), ("192.0.2.3", "7", 3)]
 
 
 def test_log_tail_waits_for_the_rest_of_a_half_written_line(tmp_path: Path) -> None:
@@ -166,7 +167,7 @@ def test_log_tail_waits_for_the_rest_of_a_half_written_line(tmp_path: Path) -> N
     assert list(tail.read()) == []
     with log.open("a") as fh:
         fh.write(whole[20:])
-    assert list(tail.read()) == [("192.0.2.1", 5)]
+    assert list(tail.read()) == [("192.0.2.1", "7", 5)]
 
 
 def test_log_tail_follows_a_rotated_or_emptied_log(tmp_path: Path) -> None:
@@ -176,11 +177,11 @@ def test_log_tail_follows_a_rotated_or_emptied_log(tmp_path: Path) -> None:
     assert len(list(tail.read())) == 3
     log.rename(tmp_path / "access-old.log")  # Caddy rolls the file and starts a new one
     log.write_text(_line("192.0.2.2", 2))
-    assert list(tail.read()) == [("192.0.2.2", 2)]
+    assert list(tail.read()) == [("192.0.2.2", "7", 2)]
     log.write_text("")  # emptied in place
     assert list(tail.read()) == []
     log.write_text(_line("192.0.2.3", 3))
-    assert list(tail.read()) == [("192.0.2.3", 3)]
+    assert list(tail.read()) == [("192.0.2.3", "7", 3)]
 
 
 # --- running it
