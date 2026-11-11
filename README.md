@@ -75,7 +75,8 @@ dashboard port that another program on this host already listens on.
 ## `vpstream doctor`
 
 Checks this host for everything vpstream needs and lists all of it in one report: the Python
-version, ffmpeg, ffprobe, Caddy, ufw, Tailscale, systemd and sudo, whether ufw is enabled,
+version, ffmpeg, ffprobe, Caddy, ufw, Tailscale, systemd, sudo and the ACL tools (only a
+warning when missing), whether ufw is enabled,
 Tailscale is connected and the tailnet issues HTTPS certificates, the fonts burned-in subtitles fall back to, the configuration file,
 and where vpstream itself is installed. Each problem comes with the command that fixes it.
 The exit code is 1 when something required is missing. Nothing is changed and no root is
@@ -111,9 +112,16 @@ vpstream devices                                      # who asked for it
 vpstream stop
 ```
 
-One stream runs at a time, and only video files are streamed (by their extension). The
-service has its own user, which must be able to read the videos and enter the folders above
-them. A link is followed once, when the stream starts.
+One stream runs at a time, and only video files are streamed (by their extension). A link is
+followed once, when the stream starts.
+
+- **Access to your files:** the service has its own user, which reads the videos. When it
+  cannot, `vpstream start` gives it access by itself: an ACL entry for that one user, read on
+  the videos and enter on your folders above them (`setfacl`, from the `acl` package). You
+  need to own the files, not to be root, and they stay closed to every other user. The entry
+  stays after the stream; `setfacl -x u:vpstream FILE` takes it away. Files of another owner
+  are refused with the command their owner or root can run. A stream started from the
+  dashboard has nobody's access to pass on, so its files must be readable already.
 
 - **Addresses:** `/ALIAS` plays the video of a `--file` stream. For a `--dir` stream it is the
   episode list for a browser and an M3U playlist for a player, so VLC can open it directly;

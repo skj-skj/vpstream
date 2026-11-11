@@ -19,7 +19,11 @@ class DaemonUnavailable(RuntimeError):
 
 
 class DaemonRefused(RuntimeError):
-    """The daemon answered with an error."""
+    """The daemon answered with an error. `data` is its whole answer."""
+
+    def __init__(self, message: str, data: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.data = data or {}
 
 
 class _UnixConnection(http.client.HTTPConnection):
@@ -78,6 +82,7 @@ def call(
             f"the daemon sent an answer that is not JSON ({response.status})"
         ) from exc
     if response.status >= 400:
-        message = data.get("error") if isinstance(data, dict) else None
-        raise DaemonRefused(f"the daemon refused: {message or response.status}")
+        details = data if isinstance(data, dict) else {}
+        message = details.get("error") or response.status
+        raise DaemonRefused(f"the daemon refused: {message}", details)
     return data

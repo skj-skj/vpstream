@@ -84,8 +84,38 @@ def test_a_folder_without_videos_is_refused(tmp_path: Path) -> None:
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
 def test_a_file_the_service_cannot_read_is_refused_with_the_reason(film: Path) -> None:
     film.chmod(0)
-    with pytest.raises(StreamError, match=r"cannot read .*a film\.mkv.*its own user"):
+    with pytest.raises(stream.Unreadable, match=r"cannot read .*a film\.mkv.*setfacl") as caught:
         make(file=str(film))
+    assert caught.value.path == str(film) and caught.value.user
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root enters everything")
+def test_a_folder_that_cannot_be_entered_is_unreadable_not_missing(tmp_path: Path) -> None:
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    (closed / "film.mkv").write_bytes(b"x")
+    (closed / "show").mkdir()
+    closed.chmod(0)
+    try:
+        for kind, name in (("file", "film.mkv"), ("dir", "show")):
+            with pytest.raises(stream.Unreadable) as caught:
+                make(**{kind: str(closed / name)})
+            assert caught.value.path == str(closed / name)
+    finally:
+        closed.chmod(0o700)
+    with pytest.raises(StreamError, match="not a file") as missing:
+        make(file=str(closed / "nope.mkv"))
+    assert not isinstance(missing.value, stream.Unreadable)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
+def test_a_folder_that_cannot_be_listed_is_unreadable(show: Path) -> None:
+    show.chmod(0o300)
+    try:
+        with pytest.raises(stream.Unreadable):
+            make(dir=str(show))
+    finally:
+        show.chmod(0o700)
 
 
 @pytest.mark.parametrize(

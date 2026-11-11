@@ -83,7 +83,12 @@ def low_priority_prefix(runner: Runner) -> list[str]:
 
 
 # The Ubuntu package that provides each program, where it differs from the program's name.
-PACKAGES = {"ffprobe": "ffmpeg", "mkvextract": "mkvtoolnix", "mkvmerge": "mkvtoolnix"}
+PACKAGES = {
+    "ffprobe": "ffmpeg",
+    "mkvextract": "mkvtoolnix",
+    "mkvmerge": "mkvtoolnix",
+    "setfacl": "acl",
+}
 
 
 class ToolMissing(RuntimeError):

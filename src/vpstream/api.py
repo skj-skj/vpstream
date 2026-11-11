@@ -14,9 +14,10 @@ from werkzeug.exceptions import HTTPException
 
 from vpstream.control import Control, ControlError
 from vpstream.gate import GateError
-from vpstream.stream import StreamError
+from vpstream.stream import StreamError, Unreadable
 
 API = "/api/v1"
+UNREADABLE = "unreadable"  # the `code` of a refusal the command line can put right
 # Route -> (file in vpstream.assets, content type).
 ASSETS = {
     "/": ("dashboard.html", "text/html; charset=utf-8"),
@@ -84,6 +85,8 @@ def create_app(status: Callable[[], dict[str, Any]], control: Control | None = N
     @app.errorhandler(StreamError)
     @app.errorhandler(GateError)
     def refused(exc: ValueError) -> tuple[Response, int]:
+        if isinstance(exc, Unreadable):
+            return jsonify(error=str(exc), code=UNREADABLE, path=exc.path, user=exc.user), 400
         return jsonify(error=str(exc)), 400
 
     @app.errorhandler(ControlError)

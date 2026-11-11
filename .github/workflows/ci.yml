@@ -44,7 +44,7 @@ jobs:
       - name: Install ffmpeg, mkvtoolnix and Caddy
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg mkvtoolnix caddy
+          sudo apt-get install -y --no-install-recommends ffmpeg mkvtoolnix caddy acl
           sudo systemctl disable --now caddy   # the package's own web server is not used
           caddy version
       - run: python -m pip install -e ".[dev]"
@@ -93,10 +93,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install build && python -m build --wheel
-      - name: Install ufw, pipx and Caddy
+      - name: Install ufw, pipx, Caddy and the ACL tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ufw pipx caddy
+          sudo apt-get install -y --no-install-recommends ufw pipx caddy acl
           sudo systemctl disable --now caddy   # the package's own web server is not used
       - name: Install vpstream for the whole system
         run: |

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import gate, media
+from vpstream import access, gate, media
 
 DIRECT = "direct"
 MODES = (DIRECT,)  # browser mode comes with the prepare command
@@ -56,19 +56,37 @@ def check_policy(text: Any) -> str:
     return str(text)
 
 
-def _unreadable(path: Path) -> StreamError:
-    return StreamError(
-        f"the vpstream service cannot read {path}. It runs as its own user: give that user "
-        "access to the file and to every folder above it (for example chmod o+r on the file "
-        "and o+x on the folders)"
-    )
+class Unreadable(StreamError):
+    """The daemon's user cannot read what it was asked to stream. The command line can
+    often put that right itself (see `access`), so the answer says what and for whom."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = str(path)
+        self.user = access.service_user()
+        super().__init__(
+            f"the vpstream service (user {self.user}) cannot read {path}. `vpstream start`, run "
+            "by the owner of the files, gives it access by itself; anyone else can with: "
+            f"sudo setfacl -m u:{self.user}:rX {path}"
+        )
+
+
+def _is(path: Path, check: str) -> bool:
+    """`path.is_file()` or `path.is_dir()`, but a folder that cannot be entered is told
+    apart from a path that is not there."""
+    try:
+        path.stat()
+    except PermissionError:
+        raise Unreadable(path) from None
+    except OSError:
+        return False
+    return bool(getattr(path, check)())
 
 
 def _videos(kind: str, path: Path) -> list[str]:
     if not path.is_absolute():
         raise StreamError(f"give the full path, starting with /: {path}")
     if kind == "file":
-        if not path.is_file():
+        if not _is(path, "is_file"):
             raise StreamError(f"not a file: {path}")
         if not media.is_video(path):
             raise StreamError(
@@ -77,10 +95,10 @@ def _videos(kind: str, path: Path) -> list[str]:
             )
         found = [path]
     else:
-        if not path.is_dir():
+        if not _is(path, "is_dir"):
             raise StreamError(f"not a folder: {path}")
         if not os.access(path, os.R_OK | os.X_OK):
-            raise _unreadable(path)
+            raise Unreadable(path)
         found = media.scan(path)
         if not found:
             raise StreamError(f"no videos at the top level of {path}")
@@ -95,7 +113,7 @@ def _videos(kind: str, path: Path) -> list[str]:
         )
     for video in found:
         if not os.access(video, os.R_OK):
-            raise _unreadable(video)
+            raise Unreadable(video)
     return [str(video) for video in found]
 
 

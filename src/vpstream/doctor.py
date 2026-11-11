@@ -46,6 +46,7 @@ TOOLS = (
     Tool("tailscale", "publishing the dashboard", "see https://tailscale.com/download/linux"),
     Tool("systemctl", "running the service", "vpstream needs a host that runs systemd"),
     Tool("sudo", "the firewall helper", "as root: apt install sudo"),
+    Tool("setfacl", "letting `vpstream start` give the service access to your videos", "", False),
     Tool("mkvextract", "WebVTT subtitles stored by mkvmerge", "", required=False),
     Tool("mkvmerge", "WebVTT subtitles stored by mkvmerge", "", required=False),
 )
