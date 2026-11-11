@@ -232,3 +232,53 @@ def test_a_stream_is_stopped_when_caddy_dies(live: Live, show: Path) -> None:
         live.stop.wait(0.1)
     assert live.api("status")["stream"] is None
     assert any("Caddy stopped unexpectedly" in line for line in live.log)
+
+
+def test_an_mkv_without_audio_in_its_index_is_sent_with_a_full_one(
+    live: Live, tmp_path: Path, need_ffmpeg: None
+) -> None:
+    """What makes VLC for Android resume quickly. ffmpeg indexes only the video."""
+    import subprocess
+
+    from vpstream import mkv
+
+    if not shutil.which("mkvmerge"):
+        pytest.skip("mkvmerge is not installed on this host")
+    film = tmp_path / "film.mkv"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine",
+            "-t",
+            "4",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            str(film),
+        ],
+        check=True,
+    )
+    assert mkv.index_problem(film) == "its seek index has no audio entries"
+    live.api("stream/start", {"file": str(film), "alias": "aaa"})
+    for _ in range(100):
+        status, headers, body = live.get("/aaa")
+        if status == 200:
+            break
+        assert status == 503 and headers["retry-after"] == "30"
+        live.stop.wait(0.1)
+    got = tmp_path / "got.mkv"
+    got.write_bytes(body)
+    assert status == 200 and mkv.index_problem(got) is None
+    assert live.api("status")["stream"]["videos"][0]["preparing"] is False
+    copies = list((live.paths.cache_dir / "index").iterdir())
+    assert len(copies) == 1 and copies[0].read_bytes() == body

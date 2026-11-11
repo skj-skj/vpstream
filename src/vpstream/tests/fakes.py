@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from vpstream.caddy import CaddyError
 from vpstream.firewall import FirewallError
-from vpstream.tools import Result
+from vpstream.tools import Result, SystemRunner
 
 NAME = "host.example.ts.net"  # the fake host's name on its tailnet
 
@@ -93,3 +94,68 @@ class FakeServer:
 
     def running(self) -> bool:
         return self.up
+
+
+FAKE_MKVMERGE = """\
+#!{python}
+import json, shutil, sys, time
+from pathlib import Path
+from vpstream.tests import mkvdata
+mode = Path(sys.argv[0] + ".mode").read_text().strip()
+Path(sys.argv[0] + ".calls").open("a").write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1] == "-J":
+    kinds = ("video", "audio", "subtitles")
+    tracks = [{{"id": n, "type": kind}} for n, kind in enumerate(kinds)]
+    print(json.dumps({{"tracks": tracks}}))
+    sys.exit(0)
+out, source = Path(sys.argv[sys.argv.index("-o") + 1]), sys.argv[-1]
+if mode == "fail":
+    print("Error: the file could not be read")
+    sys.exit(2)
+if mode == "slow":
+    out.write_bytes(b"half")
+    time.sleep(30)
+if mode == "same":
+    shutil.copy(source, out)
+else:
+    mkvdata.write(out, ("video", "audio", "subtitles"), indexed=[1, 2])
+"""
+
+
+class FakeMkvmerge(SystemRunner):
+    """A host whose mkvmerge is a stand-in: `mode` is "ok", "slow", "fail" or "same" (writes
+    the file back unchanged). It has no nice or ionice, and runs nothing else."""
+
+    def __init__(self, folder: Path, mode: str = "ok") -> None:
+        import sys
+
+        self.program = folder / "mkvmerge"
+        self.program.write_text(FAKE_MKVMERGE.format(python=sys.executable))
+        self.program.chmod(0o755)
+        self.mode = mode
+
+    @property
+    def mode(self) -> str:
+        return Path(f"{self.program}.mode").read_text()
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        Path(f"{self.program}.mode").write_text(value)
+
+    def calls(self) -> list[list[str]]:
+        import json
+
+        record = Path(f"{self.program}.calls")
+        return (
+            [json.loads(line) for line in record.read_text().splitlines()]
+            if record.exists()
+            else []
+        )
+
+    def which(self, name: str) -> str | None:
+        return str(self.program) if name == "mkvmerge" else None
+
+    def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result:
+        if not args or args[0] != "mkvmerge":
+            return Result(127, "", f"{args[0] if args else ''}: not here")
+        return super().run([str(self.program), *args[1:]], timeout=timeout)

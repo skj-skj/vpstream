@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from vpstream import config, state
+from vpstream import config, mkv, state
 from vpstream.control import Control, ControlError
 from vpstream.stream import StreamError
-from vpstream.tests.fakes import FakeFirewall, FakeServer
+from vpstream.tests import mkvdata
+from vpstream.tests.fakes import FakeFirewall, FakeMkvmerge, FakeRunner, FakeServer
 
 
 class Clock:
@@ -463,3 +465,105 @@ def test_the_address_is_looked_up_again_until_there_is_one(
     assert control.base_url() == "http://<server-ip>:1337"
     monkeypatch.setattr(net, "outgoing_address", lambda: "192.0.2.5")
     assert control.base_url() == "http://192.0.2.5:1337"
+
+
+# --- MKV files without a full seek index
+
+
+def _until(check: Any, seconds: float = 15) -> None:
+    deadline = time.monotonic() + seconds
+    while not check():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.05)
+
+
+def _needs_index(tmp_path: Path, mode: str = "ok") -> tuple[Rig, FakeMkvmerge]:
+    rig = Rig(tmp_path, FakeFirewall(), FakeServer())
+    mkvdata.write(rig.film, ("video", "audio", "subtitles"), indexed=[1])
+    tools = FakeMkvmerge(tmp_path, mode)
+    rig.control.runner = tools
+    return rig, tools
+
+
+def _video(rig: Rig) -> dict[str, Any]:
+    return rig.control.status()["stream"]["videos"][0]  # type: ignore[no-any-return]
+
+
+def test_an_mkv_without_audio_in_its_index_is_served_from_a_full_copy(tmp_path: Path) -> None:
+    rig, tools = _needs_index(tmp_path, "slow")
+    info = rig.start()
+    assert info["stream"]["videos"][0]["preparing"] is True
+    answer = rig.control.visit("aaa", "192.0.2.1", "vlc", False)
+    assert (answer.status, answer.kind) == (503, "preparing")
+    assert not (rig.paths.videos_dir / "1").exists()  # Caddy has nothing to send yet
+    rig.control._stop_indexing()  # the slow one is cut off; a quick one takes its place
+    tools.mode = "ok"
+    rig.control._start_indexing(rig.control.stream)  # type: ignore[arg-type]
+    _until(lambda: not _video(rig)["preparing"])
+    answer = rig.control.visit("aaa", "192.0.2.1", "vlc", False)
+    copy = Path(answer.file)
+    assert answer.status == 200 and copy.parent == rig.paths.cache_dir / "index"
+    assert mkv.index_problem(copy) is None and mkv.index_problem(rig.film) is not None
+    assert (rig.paths.videos_dir / "1").resolve() == copy
+    assert rig.recorded()["served"] == [str(copy)] and rig.recorded()["indexing"] == []  # type: ignore[index]
+    assert any("copy with a full index ready" in line for line in rig.log)
+    assert _video(rig)["note"] is None
+
+
+def test_the_copy_is_made_once_and_used_again(tmp_path: Path) -> None:
+    rig, tools = _needs_index(tmp_path)
+    rig.start()
+    _until(lambda: not _video(rig)["preparing"])
+    made = len(tools.calls())
+    rig.control.stop()
+    assert rig.start()["stream"]["videos"][0]["preparing"] is False
+    assert rig.control.visit("aaa", "192.0.2.1", "x", False).status == 200
+    assert len(tools.calls()) == made  # mkvmerge was not run again
+
+
+def test_stop_cuts_a_copy_off_and_leaves_no_half_file(tmp_path: Path) -> None:
+    rig, _ = _needs_index(tmp_path, "slow")
+    rig.start()
+    _until(lambda: list((rig.paths.cache_dir / "index").glob("*.part")))
+    started = time.monotonic()
+    rig.control.stop()
+    assert time.monotonic() - started < 10
+    assert list((rig.paths.cache_dir / "index").iterdir()) == []
+
+
+def test_a_failed_copy_serves_the_video_itself_with_a_note(tmp_path: Path) -> None:
+    rig, _ = _needs_index(tmp_path, "fail")
+    rig.start()
+    _until(lambda: not _video(rig)["preparing"])
+    assert "the copy failed" in _video(rig)["note"]
+    assert rig.control.visit("aaa", "192.0.2.1", "x", False).file == str(rig.film)
+    assert (rig.paths.videos_dir / "1").resolve() == rig.film
+
+
+def test_without_mkvmerge_the_video_itself_is_served_with_a_note(tmp_path: Path) -> None:
+    rig, _ = _needs_index(tmp_path)
+    rig.control.runner = FakeRunner(())
+    video = rig.start()["stream"]["videos"][0]
+    assert video["preparing"] is False and "install mkvtoolnix" in video["note"]
+    assert rig.control.visit("aaa", "192.0.2.1", "x", False).file == str(rig.film)
+
+
+def test_an_mkv_with_a_full_index_is_served_as_it_is(tmp_path: Path) -> None:
+    rig, tools = _needs_index(tmp_path)
+    mkvdata.write(rig.film, ("video", "audio"))
+    assert rig.start()["stream"]["videos"][0] == {**_video(rig), "preparing": False, "note": None}
+    assert tools.calls() == []
+
+
+def test_a_stream_taken_up_after_a_crash_finishes_its_copies(tmp_path: Path) -> None:
+    rig, tools = _needs_index(tmp_path, "slow")
+    rig.start()
+    rig.control._stop_indexing()  # the daemon dies while the copy is made
+    tools.mode = "ok"
+    control = rig.again()
+    control.runner = tools
+    control.reconcile()
+    assert control.status()["stream"]["videos"][0]["preparing"] is True
+    _until(lambda: not control.status()["stream"]["videos"][0]["preparing"])
+    assert mkv.index_problem(control.visit("aaa", "192.0.2.1", "x", False).file) is None
+    control.stop()

@@ -269,6 +269,8 @@ def test_describe(show: Path) -> None:
         "number": 3,
         "name": "e10.mkv",
         "url": "http://192.0.2.9:1337/aaa/3",
+        "preparing": False,
+        "note": None,
     }
     assert {d["ip"]: d["passes"] for d in info["devices"]} == {
         "192.0.2.1": True,
@@ -303,3 +305,37 @@ def test_links_are_followed_once_at_the_start(tmp_path: Path) -> None:
     assert make(file=str(folder / "e1.mkv")).videos == [str(real)]
     with pytest.raises(StreamError, match="not a video file"):
         make(file=str(folder / "e4.mkv"))
+
+
+def test_what_is_served_survives_a_round_trip(show: Path) -> None:
+    s = make(dir=str(show), alias="aaa")
+    s.served[1] = "/var/cache/vpstream/index/x.mkv"
+    s.indexing = {3}
+    s.notes = {1: "VLC resumes it slowly"}
+    again = Stream.from_dict(s.to_dict())
+    assert (again.served, again.indexing, again.notes) == (s.served, {3}, s.notes)
+    assert visit(again, "aaa/2").file == "/var/cache/vpstream/index/x.mkv"
+    assert (visit(again, "aaa/3").status, visit(again, "aaa/3").kind) == (503, "preparing")
+
+
+def test_a_stream_recorded_by_an_older_version_serves_its_videos(show: Path) -> None:
+    data = make(dir=str(show)).to_dict()
+    for key in ("served", "indexing", "notes"):
+        del data[key]
+    again = Stream.from_dict(data)
+    assert again.served == again.videos and again.indexing == set() and again.notes == {}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"served": ["/a"]},
+        {"served": ["x", "y", "z"]},
+        {"indexing": [4]},
+        {"indexing": ["1"]},
+        {"notes": []},
+    ],
+)
+def test_a_damaged_record_of_what_is_served_is_refused(show: Path, change: dict[str, Any]) -> None:
+    with pytest.raises(StreamError, match="not usable"):
+        Stream.from_dict({**make(dir=str(show)).to_dict(), **change})

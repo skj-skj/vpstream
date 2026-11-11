@@ -76,6 +76,13 @@ def respond(answer: Answer, host: str) -> Response:
         return Response(index_page(answer.alias, answer.names), mimetype="text/html")
     if answer.kind == "playlist":
         return Response(playlist(answer.alias, answer.names, host), mimetype=M3U_TYPE)
+    if answer.kind == "preparing":
+        response = _text(
+            answer.status,
+            "This video is being prepared so players can seek in it. Try again in a minute.",
+        )
+        response.headers["Retry-After"] = "30"
+        return response
     if answer.kind == "denied":
         return _text(
             answer.status, "This device is not allowed to watch. Ask the person who sent the link."

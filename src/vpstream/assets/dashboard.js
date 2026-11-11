@@ -95,7 +95,9 @@
     }
     stream.videos.forEach(function (video) {
       var url = stream.kind === "dir" ? video.url : stream.url;
-      rows.push(row([stream.kind === "dir" ? video.number : "", el("td", url, "url"), video.name]));
+      var name = video.name + (video.preparing ? " (preparing a seek index)" : "") +
+        (video.note ? " (" + video.note + ")" : "");
+      rows.push(row([stream.kind === "dir" ? video.number : "", el("td", url, "url"), name]));
     });
     fill($("videos"), rows);
   }

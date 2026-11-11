@@ -221,10 +221,24 @@ def format_stream(stream: dict[str, Any]) -> str:
             f"Address:      {stream.get('url')}  (index for browsers, playlist for players)"
         )
         width = len(str(len(videos)))
-        lines += [f"  {v['number']:>{width}}  {v['url']}  {v['name']}" for v in videos]
+        lines += [
+            f"  {v['number']:>{width}}  {v['url']}  {v['name']}{_video_state(v)}" for v in videos
+        ]
     else:
-        lines.append(f"Address:      {stream.get('url')}")
+        lines.append(f"Address:      {stream.get('url')}{''.join(map(_video_state, videos[:1]))}")
+    preparing = sum(bool(v.get("preparing")) for v in videos)
+    if preparing:
+        lines.append(
+            f"Preparing:    {preparing} MKV {'file gets' if preparing == 1 else 'files get'} a "
+            "full seek index (no re-encoding, about a minute per GB); until then its address "
+            "says to try again"
+        )
+    lines += [f"note: video {v['number']}: {v['note']}" for v in videos if v.get("note")]
     return "\n".join(lines)
+
+
+def _video_state(video: dict[str, Any]) -> str:
+    return "  [preparing]" if video.get("preparing") else ""
 
 
 def format_status(info: dict[str, Any], cli_version: str) -> str:
