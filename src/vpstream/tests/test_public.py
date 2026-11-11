@@ -376,3 +376,19 @@ def test_the_dashboard_sends_no_time_limit_of_its_own_for_an_empty_field(
     script = dash.get("/assets/dashboard.js").get_data(as_text=True)
     assert 'ttl === "" ? null : Number(ttl)' in script
     assert b'value="180" required' in dash.get("/").data
+
+
+def test_a_video_being_prepared_says_to_try_again(control: Control, tmp_path: Path) -> None:
+    from vpstream.tests import mkvdata
+    from vpstream.tests.fakes import FakeMkvmerge
+
+    film = mkvdata.write(tmp_path / "film.mkv", indexed=[1])
+    control.runner = FakeMkvmerge(tmp_path, "slow")
+    control.start({"file": str(film), "alias": "aaa"})
+    try:
+        answer = public.create_app(control).test_client().get("/aaa", headers=IP)
+        assert answer.status_code == 503 and answer.headers["Retry-After"] == "30"
+        assert "being prepared" in answer.get_data(as_text=True)
+        assert "X-Vpstream-File" not in answer.headers
+    finally:
+        control.stop()

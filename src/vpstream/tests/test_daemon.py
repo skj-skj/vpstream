@@ -721,3 +721,33 @@ def test_format_stream_of_one_file() -> None:
         "Source:       /srv/film.mkv",
         "Address:      http://192.0.2.9:1337/aaa",
     ]
+
+
+def test_format_stream_shows_what_is_being_prepared() -> None:
+    url = "http://192.0.2.9:1337/aaa"
+    stream = {
+        "alias": "aaa",
+        "mode": "direct",
+        "policy": "open",
+        "seconds_left": None,
+        "source": "/srv/show",
+        "kind": "dir",
+        "url": url,
+        "videos": [
+            {"number": 1, "name": "e1.mkv", "url": f"{url}/1", "preparing": True, "note": None},
+            {
+                "number": 2,
+                "name": "e2.mkv",
+                "url": f"{url}/2",
+                "preparing": False,
+                "note": "its seek index has no audio entries, so VLC resumes it slowly",
+            },
+        ],
+    }
+    lines = cli.format_stream(stream).splitlines()
+    assert lines[3] == f"  1  {url}/1  e1.mkv  [preparing]"
+    assert lines[4] == f"  2  {url}/2  e2.mkv"
+    assert lines[5].startswith("Preparing:    1 MKV file gets a full seek index")
+    assert (
+        lines[6] == "note: video 2: its seek index has no audio entries, so VLC resumes it slowly"
+    )

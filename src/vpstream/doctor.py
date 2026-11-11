@@ -48,7 +48,7 @@ TOOLS = (
     Tool("sudo", "the firewall helper", "as root: apt install sudo"),
     Tool("setfacl", "letting `vpstream start` give the service access to your videos", "", False),
     Tool("mkvextract", "WebVTT subtitles stored by mkvmerge", "", required=False),
-    Tool("mkvmerge", "WebVTT subtitles stored by mkvmerge", "", required=False),
+    Tool("mkvmerge", "a full seek index in MKV files, so VLC resumes them quickly", "", False),
 )
 
 # Burned-in subtitles fall back to these when a file does not carry its font.

@@ -42,12 +42,22 @@ class CaddyError(RuntimeError):
     pass
 
 
-def link_videos(folder: Path, videos: Sequence[str]) -> None:
-    """Fill `folder` with one link per video, named 1, 2, 3 and so on. What was there goes."""
+def link_videos(folder: Path, videos: Sequence[str | None]) -> None:
+    """Fill `folder` with one link per video, named 1, 2, 3 and so on; None leaves a number
+    without one for now. What was there goes."""
     unlink_videos(folder)
     folder.mkdir(mode=0o750, parents=True)
     for number, video in enumerate(videos, 1):
-        (folder / str(number)).symlink_to(video)
+        if video is not None:
+            (folder / str(number)).symlink_to(video)
+
+
+def link_video(folder: Path, number: int, video: str) -> None:
+    """Point one number at `video`, in one step: a request sees the old link or the new."""
+    part = folder / f".{number}.new"
+    part.unlink(missing_ok=True)
+    part.symlink_to(video)
+    os.replace(part, folder / str(number))
 
 
 def unlink_videos(folder: Path) -> None:

@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import net, state
-from vpstream.caddy import CaddyError, Server, link_videos, unlink_videos
+from vpstream import mkv, net, reindex, state
+from vpstream.caddy import CaddyError, Server, link_video, link_videos, unlink_videos
 from vpstream.config import Config, Paths
 from vpstream.firewall import Firewall, FirewallError
 from vpstream.stream import MISSING, Answer, Stream, StreamError, check_alias
@@ -53,6 +53,8 @@ class Control:
     _lock: threading.RLock = field(default_factory=threading.RLock)
     runner: Runner | None = None  # for `ss`; without one, the access log alone counts bytes
     _traffic: Traffic | None = None
+    _indexer: threading.Thread | None = None
+    _cancel: threading.Event = field(default_factory=threading.Event)
     _host: str = ""
 
     # --- the pieces
@@ -94,7 +96,10 @@ class Control:
         if self.server is None:
             raise ControlError("this daemon has no public server to start")
         try:
-            link_videos(self.paths.videos_dir, stream.videos)
+            link_videos(
+                self.paths.videos_dir,
+                [None if n in stream.indexing else v for n, v in enumerate(stream.served, 1)],
+            )
             self.server.start()
         except (CaddyError, ToolMissing, OSError) as exc:
             unlink_videos(self.paths.videos_dir)
@@ -144,6 +149,7 @@ class Control:
     def _end(self, why: str) -> None:
         """Forget the stream and its approvals, so the gate refuses at once; then close the
         port and stop Caddy. Called with `_op` held."""
+        self._stop_indexing()
         self._undo()
         port = self.config.stream_port
         if self.firewall_problem:
@@ -151,6 +157,72 @@ class Control:
         else:
             port_now = "is closed" if self.firewall else "was not opened (no firewall helper)"
         self.log(f"the stream is stopped ({why}); stream port {port} {port_now}")
+
+    # --- the seek index of MKV files (see `mkv`)
+
+    def _plan_index(self, stream: Stream, numbers: Any) -> None:
+        """Serve a copy with a proper index for each of these videos that lacks one: the
+        copy made before, or one made now (`indexing`). Without mkvmerge, the video itself."""
+        can_fix = bool(self.runner and self.runner.which(reindex.TOOL))
+        for n in numbers:
+            source = stream.videos[n - 1]
+            stream.indexing.discard(n)
+            problem = mkv.index_problem(source)
+            if problem is None:
+                continue
+            copy = reindex.ready(self.paths.cache_dir, source)
+            if copy is not None:
+                stream.served[n - 1] = str(copy.resolve())
+            elif can_fix:
+                stream.indexing.add(n)
+                self.log(f"video {n}: {problem}; making a copy with a full index")
+            else:
+                stream.notes[n] = f"{problem}, so VLC resumes it slowly (install mkvtoolnix)"
+
+    def _start_indexing(self, stream: Stream) -> None:
+        if not stream.indexing or self.runner is None:
+            return
+        self._cancel = threading.Event()
+        self._indexer = threading.Thread(
+            target=self._index, args=(stream, self.runner, self._cancel), daemon=True
+        )
+        self._indexer.start()
+
+    def _stop_indexing(self) -> None:
+        self._cancel.set()
+        if self._indexer is not None:
+            self._indexer.join(timeout=15)
+            self._indexer = None
+
+    def _index(self, stream: Stream, runner: Runner, cancel: threading.Event) -> None:
+        """Make the copies one after the other. Each is served as soon as it is ready."""
+        for n in sorted(stream.indexing):
+            source = stream.videos[n - 1]
+            started = time.monotonic()
+            note = None
+            try:
+                out = reindex.copy_path(self.paths.cache_dir, source)
+                if not out.is_file():  # the same file may be in the folder twice
+                    reindex.make(runner, source, out, cancel)
+                served = str(out.resolve())
+            except reindex.Cancelled:
+                return
+            except (reindex.ReindexError, ToolMissing, OSError) as exc:
+                served, note = source, f"VLC resumes it slowly: the copy failed: {exc}"
+            with self._lock:
+                if self.stream is not stream or cancel.is_set():
+                    return
+                stream.served[n - 1] = served
+                stream.indexing.discard(n)
+                if note:
+                    stream.notes[n] = note
+                try:
+                    link_video(self.paths.videos_dir, n, served)
+                    self._save()
+                except OSError as exc:
+                    self.log(f"WARNING: video {n}: {exc}")
+            took = time.monotonic() - started
+            self.log(f"video {n}: {note or f'copy with a full index ready ({took:.0f} s)'}")
 
     # --- when the daemon starts and stops
 
@@ -192,11 +264,13 @@ class Control:
         if stream.expires is not None and stream.expires <= self.clock():
             self.log("the recorded stream's time limit is over; it is not started again")
             return False
+        self._plan_index(stream, sorted(stream.indexing))
         try:
             self._serve(stream)
         except ControlError as exc:
             self.log(f"WARNING: the recorded stream could not be started again: {exc}")
             return False
+        self._start_indexing(stream)
         self.log(f"the stream /{stream.alias} is running again after a restart of the daemon")
         return True
 
@@ -237,8 +311,10 @@ class Control:
                     f"a stream is already running (/{self.stream.alias}); stop it first"
                 )
             stream = Stream.create(options, self.clock())
+            self._plan_index(stream, range(1, len(stream.videos) + 1))
             self._serve(stream)
             self.log(f"stream /{stream.alias} started: {stream.source} ({stream.policy})")
+            self._start_indexing(stream)
             return self.status()
 
     def stop(self) -> dict[str, Any]:

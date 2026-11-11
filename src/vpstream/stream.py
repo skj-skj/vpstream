@@ -133,7 +133,7 @@ class Answer:
 
     status: int
     kind: str  # "video", "index", "playlist", "denied" or "missing"
-    file: str = ""  # for a video: the file to send
+    file: str = ""  # for a video: the file to send (the original, or its re-indexed copy)
     number: int = 0  # and its number
     alias: str = ""  # for an index or a playlist: what it lists
     names: list[str] = field(default_factory=list)
@@ -155,6 +155,14 @@ class Stream:
     policy: str = gate.OPEN
     unlocked_policy: str = gate.OPEN  # what Unlock goes back to
     devices: gate.Devices = field(default_factory=gate.Devices)
+    # What is sent for each number: the video itself, or a copy with a proper seek index.
+    served: list[str] = field(default_factory=list)
+    indexing: set[int] = field(default_factory=set)  # numbers whose copy is being made
+    notes: dict[int, str] = field(default_factory=dict)  # number -> why it stays slow to seek
+
+    def __post_init__(self) -> None:
+        if len(self.served) != len(self.videos):
+            self.served = list(self.videos)
 
     @classmethod
     def create(cls, options: dict[str, Any], now: float) -> Stream:
@@ -242,7 +250,9 @@ class Stream:
     def _video(self, number: int) -> Answer:
         if not 1 <= number <= len(self.videos):
             return MISSING
-        return Answer(200, "video", self.videos[number - 1], number)
+        if number in self.indexing:
+            return Answer(503, "preparing", number=number)
+        return Answer(200, "video", self.served[number - 1], number)
 
     # --- as plain data
 
@@ -262,6 +272,9 @@ class Stream:
             "policy": self.policy,
             "unlocked_policy": self.unlocked_policy,
             "devices": self.devices.rows(),
+            "served": self.served,
+            "indexing": sorted(self.indexing),
+            "notes": {str(n): text for n, text in self.notes.items()},
         }
 
     @classmethod
@@ -280,7 +293,22 @@ class Stream:
                 or data["unlocked_policy"] == gate.LOCKED
             ):
                 raise StreamError("the recorded stream is not usable")
+            count = len(videos)
+            served = data.get("served", videos)  # a stream recorded before 0.9 has none
+            indexing = data.get("indexing", [])
+            notes = data.get("notes", {})
+            if (
+                not isinstance(served, list)
+                or len(served) != count
+                or not all(isinstance(v, str) and v.startswith("/") for v in served)
+                or not all(isinstance(n, int) and 0 < n <= count for n in indexing)
+                or not isinstance(notes, dict)
+            ):
+                raise StreamError("the recorded stream is not usable")
             return cls(
+                served=served,
+                indexing=set(indexing),
+                notes={int(n): str(text) for n, text in notes.items()},
                 kind=data["kind"],
                 source=str(data["source"]),
                 videos=videos,
@@ -311,7 +339,13 @@ class Stream:
             "expires": self.expires,
             "seconds_left": None if self.expires is None else max(0.0, self.expires - now),
             "videos": [
-                {"number": n, "name": name, "url": f"{url}/{n}"}
+                {
+                    "number": n,
+                    "name": name,
+                    "url": f"{url}/{n}",
+                    "preparing": n in self.indexing,
+                    "note": self.notes.get(n),
+                }
                 for n, name in enumerate(self.names(), 1)
             ],
             "devices": [
