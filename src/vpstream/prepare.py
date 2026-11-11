@@ -540,6 +540,13 @@ class Preparer:
                 f"not enough free space in {self.cache_dir} (about {need / 1e9:.1f} GB needed)"
             )
 
+    def _check(self, job: Job, part: Path, final: str) -> None:
+        """A version whose playlists name a file a viewer cannot fetch is not put in place:
+        it would load in a player and then fail."""
+        problems = prepared.playlist_problems(job.entry, part, final)
+        if problems:
+            raise PrepareError("the new version is not whole: " + "; ".join(problems[:3]))
+
     def _has_filters(self, *names: str) -> bool:
         if self._filters is None:
             self._filters = ffmpeg_names(self.runner, "filters")
@@ -579,6 +586,7 @@ class Preparer:
             self._ffmpeg(job, args)
             if not prepared.master(part).is_file():
                 raise PrepareError("ffmpeg wrote no playlist")
+            self._check(job, part, prepared.BASE)
             _install(part, final)
         finally:
             shutil.rmtree(part, ignore_errors=True)
@@ -637,6 +645,7 @@ class Preparer:
             except ValueError as exc:
                 raise PrepareError(str(exc)) from exc
             write_atomic(own, text)
+            self._check(job, part, f"{prepared.BURN}/{track.number}")
             final.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
             _install(part, final)
         finally:

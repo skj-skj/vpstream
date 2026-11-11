@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -177,6 +178,36 @@ def versions(entry: Path) -> Versions:
             if master(burn_dir(entry, n)).is_file()
         ],
     )
+
+
+def playlist_uris(text: str) -> list[str]:
+    """Every file an HLS playlist names: its media lines and its URI="..." attributes."""
+    found = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            found.append(line)
+        elif line.startswith("#"):
+            found += re.findall(r'URI="([^"]*)"', line)
+    return found
+
+
+def playlist_problems(entry: Path, folder: Path, final: str) -> list[str]:
+    """What the playlists of a new version name that a viewer could not fetch, before it is
+    put in place: `folder` is still its .part folder, which will be `final` ("base",
+    "burn/7") in `entry`. Each named file must be there and be one vpstream serves."""
+    problems = []
+    for playlist in sorted(folder.glob("*.m3u8")):
+        for uri in playlist_uris(playlist.read_text(encoding="utf-8", errors="replace")):
+            rel = posixpath.normpath(posixpath.join(final, uri))
+            if not _SERVED.fullmatch(rel):
+                problems.append(f"{playlist.name} names {uri!r}, which cannot be served")
+                continue
+            inside = rel.startswith(final + "/")
+            path = folder / rel[len(final) + 1 :] if inside else entry / rel
+            if not path.is_file():
+                problems.append(f"{playlist.name} names {uri!r}, which is not there")
+    return problems
 
 
 def served_file(entry: Path, rel: str) -> Path | None:

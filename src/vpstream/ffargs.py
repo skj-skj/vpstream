@@ -170,14 +170,22 @@ def variant_map(languages: Sequence[str], default: int = 0) -> str:
 
 
 def rendition_output_args(out_dir: str | Path, stream_map: str) -> list[str]:
-    """HLS output of named renditions (see MASTER) into `out_dir`."""
+    """HLS output of named renditions (see MASTER) into `out_dir`.
+
+    ffmpeg puts the rendition's name in place of %v in the segment and playlist names
+    always, but in the init segment's name only when there are two renditions or more. A
+    video alone (a burned-in version) gets the name written out, else its playlist names
+    a file "%v_init.mp4", which works from a disk and not over HTTP.
+    """
+    variants = stream_map.split()
+    init = "%v_init.mp4" if len(variants) > 1 else f"{VIDEO}_init.mp4"
     return hls_output_args(
         out_dir,
         segment="%v_%05d",
         playlist="%v.m3u8",
         extra=(
             "-hls_fmp4_init_filename",
-            "%v_init.mp4",
+            init,
             "-master_pl_name",
             MASTER,
             "-var_stream_map",
