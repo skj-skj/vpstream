@@ -57,12 +57,27 @@ step "a stream: the real Caddy serves the file, and the port is open only while 
 MEDIA=/srv/vpstream-ci-media
 status_code() { curl -s -m 10 -o /dev/null -w '%{http_code}' "$1"; }
 sudo mkdir -p "$MEDIA"
-head -c 300000 /dev/urandom | sudo tee "$MEDIA/film.mkv" > /dev/null
-sudo chmod 600 "$MEDIA/film.mkv"
-no as_group "$BIN/vpstream start --file $MEDIA/film.mkv"   # the service user cannot read it
+# Someone else's private file: start cannot open it up, and says who can.
+head -c 1000 /dev/urandom | sudo tee "$MEDIA/roots.mkv" > /dev/null
+sudo chmod 600 "$MEDIA/roots.mkv"
+no as_group "$BIN/vpstream start --file $MEDIA/roots.mkv" 2> /tmp/refused.txt
+cat /tmp/refused.txt
+grep -q "sudo setfacl -m u:vpstream:rX $MEDIA/roots.mkv" /tmp/refused.txt
 no has_rule 1337
-sudo chmod 644 "$MEDIA/film.mkv"
-as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci"
+# The caller's own private library: no chmod and no group change, start gives the service
+# access by itself, to its user alone.
+sudo chown "$USER" "$MEDIA"
+chmod 700 "$MEDIA"
+head -c 300000 /dev/urandom > "$MEDIA/film.mkv"
+chmod 600 "$MEDIA/film.mkv"
+no sudo -u vpstream cat "$MEDIA/film.mkv" > /dev/null
+as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci" 2> /tmp/granted.txt
+cat /tmp/granted.txt
+grep -q "Gave the vpstream service (user vpstream) read access to 2 of your" /tmp/granted.txt
+getfacl -c "$MEDIA/film.mkv" | tee /tmp/acl.txt
+grep -qx "user:vpstream:r--" /tmp/acl.txt
+grep -qx "other::---" /tmp/acl.txt
+no sudo -u nobody cat "$MEDIA/film.mkv" > /dev/null   # still closed to everyone else
 has_rule "ufw allow 1337/tcp"
 [ "$(ps -o user= -C caddy | sort -u | tr -d ' ')" = vpstream ]
 curl -sS -m 10 -D /tmp/film.headers -o /tmp/film.out http://127.0.0.1:1337/ci
@@ -88,8 +103,11 @@ has_rule "ufw allow 1337/tcp"
 as_group "$BIN/vpstream devices enable 127.0.0.1"
 [ "$(status_code http://127.0.0.1:1337/ci)" = 200 ]
 
-step "stop closes the port and ends Caddy"
-as_group "$BIN/vpstream stop"
+step "stop closes the port, ends Caddy and takes the file access back"
+as_group "$BIN/vpstream stop" | tee /tmp/stopped.txt
+grep -q "Took back the vpstream service's access to 2 of your" /tmp/stopped.txt
+no grep -q vpstream <(getfacl -c "$MEDIA/film.mkv" "$MEDIA")
+no sudo -u vpstream cat "$MEDIA/film.mkv" > /dev/null
 no has_rule 1337
 no pgrep -x caddy
 no curl -s -m 3 -o /dev/null http://127.0.0.1:1337/ci
@@ -102,6 +120,10 @@ sleep 3
 no has_rule 1337
 no pgrep -x caddy
 as_group "$BIN/vpstream status --json" | grep -q '"stream": null'
+# That stream ended without `vpstream stop`, so its access is still there: revoke takes it.
+getfacl -c "$MEDIA/film.mkv" | grep -qx "user:vpstream:r--"
+as_group "$BIN/vpstream revoke"
+no grep -q vpstream <(getfacl -c "$MEDIA/film.mkv" "$MEDIA")
 sudo rm -r "$MEDIA"
 
 step "the helper opens and closes only the configured port"
