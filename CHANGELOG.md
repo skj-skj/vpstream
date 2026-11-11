@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.8.2 (2026-11-11)
+
+### Bug Fixes
+
+- Remove the ACL mask that setfacl leaves when the last entry is taken back
+  ([#13](https://github.com/skj-skj/vpstream/pull/13),
+  [`6663dc3`](https://github.com/skj-skj/vpstream/commit/6663dc384699b79e8e06a862e96bc9ff338ab63d))
+
+
 ## v0.8.1 (2026-11-11)
 
 ### Bug Fixes
