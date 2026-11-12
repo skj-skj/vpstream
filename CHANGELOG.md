@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.11.0 (2026-11-12)
+
+### Features
+
+- Client control in browser mode: approval cookie, viewer reports and commands
+  ([#20](https://github.com/skj-skj/vpstream/pull/20),
+  [`367b270`](https://github.com/skj-skj/vpstream/commit/367b270848d3a9f9438d632f06ef3826916b94fd))
+
+
 ## v0.10.1 (2026-11-12)
 
 ### Bug Fixes
