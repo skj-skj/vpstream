@@ -74,6 +74,27 @@ function load(over, options) {
     if (at !== undefined) { video.currentTime = at; }
     video.dispatch("timeupdate");
   };
+  // Full screen as a browser has it: the standard API, Safari's webkit one, or none.
+  const fullApi = (options && options.full) || "standard";
+  const fire = (name) => (document.listeners[name] || []).forEach((fn) => fn({}));
+  if (fullApi !== "none") {
+    const w = fullApi === "webkit";
+    const enter = function () {
+      if (options && options.refuse) { return Promise.reject(new Error("not allowed")); }
+      document[w ? "webkitFullscreenElement" : "fullscreenElement"] = this;
+      fire(w ? "webkitfullscreenchange" : "fullscreenchange");
+      return w ? undefined : Promise.resolve();
+    };
+    const leave = () => {
+      document[w ? "webkitFullscreenElement" : "fullscreenElement"] = null;
+      fire(w ? "webkitfullscreenchange" : "fullscreenchange");
+      return w ? undefined : Promise.resolve();
+    };
+    document[w ? "webkitFullscreenEnabled" : "fullscreenEnabled"] = true;
+    document[w ? "webkitFullscreenElement" : "fullscreenElement"] = null;
+    document[w ? "webkitExitFullscreen" : "exitFullscreen"] = leave;
+    root[w ? "webkitRequestFullscreen" : "requestFullscreen"] = enter;
+  }
   document.getElementById("bar").getBoundingClientRect = () => ({ left: 0, width: 1000 });
 
   const hlses = [];
@@ -329,6 +350,39 @@ const { check, finish } = runner();
     ok(!shown(), "hidden by the timer");
     page.document.listeners.mousemove.forEach((fn) => fn({}));
     ok(shown(), "and back on a move");
+  });
+
+  await check("full screen: the button and the f key enter and leave it, the whole page", async () => {
+    for (const api of ["standard", "webkit"]) {
+      const page = load({}, { full: api });
+      const now = () => page.document.fullscreenElement || page.document.webkitFullscreenElement;
+      eq(page.$("full").hidden, false, api + ": a button");
+      eq(text(page.$("full")), "Full screen");
+      press(page, "full");
+      ok(now() === page.root, api + ": the page, so the controls and subtitles stay");
+      eq(text(page.$("full")), "Exit full screen");
+      press(page, "full");
+      ok(!now()); eq(text(page.$("full")), "Full screen");
+      const key = (k, more) => page.document.listeners.keydown.forEach((fn) => fn(Object.assign({ key: k, preventDefault() {} }, more)));
+      key("f"); ok(now(), api + ": f enters");
+      key("F"); ok(!now(), api + ": and leaves (Shift too)");
+      key("f", { metaKey: true }); key("f", { ctrlKey: true }); key("f", { altKey: true });
+      ok(!now(), "not with Cmd, Ctrl or Alt: those are the browser's");
+      // Leaving with Esc is the browser's own; the label follows.
+      key("f");
+      page.document.exitFullscreen ? page.document.exitFullscreen() : page.document.webkitExitFullscreen();
+      eq(text(page.$("full")), "Full screen");
+    }
+  });
+
+  await check("full screen: no button where the browser has none, and a refusal is said", async () => {
+    const none = load({}, { full: "none" });
+    eq(none.$("full").hidden, true);
+    none.document.listeners.keydown.forEach((fn) => fn({ key: "f", preventDefault() {} }));  // nothing breaks
+    const refused = load({}, { refuse: true });
+    press(refused, "full");
+    await settle();
+    eq(text(refused.$("message")), "Full screen is not allowed here.");
   });
 
   await check("without a place to report it only plays", async () => {

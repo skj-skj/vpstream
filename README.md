@@ -88,7 +88,8 @@ vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
 - **Dashboard:** shows the plan of a prepare (what it makes, how long, the tracks it found)
   before it is queued, then its progress.
 - **Player:** large buttons for a TV remote that works as a pointer: play, ±10 s, audio
-  (each track, then Off), subtitles (Off, then each prepared one), episodes and next. Other
+  (each track, then Off), subtitles (Off, then each prepared one), episodes, next, full
+  screen (also the `f` key on a computer) and hide. Other
   players get the HLS playlist at the same address.
 - **Who gets in:** approval by default; a waiting browser shows a 4-digit code, which
   `vpstream devices` and the dashboard show next to its address. A browser gets a random

@@ -231,6 +231,35 @@
     showControls();
   }
 
+  // --- full screen: the whole page, so the controls and the subtitles stay on it. Safari
+  // has the API under webkit names. A browser without it (some TVs) shows no button.
+
+  var root = document.documentElement;
+
+  function fullElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  function canFull() {
+    return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled) &&
+      !!(root.requestFullscreen || root.webkitRequestFullscreen);
+  }
+
+  function toggleFull() {
+    if (!canFull()) { return; }
+    var asked;
+    if (fullElement()) {
+      asked = document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen();
+    } else {
+      asked = root.requestFullscreen ? root.requestFullscreen() : root.webkitRequestFullscreen();
+    }
+    if (asked && asked["catch"]) { asked["catch"](function () { say("Full screen is not allowed here."); }); }
+  }
+
+  function fullLabel() {
+    $("full").textContent = fullElement() ? "Exit full screen" : "Full screen";
+  }
+
   function seekTo(t) {
     if (video.readyState < 1) { seekWhenReady = t; return; }
     var end = video.duration || Infinity;
@@ -342,6 +371,7 @@
   on("subs", press("sub", nextSub));
   on("episodes", function () { window.location.href = S.index; });
   on("next", function () { if (S.next) { window.location.href = S.next; } });
+  on("full", toggleFull);
   $("bar").addEventListener("click", function (event) {
     event.stopPropagation();
     var box = $("bar").getBoundingClientRect();
@@ -371,8 +401,13 @@
     } else if ((key === " " || key === "MediaPlayPause") && at < 0) {
       $("play").click();
       event.preventDefault();
+    } else if ((key === "f" || key === "F") && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      toggleFull();
+      event.preventDefault();
     }
   });
+  document.addEventListener("fullscreenchange", fullLabel);
+  document.addEventListener("webkitfullscreenchange", fullLabel);
 
   ["timeupdate", "play", "pause", "seeked", "durationchange"].forEach(function (name) {
     video.addEventListener(name, update);
@@ -396,6 +431,7 @@
   $("next").hidden = !S.next;
   $("audio").hidden = !S.audio.length;
   $("subs").hidden = !S.subs.length;
+  $("full").hidden = !canFull();
   $("audio").textContent = audioLabel();
   $("subs").textContent = subLabel();
   var first = sub >= 0 && S.subs[sub].kind === "burn" ? S.subs[sub].url : S.master;
