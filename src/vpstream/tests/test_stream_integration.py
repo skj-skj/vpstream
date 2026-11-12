@@ -149,13 +149,13 @@ def test_policies_and_alias_apply_on_the_next_request(live: Live, show: Path) ->
     assert device["ip"] == "127.0.0.1"  # the address the request came from, not one it claimed
     assert device["wl"] is True and device["user_agent"] == "TV"
 
-    live.api("devices", {"ip": "127.0.0.1", "allowed": True})
+    live.api("devices", {"device": "127.0.0.1", "allowed": True})
     assert live.get("/aaa")[0] == 200
-    live.api("devices", {"ip": "127.0.0.1", "allowed": False})
+    live.api("devices", {"device": "127.0.0.1", "allowed": False})
     assert live.get("/aaa")[0] == 403
     live.api("stream/policy", {"policy": "open"})
     assert live.get("/aaa")[0] == 403  # disabled stays out, even when open
-    live.api("devices", {"ip": "127.0.0.1", "allowed": True})
+    live.api("devices", {"device": "127.0.0.1", "allowed": True})
 
     live.api("stream/alias", {"alias": "bbb"})
     assert live.get("/aaa")[0] == 404 and live.get("/bbb")[0] == 200
@@ -389,17 +389,81 @@ def test_a_browser_stream_makes_its_copy_and_says_so_meanwhile(
     info = live.api("stream/start", {"file": str(film), "alias": "aaa", "mode": "browser"})
     assert info["stream"]["policy"] == "approval"
     # Approval mode: a browser waits with a code, which the dashboard shows.
-    status, _, body = live.get("/aaa", headers=HTML)
+    status, headers, body = live.get("/aaa", headers=HTML)
     code = live.api("status")["stream"]["devices"][0]["code"]
     assert status == 403 and code.encode() in body
-    live.api("devices", {"ip": "127.0.0.1", "allowed": True})
-    status, _, body = live.get("/aaa", headers=HTML)
+    first = _cookie(headers)
+    status, headers, body = live.get("/aaa", headers=HTML)
+    assert status == 403 and code.encode() not in body, "each new browser waits with its own"
+    browser = {**HTML, "Cookie": first}
+    (device,) = [d for d in live.api("status")["stream"]["devices"] if d["code"] == code]
+    assert device["kind"] == "browser"
+    live.api("devices", {"device": device["id"], "allowed": True})
+    assert live.get("/aaa", headers=HTML)[0] == 403, "approved: that browser, not the address"
+    status, _, body = live.get("/aaa", headers=browser)
     assert status in (200, 503)  # done already on a fast host
     jobs = _wait_prepared(live)
     assert {j["task"] for j in jobs} == {"base version (copy)", "subtitle 1 (soft)"}
-    assert live.get("/aaa", headers=HTML)[0] == 200
+    assert live.get("/aaa", headers=browser)[0] == 200
     listed = live.api("prepared")["prepared"]
     assert [(e["source"], e["in_use"]) for e in listed if e["source"] == str(film)] == [
         (str(film), True)
     ]
     assert live.api("prepared/rm", {"path": str(film)})["kept"] == [str(film)]
+
+
+def _cookie(headers: dict[str, str]) -> str:
+    """The approval cookie a response sets, as a browser sends it back."""
+    return headers["set-cookie"].split(";")[0]
+
+
+def test_a_tv_is_known_by_its_cookie_and_obeys_through_caddy(live: Live, sample: Path) -> None:
+    """The cookie, the player's reports and the owner's commands over real HTTP: Caddy must
+    pass the cookie on, return the one the gate sets, and send a report's answer whole."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed on this host")
+    live.api("prepare", {"file": str(sample), "sub": "1", "confirmed": True})
+    _wait_prepared(live)
+    live.api("stream/start", {"file": str(sample), "alias": "aaa", "mode": "browser"})
+    status, headers, _ = live.get("/aaa", headers=HTML)
+    assert status == 403
+    set_cookie = headers["set-cookie"]
+    assert "HttpOnly" in set_cookie and "SameSite=Lax" in set_cookie
+    tv = {"Cookie": _cookie(headers)}
+    device = live.api("status")["stream"]["devices"][0]
+    live.api("devices", {"device": device["id"], "allowed": True})
+
+    status, headers, body = live.get("/aaa", headers={**HTML, **tv})
+    assert status == 200 and "set-cookie" not in headers
+    page = json.loads(body.decode().split('type="application/json">')[1].split("</script>")[0])
+    assert page["report"] == "/aaa/1/client" and page["start"] == 0
+    # Segments carry the cookie and no page is asked for: Caddy sends them.
+    assert live.get("/aaa/1/hls/base/master.m3u8", headers=tv)[0] == 200
+    assert live.get("/aaa/1/hls/base/master.m3u8")[0] == 403, "not without it"
+
+    report = page["report"]
+    tv_player = {**tv, "X-Vpstream-Player": "1"}  # as player.js sends a report
+    status, headers, body = live.get(f"{report}?t=4.5&d=12&p=0&a=1&s=off&ack=0", headers=tv_player)
+    assert status == 200 and headers["content-type"].startswith("application/json")
+    assert headers["cache-control"] == "no-store" and json.loads(body) == {"commands": []}
+    live.api("clients", {"devices": [device["id"]], "audio": "2", "seek": "0:08"})
+    status, _, body = live.get(f"{report}?t=5&ack=0", headers=tv_player)
+    assert json.loads(body) == {"commands": [{"seq": 1, "audio": 2}, {"seq": 2, "seek": 8.0}]}
+    live.get(f"{report}?t=8&a=2&ack=2", headers=tv_player)
+    (shown,) = [d for d in live.api("status")["stream"]["devices"] if d["id"] == device["id"]]
+    assert shown["client"]["audio"] == 2 and shown["client"]["pending"] == {}
+    assert shown["client"]["position"] == 8
+
+    # Another browser on the same address is a stranger: it waits, and has no record.
+    status, headers, _ = live.get("/aaa", headers=HTML)
+    assert status == 403 and _cookie(headers) != tv["Cookie"]
+    stranger = {"Cookie": _cookie(headers)}
+    assert live.get(f"{report}?t=1", headers={**stranger, "X-Vpstream-Player": "1"})[0] == 403
+    assert (
+        live.get(
+            f"{report}?t=1", headers={"Cookie": "vpstream=" + "A" * 43, "X-Vpstream-Player": "1"}
+        )[0]
+        == 403
+    )
+    # Without the header it is no report, even with the cookie (a request from another site).
+    assert live.get(f"{report}?ack=99", headers=tv)[0] == 404

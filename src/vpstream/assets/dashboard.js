@@ -17,6 +17,8 @@
   var cacheAt = 0;
   var allJobs = false;  // finished prepares: the last few, or all the daemon keeps
   var RECENT = 8;
+  var ticked = {};  // the viewers a change is for: device id -> true
+  var menuKey = "";  // what the audio and subtitle lists hold now
 
   function $(id) { return document.getElementById(id); }
 
@@ -47,6 +49,13 @@
     if (h) { return h + "h " + (m < 10 ? "0" : "") + m + "m"; }
     if (m) { return m + "m " + (s % 60 < 10 ? "0" : "") + (s % 60) + "s"; }
     return s + "s";
+  }
+
+  // A position as a player shows it: 1:02:03, or 2:03 under an hour.
+  function clock(seconds) {
+    var s = Math.max(0, Math.floor(seconds || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    return (h ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (r < 10 ? "0" : "") + r;
   }
 
   function size(bytes) {
@@ -234,9 +243,11 @@
     return d.allowed ? ["Let in", "ok"] : ["Shut out", "bad"];
   }
 
+  function deviceName(d) { return d.name || (d.kind === "browser" ? shortAgent(d.user_agent) : d.ip); }
+
   function decide(d, allowed) {
-    change("devices", { ip: d.ip, allowed: allowed }, null,
-      (allowed ? "Let in " : "Shut out ") + d.ip);
+    change("devices", { device: d.id, allowed: allowed }, null,
+      (allowed ? "Let in " : "Shut out ") + deviceName(d));
   }
 
   function renderDevices(info) {
@@ -279,9 +290,11 @@
       if (d.allowed !== false) { actions.push(button(policy === "approval" ? "Deny" : "Disable", function () { decide(d, false); }, "danger")); }
       return h("div", { className: "item device" }, [
         h("div", { className: "grow" }, [
-          h("div", { className: "row" }, [h("span", { className: "title mono" }, d.ip), pill(state[0], state[1]),
-            d.wl ? pill("WL", "warn") : null]),
+          h("div", { className: "row" }, [h("span", { className: "title" + (d.name ? "" : " mono") }, d.name || d.ip),
+            pill(state[0], state[1]), d.wl ? pill("WL", "warn") : null]),
           h("div", { className: "meta" }, [
+            d.name ? h("span", { className: "mono" }, d.ip) : null,
+            h("span", {}, d.kind === "browser" ? "browser " + d.id : "player"),
             h("span", {}, shortAgent(d.user_agent)), h("span", {}, size(d.bytes) + " sent"),
             h("span", {}, d.requests + " requests" + (d.blocked ? ", " + d.blocked + " blocked" : "")),
             h("span", {}, seen)])
@@ -289,6 +302,149 @@
         h("div", { className: "actions" }, actions)
       ]);
     }));
+  }
+
+  // --- viewers: the browsers of a browser stream, and what the owner asks of them
+
+  function viewers(stream) {
+    return stream ? stream.devices.filter(function (d) { return d.kind === "browser" && d.passes; }) : [];
+  }
+
+  function tickedIds() { return Object.keys(ticked); }
+
+  // What a video offers: {audio: [{value, label}], subs: [...]}.
+  function menuOf(stream, number) {
+    var video = stream.videos[(number || 1) - 1];
+    return (video && video.menu) || { audio: [], subs: [] };
+  }
+
+  function trackLabel(list, value) {
+    if (value === null || value === undefined) { return "?"; }
+    if (value === 0 || value === "off") { return "Off"; }
+    for (var i = 0; i < list.length; i++) { if (list[i].value === String(value)) { return list[i].label; } }
+    return String(value);
+  }
+
+  function viewerState(c, now) {
+    if (!c || !c.reported) { return ["Not playing yet", ""]; }
+    if (!c.active) { return ["Left " + duration(now - c.reported) + " ago", "bad"]; }
+    return c.paused ? ["Paused", "warn"] : ["Playing", "ok"];
+  }
+
+  function pending(c, menu) {
+    var chips = [];
+    var waits = (c && c.pending) || {};
+    if ("audio" in waits) { chips.push(pill("asked: audio " + trackLabel(menu.audio, waits.audio), "accent")); }
+    if ("sub" in waits) { chips.push(pill("asked: subtitles " + trackLabel(menu.subs, waits.sub), "accent")); }
+    if ("seek" in waits) { chips.push(pill("asked: seek to " + clock(waits.seek), "accent")); }
+    if (c && c.start_at) { chips.push(pill("next start: video " + c.start_at[0] + " at " + clock(c.start_at[1]), "")); }
+    return chips;
+  }
+
+  function renderViewer(stream, now, d) {
+    var c = d.client;
+    var menu = menuOf(stream, c && c.video);
+    var state = viewerState(c, now);
+    var video = c && c.video ? stream.videos[c.video - 1] : null;
+    var on = !!ticked[d.id];
+    var chips = pending(c, menu);
+    return h("div", { className: "item client" + (on ? " ticked" : ""), onclick: function () {
+      if (on) { delete ticked[d.id]; } else { ticked[d.id] = true; }
+      renderViewers(last);
+    } }, [
+      h("div", { className: "tick" }, on ? "✓" : ""),
+      h("div", { className: "grow" }, [
+        h("div", { className: "row" }, [h("span", { className: "title ellipsis grow" }, deviceName(d)), pill(state[0], state[1])]),
+        h("div", { className: "sub ellipsis" }, d.id + " · " + d.ip + (video ? " · " + video.number + ". " + video.name : "")),
+        video && c.duration ? bar(c.position / c.duration) : null,
+        h("div", { className: "meta" }, [
+          video ? h("span", {}, clock(c.position) + (c.duration ? " / " + clock(c.duration) : "")) : null,
+          h("span", {}, "Audio: " + trackLabel(menu.audio, c && c.audio)),
+          h("span", {}, "Subtitles: " + trackLabel(menu.subs, c && c.sub))
+        ]),
+        chips.length ? h("div", { className: "chips" }, chips) : null
+      ])
+    ]);
+  }
+
+  // The tracks the ticked viewers' videos offer, each once, in the order first seen.
+  function unionMenu(stream, list) {
+    var out = { audio: [], subs: [] };
+    var seen = {};
+    var chosen = list.filter(function (d) { return ticked[d.id]; });
+    var numbers = chosen.map(function (d) { return (d.client && d.client.video) || 1; });
+    numbers.forEach(function (n) {
+      var menu = menuOf(stream, n);
+      ["audio", "subs"].forEach(function (kind) {
+        menu[kind].forEach(function (m) {
+          if (!seen[kind + m.value]) { seen[kind + m.value] = true; out[kind].push(m); }
+        });
+      });
+    });
+    return out;
+  }
+
+  function fillSelect(id, items) {
+    fill($(id), [h("option", { value: "" }, "Choose...")].concat(items.map(function (m) {
+      return h("option", { value: m.value }, m.label);
+    })).concat([h("option", { value: "off" }, "Off")]));
+  }
+
+  // What the ticked viewers play with, as a list's value: what was asked for while it is on
+  // its way, else what their players said. "" (Choose...) when they differ or it is unknown.
+  function sharedChoice(list, kind) {
+    var values = list.filter(function (d) { return ticked[d.id]; }).map(function (d) {
+      var c = d.client;
+      if (!c) { return ""; }
+      var value = c.pending && kind in c.pending ? c.pending[kind] : c[kind];
+      if (value === null || value === undefined) { return ""; }
+      return value === 0 ? "off" : String(value);
+    });
+    return values.length && values.every(function (v) { return v === values[0]; }) ? values[0] : "";
+  }
+
+  function showChoice(id, value) {
+    if (document.activeElement === $(id)) { return; }  // not while it is being used
+    var known = Array.prototype.some.call($(id).querySelectorAll("option"), function (o) { return o.value === value; });
+    $(id).value = known ? value : "";
+  }
+
+  function renderViewers(info) {
+    var stream = info && info.stream;
+    var list = viewers(stream);
+    var ids = list.map(function (d) { return d.id; });
+    Object.keys(ticked).forEach(function (id) { if (ids.indexOf(id) < 0) { delete ticked[id]; } });
+    var playing = list.filter(function (d) { return d.client && d.client.active; });
+    $("viewerbadge").hidden = !playing.length;
+    $("viewerbadge").textContent = String(playing.length);
+    $("clientcount").textContent = list.length ? String(list.length) : "";
+    $("tickall").hidden = !list.length;
+    $("tickall").textContent = list.length && tickedIds().length === list.length ? "Untick all" : "Tick all";
+    $("clientform").hidden = !tickedIds().length;
+    $("tickedcount").textContent = tickedIds().length + " ticked";
+    if (!stream) { fill($("clients"), [empty("No stream", "Viewers show up here once a stream runs.")]); return; }
+    if (stream.mode !== "browser") {
+      fill($("clients"), [empty("Direct mode", "Players do what they want in direct mode. Viewers can be told what to do in browser mode.")]);
+      return;
+    }
+    if (!list.length) { fill($("clients"), [empty("Nobody yet", "Browsers show up here once they are let in.")]); return; }
+    fill($("clients"), list.map(function (d) { return renderViewer(stream, info.now, d); }));
+    var menu = unionMenu(stream, list);
+    var key = JSON.stringify(menu);
+    if (key !== menuKey) {
+      menuKey = key;
+      fillSelect("caudio", menu.audio);
+      fillSelect("csub", menu.subs);
+    }
+    showChoice("caudio", sharedChoice(list, "audio"));
+    showChoice("csub", sharedChoice(list, "sub"));
+  }
+
+  function askViewers(payload, done) {
+    var ids = tickedIds();
+    if (!ids.length) { return; }
+    payload.devices = ids;
+    change("clients", payload, null, done);
   }
 
   // --- prepares and the cache
@@ -397,6 +553,7 @@
     fill($("notes"), notes);
     renderStream(info);
     renderDevices(info);
+    renderViewers(info);
     renderJobs(info.prepare || []);
   }
 
@@ -471,6 +628,36 @@
     var policy = b.getAttribute("data-policy");
     if (policy === "locked" && last.stream.policy === "locked") { change("stream/unlock", {}, null, "Unlocked"); }
     else if (policy !== last.stream.policy) { change("stream/policy", { policy: policy }, null, "Now " + policy); }
+  });
+
+  $("tickall").addEventListener("click", function () {
+    var list = viewers(last && last.stream);
+    var all = tickedIds().length === list.length;
+    ticked = {};
+    if (!all) { list.forEach(function (d) { ticked[d.id] = true; }); }
+    renderViewers(last);
+  });
+  [["caudio", "audio", "Audio"], ["csub", "sub", "Subtitles"]].forEach(function (pick) {
+    $(pick[0]).addEventListener("change", function () {
+      var value = $(pick[0]).value;
+      if (!value) { return; }
+      var payload = {};
+      payload[pick[1]] = value;
+      askViewers(payload, pick[2] + " asked for");
+      $(pick[0]).blur();  // so the next status shows what was asked for
+    });
+  });
+  [["seeknow", "seek", "Seek asked for"], ["startat", "start_at", "Start position set"]].forEach(function (pick) {
+    $(pick[0]).addEventListener("click", function () {
+      var at = $("cat").value.trim();
+      if (!at) { $("cat").focus(); return; }
+      var payload = {};
+      payload[pick[1]] = at;
+      askViewers(payload, pick[2]);
+    });
+  });
+  $("rename").addEventListener("click", function () {
+    askViewers({ name: $("cname").value.trim() }, "Renamed");
   });
 
   // A prepare is shown first: what it makes of each video, how long that takes, and the

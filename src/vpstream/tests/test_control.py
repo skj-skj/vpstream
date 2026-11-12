@@ -189,9 +189,9 @@ def test_lock_unlock_and_devices(rig: Rig) -> None:
 @pytest.mark.parametrize(
     ("ip", "allowed", "message"),
     [
-        ("192.0.2.1", "yes", "needs an ip"),
-        (None, True, "needs an ip"),
-        ("not-an-ip", True, "not an IP address"),
+        ("192.0.2.1", "yes", "needs a device"),
+        (None, True, "needs a device"),
+        ("not-an-ip", True, "not a device or an IP address"),
     ],
 )
 def test_bad_device_changes(rig: Rig, ip: Any, allowed: Any, message: str) -> None:

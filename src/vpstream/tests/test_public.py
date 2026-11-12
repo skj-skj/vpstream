@@ -8,6 +8,7 @@ from flask.testing import FlaskClient
 
 from vpstream import api, config, public
 from vpstream.control import Control
+from vpstream.tests import harness
 from vpstream.tests.fakes import FakeFirewall, FakeServer
 
 IP = {"X-Vpstream-Ip": "192.0.2.1"}
@@ -158,7 +159,7 @@ def test_start_change_and_stop_through_the_api(
         dash.post("/api/v1/stream/policy", json={"policy": "locked"}).get_json()["stream"]["policy"]
         == "locked"
     )
-    enabled = dash.post("/api/v1/devices", json={"ip": "192.0.2.4", "allowed": True}).get_json()
+    enabled = dash.post("/api/v1/devices", json={"device": "192.0.2.4", "allowed": True}).get_json()
     assert enabled["stream"]["devices"][0]["passes"] is True
     assert dash.post("/api/v1/stream/unlock", json={}).get_json()["stream"]["policy"] == "open"
     assert dash.get("/api/v1/status").get_json()["stream"]["alias"] == "bbb"
@@ -173,7 +174,7 @@ def test_start_change_and_stop_through_the_api(
         ("stream/stop", {}, "no stream is running"),
         ("stream/alias", {"alias": "x"}, "no stream is running"),
         ("stream/alias", {}, "not a usable alias"),
-        ("devices", {"ip": "192.0.2.1"}, "needs an ip"),
+        ("devices", {"device": "192.0.2.1"}, "needs a device"),
     ],
 )
 def test_refusals_are_json_with_the_reason(
@@ -185,8 +186,10 @@ def test_refusals_are_json_with_the_reason(
 
 def test_bad_device_address_is_a_refusal(control: Control, dash: FlaskClient, show: Path) -> None:
     control.start({"dir": str(show)})
-    answer = dash.post("/api/v1/devices", json={"ip": "example.com", "allowed": True})
-    assert answer.status_code == 400 and "not an IP address" in answer.get_json()["error"]
+    answer = dash.post("/api/v1/devices", json={"device": "example.com", "allowed": True})
+    assert (
+        answer.status_code == 400 and "not a device or an IP address" in answer.get_json()["error"]
+    )
 
 
 def test_a_host_failure_is_a_503(control: Control, dash: FlaskClient, show: Path) -> None:
@@ -240,7 +243,7 @@ def test_an_unexpected_failure_is_json_too(
         raise OSError("disk full")
 
     monkeypatch.setattr(control, "set_device", full)
-    answer = dash.post("/api/v1/devices", json={"ip": "192.0.2.1", "allowed": True})
+    answer = dash.post("/api/v1/devices", json={"device": "192.0.2.1", "allowed": True})
     assert answer.status_code == 500 and "disk full" in answer.get_json()["error"]
 
 
@@ -334,7 +337,7 @@ def test_a_guesser_is_shut_out_and_can_be_let_back_in(
     info = dash.get("/api/v1/status").get_json()
     assert info["stream"]["guessers"] == ["192.0.2.1"]
     assert [d["ip"] for d in info["stream"]["devices"]] == ["192.0.2.50"]
-    dash.post("/api/v1/devices", json={"ip": "192.0.2.1", "allowed": True})
+    dash.post("/api/v1/devices", json={"device": "192.0.2.1", "allowed": True})
     assert viewer.get("/aaa", headers=IP).status_code == 200
 
 
@@ -423,22 +426,13 @@ def test_every_element_the_dashboard_script_looks_up_is_on_the_page(dash: FlaskC
     assert len(ids) > 30 and missing == []
 
 
-def test_the_dashboard_behaves(dash: FlaskClient) -> None:
+def test_the_dashboard_behaves() -> None:
     """The real page and script in node with a small DOM of their own (dashboard_test.js):
     what they show for a status, and what each button and form sends."""
-    import shutil
-    import subprocess
-    from importlib import resources
+    harness.run("dashboard_test.js", "dashboard.html", "dashboard.js", at_least=15)
 
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is not installed")
-    assets = resources.files("vpstream.assets")
-    harness = Path(__file__).with_name("dashboard_test.js")
-    page, script = (str(assets.joinpath(name)) for name in ("dashboard.html", "dashboard.js"))
-    res = subprocess.run(
-        [node, str(harness), page, script], capture_output=True, text=True, timeout=60, check=False
-    )
-    lines = res.stdout.splitlines()
-    assert res.returncode == 0 and len(lines) >= 15, res.stdout + res.stderr
-    assert all(line.startswith("pass ") for line in lines), res.stdout
+
+def test_the_player_behaves() -> None:
+    """The real player page and scripts in node (player_test.js): where it starts, what it
+    reports, and how the owner's commands and the viewer's own buttons meet."""
+    harness.run("player_test.js", "player.html", "vtt.js", "player.js", at_least=10)

@@ -32,7 +32,8 @@ prefix and `pipx upgrade vpstream`, then `sudo vpstream init` again.
 | `vpstream prepare --file F` / `--dir D` | Makes the versions browser mode plays (`--sub 1,3`, `eng`, `none`) |
 | `vpstream prepared [rm PATH \| --stale \| --all \| cancel [PATH]]` | Lists, removes or cancels prepared versions |
 | `vpstream stop` / `status` | Stops the stream, or shows its addresses and state |
-| `vpstream devices [enable\|disable ADDRESS \| lock \| unlock]` | Who asked for the stream, and who gets in |
+| `vpstream devices [enable\|disable DEVICE \| lock \| unlock]` | Who asked for the stream, and who gets in (a device is an address, or a browser's id) |
+| `vpstream clients [set DEVICE... \| --all]` | Browser mode: where each browser is, and `--audio`, `--sub`, `--seek`, `--start-at`, `--name` for them |
 | `vpstream alias NAME` | Changes the short name in the address |
 | `vpstream revoke` | Takes back file access a stream that ended by itself left behind |
 | `vpstream doctor` | Checks this host |
@@ -90,7 +91,14 @@ vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
   (each track, then Off), subtitles (Off, then each prepared one), episodes and next. Other
   players get the HLS playlist at the same address.
 - **Who gets in:** approval by default; a waiting browser shows a 4-digit code, which
-  `vpstream devices` and the dashboard show next to its address.
+  `vpstream devices` and the dashboard show next to its address. A browser gets a random
+  cookie on its first page and is known by it, so an approved TV stays approved when its
+  address changes, and a stranger behind the same address waits. Players such as VLC are known
+  by their address. A stop forgets every cookie.
+- **Viewers:** each browser's player reports where it is every 2 seconds. On the dashboard's
+  Viewers tab (or `vpstream clients`) you tick one or more and set the audio, the subtitles, a
+  seek now, where the next load starts, or a name. Reopening a video continues where that
+  browser left off. A button pressed on the TV while a command is on its way wins.
 - **Cache:** `/var/cache/vpstream/prepared`, kept until `vpstream prepared rm`. A changed
   file is prepared again; its old versions are listed as stale.
 

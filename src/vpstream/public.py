@@ -1,7 +1,8 @@
 """What viewers get on the stream port. Caddy passes every request here, over a unix socket.
 
-This app is all a viewer can reach of the daemon: it has no route that changes anything. For
-a video it answers with the name of the file, and Caddy sends the file itself.
+This app is all a viewer can reach of the daemon. The one thing a viewer changes is its own
+client record, by the reports of its player (see `clients`); nothing else here changes
+anything. For a video it answers with the name of the file, and Caddy sends the file itself.
 """
 
 from __future__ import annotations
@@ -11,15 +12,17 @@ import re
 from html import escape
 from typing import Any
 
-from flask import Flask, Response, request
+from flask import Flask, Response, jsonify, request
 from werkzeug.exceptions import HTTPException
 
-from vpstream import caddy, media, player, text
+from vpstream import caddy, gate, media, player, text
 from vpstream.control import Control
 from vpstream.net import normal_ip
 from vpstream.stream import Answer
 
 M3U_TYPE = "audio/x-mpegurl"
+COOKIE_SECONDS = 30 * 24 * 3600  # the cookie outlives a TV turned off; its stream may not
+MAX_VALUES, MAX_VALUE = 16, 32  # what is read of a report's query
 _HOST = re.compile(r"[A-Za-z0-9.:\[\]-]{1,255}")
 
 _PAGE = """<!doctype html>
@@ -128,6 +131,8 @@ def respond(answer: Answer, host: str, wants_html: bool = False) -> Response:
         return _html(200, player.page(answer.data))
     if answer.kind == "asset":
         return Response(player.asset(answer.asset), content_type=player.ASSETS[answer.asset])
+    if answer.kind == "client":
+        return jsonify(answer.data)
     if answer.kind == "redirect":
         return Response(b"", 302, headers={"Location": answer.location})
     if answer.kind == "waiting":
@@ -163,9 +168,30 @@ def create_app(control: Control) -> Flask:
         if ip is None:  # not through Caddy
             return _text(400, "Bad request.")
         wants_html = "text/html" in request.headers.get("Accept", "").lower()
-        answer = control.visit(path, ip, request.headers.get("User-Agent", ""), wants_html)
+        answer = control.visit(
+            path,
+            ip,
+            request.headers.get("User-Agent", ""),
+            wants_html,
+            request.cookies.get(gate.COOKIE),
+            # One value per name: a report is a handful of short numbers.
+            {k: v[:MAX_VALUE] for k, v in list(request.args.items())[:MAX_VALUES]}
+            if request.headers.get(player.REPORT_HEADER) == "1"
+            else None,
+        )
         response = respond(answer, request.host, wants_html)
         response.headers["Cache-Control"] = "no-store"
+        if answer.cookie:
+            # Plain HTTP, so not Secure. HttpOnly: no script needs it. Lax: a page on another
+            # site cannot fetch with it, but a link to the stream still carries it.
+            response.set_cookie(
+                gate.COOKIE,
+                answer.cookie,
+                max_age=COOKIE_SECONDS,
+                path="/",
+                httponly=True,
+                samesite="Lax",
+            )
         return response
 
     @app.errorhandler(Exception)
