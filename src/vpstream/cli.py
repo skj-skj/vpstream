@@ -268,8 +268,9 @@ def format_prepared(rows: list[dict[str, Any]]) -> str:
         return "Nothing is prepared."
     table = [["BASE", "SOFT", "BURNED IN", "SIZE", "SOURCE"]]
     for row in rows:
-        marks = [m for m, on in (("stale", row.get("stale")), ("in use", row.get("in_use")),
-                                 ("preparing", row.get("busy"))) if on]  # fmt: skip
+        flags = {"stale": "stale", "unchecked": "cannot check", "in_use": "in use",
+                 "busy": "preparing"}  # fmt: skip
+        marks = [mark for key, mark in flags.items() if row.get(key)]
         table.append(
             [
                 str(row.get("base") or "-"),

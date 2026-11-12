@@ -225,6 +225,22 @@ def test_remove_by_folder_and_the_stale_ones(rig: Rig) -> None:
     assert rig.control.remove_prepared({"path": str(rig.media)})["removed"] == 1
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root looks at everything")
+def test_removing_the_stale_ones_keeps_what_cannot_be_looked_at(rig: Rig) -> None:
+    # Found on the VPS: after its access was taken back, the service could not enter the
+    # folder, and "remove the stale ones" would have removed good versions.
+    rig.control.prepare({"file": str(rig.film), "sub": "none"})
+    rig.preparer.wait()
+    rig.media.chmod(0)
+    try:
+        (row,) = rig.control.prepared()
+        answer = rig.control.remove_prepared({"stale": True})
+    finally:
+        rig.media.chmod(0o755)
+    assert (row["stale"], row["unchecked"]) == (False, True)
+    assert answer == {"removed": 0, "kept": []} and prepared.base_ready(rig.entry())
+
+
 @pytest.mark.parametrize(
     "options",
     [{}, {"path": "relative"}, {"path": "/m", "all": True}, {"stale": True, "all": True}],

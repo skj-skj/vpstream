@@ -443,6 +443,7 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     const rows = [
       { key: "a", source: "/m/a.mkv", stale: false, base: "copy", soft: [1], burn: [3], bytes: 2e9, in_use: true, busy: false },
       { key: "b", source: "/m/b.mkv", stale: true, base: "", soft: [], burn: [], bytes: 1e6, in_use: false, busy: false },
+      { key: "c", source: "/m/c.mkv", stale: false, unchecked: true, base: "copy", soft: [], burn: [], bytes: 1e6, in_use: false, busy: false },
     ];
     const page = load({ status: status(), prepared: { prepared: rows }, "prepared/rm": Object.assign(status(), { removed: 1, kept: [] }) });
     await settle();
@@ -454,6 +455,7 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     ok(text(items[0]).includes("base copy") && text(items[0]).includes("soft 1") && text(items[0]).includes("burned in 3") && text(items[0]).includes("in use"));
     ok(!items[0].querySelectorAll("button").length, "no Remove for one in use");
     ok(text(items[1]).includes("stale") && text(items[1]).includes("no base"));
+    ok(text(items[2]).includes("cannot check") && !text(items[2]).includes("stale"), text(items[2]));
     eq(text(page.$("cachetotal")), "2.0 GB");
     items[1].querySelector("button").click();
     eq(page.posts().length, 0);
