@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.12.0 (2026-11-12)
+
+### Features
+
+- Full screen in the player, with a button and the f key
+  ([#21](https://github.com/skj-skj/vpstream/pull/21),
+  [`085fada`](https://github.com/skj-skj/vpstream/commit/085fada0522e85746c700a731d378657e0b78e34))
+
+
 ## v0.11.0 (2026-11-12)
 
 ### Features
