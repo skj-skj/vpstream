@@ -173,6 +173,7 @@ function parse(html) {
 function newDocument(root) {
   document = {
     root,
+    documentElement: root,
     hidden: false,
     activeElement: null,
     body: root.querySelector("body"),
