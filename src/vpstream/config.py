@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from vpstream.checks import is_number, is_whole
+
 MIN_PORT = 1024  # the daemon runs as an unprivileged user, which cannot bind lower ports
 
 
@@ -126,7 +128,7 @@ port = 1338
 
 def _port_problem(name: str, value: Any) -> str | None:
     # bool is an int in Python, and `port = true` is a mistake, not port 1.
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_whole(value):
         return f"{name} must be a whole number, not {value!r}"
     if not MIN_PORT <= value <= 65535:
         return f"{name} must be from {MIN_PORT} to 65535, not {value}"
@@ -140,7 +142,7 @@ def _host_problem(name: str, value: Any) -> str | None:
 
 
 def _speed_problem(name: str, value: Any) -> str | None:
-    if isinstance(value, bool) or not isinstance(value, int | float) or not 0.01 <= value <= 1000:
+    if not is_number(value) or not 0.01 <= value <= 1000:
         return f"{name} must be a number from 0.01 to 1000 (times real time), not {value!r}"
     return None
 

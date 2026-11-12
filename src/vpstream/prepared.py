@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream import ffargs, media, tracks
+from vpstream.checks import is_whole
 from vpstream.files import dir_size, source_key, write_atomic
 from vpstream.probe import MediaInfo
 
@@ -143,7 +144,7 @@ def meta_tracks(entry: Path, kind: str) -> list[Track]:
     found = []
     for raw in (read_meta(entry) or {}).get(kind) or []:
         number = raw.get("number")
-        if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+        if is_whole(number) and number > 0:
             language = str(raw.get("language") or "und")
             label = str(raw.get("label") or "") or f"Track {number}"
             found.append(Track(number, language, label, raw.get("default") is True))

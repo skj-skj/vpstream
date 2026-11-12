@@ -5,6 +5,7 @@ Nothing here talks to Caddy or the firewall; `control` does that.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import secrets
@@ -13,7 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import access, gate, media, player, prepared, tracks
+from vpstream import access, clients, gate, media, player, prepared, tracks
+from vpstream.checks import is_number
 
 DIRECT = "direct"  # the files as they are, for players such as VLC
 BROWSER = "browser"  # prepared HLS versions and a player page, for TV browsers
@@ -176,7 +178,7 @@ def videos_of(kind: str, path: Path) -> list[str]:
 def _ttl_seconds(value: Any) -> float | None:
     if value is None:
         value = DEFAULT_TTL_MINUTES
-    if isinstance(value, bool) or not isinstance(value, int | float) or not value >= 0:
+    if not is_number(value) or not value >= 0:
         raise StreamError(f"the time limit must be a number of minutes, 0 or more: {value!r}")
     if value > MAX_TTL_MINUTES:
         raise StreamError(f"the time limit can be at most {MAX_TTL_MINUTES:g} minutes (7 days)")
@@ -189,7 +191,8 @@ class Answer:
 
     status: int
     # "video" or "file" (Caddy sends it), "index", "playlist", "player", "asset", "redirect",
-    # "preparing", "notready", "waiting", "denied" or "missing"
+    # "client" (the answer to a player's report), "preparing", "notready", "waiting",
+    # "denied" or "missing"
     kind: str
     file: str = ""  # a video or a prepared file: the full path of the file to send
     number: int = 0  # the video's number
@@ -200,8 +203,13 @@ class Answer:
     ready: list[bool] = field(default_factory=list)  # for an index: which videos play
     rel: str = ""  # a prepared file, as Caddy finds it under the video's number
     data: dict[str, Any] = field(default_factory=dict)  # the player's settings; the code
+    cookie: str = ""  # a new approval cookie for the browser (see `gate`)
+    saves: str = ""  # it changed what the state file holds: SAVE_NOW or SAVE_LATER
 
 
+# How soon what a request changed must be written down. A new cookie, or a start position
+# that was used, would be wrong after a crash; where a player is can wait a little.
+SAVE_NOW, SAVE_LATER = "now", "later"
 MISSING = Answer(404, "missing")
 DENIED = Answer(403, "denied")
 NUMBER = re.compile(r"[1-9][0-9]{0,5}")
@@ -280,35 +288,75 @@ class Stream:
 
     # --- requests
 
-    def visit(self, path: str, ip: str, user_agent: str, wants_html: bool, now: float) -> Answer:
-        """Answer one request for `path` (decoded, as the viewer asked for it).
+    def visit(
+        self,
+        path: str,
+        ip: str,
+        user_agent: str,
+        wants_html: bool,
+        now: float,
+        cookie: str | None = None,
+        query: dict[str, str] | None = None,
+    ) -> Answer:
+        """Answer one request for `path` (decoded, as the viewer asked for it), with the
+        approval cookie the browser sent and the query of a player's report (None for a
+        request that is not one; see player.REPORT_HEADER).
 
         Only a request under the alias counts as a device; anything else on the port, such
         as a scanner trying `/`, is simply not found.
         """
         if self.devices.guesser(ip):
             return MISSING
-        answer = self._route(path, ip, user_agent, wants_html, now)
+        answer = self._route(path, ip, user_agent, wants_html, now, cookie, query)
         # A device that gets in may ask for what is not there (a browser's favicon); from
         # anyone else it is a guess at the alias.
-        if answer is MISSING and not self.devices.passes(self.policy, ip):
+        if answer.kind == "missing" and not self.devices.passes(self.policy, ip, cookie):
             self.devices.miss(ip)
         return answer
 
-    def _route(self, path: str, ip: str, user_agent: str, wants_html: bool, now: float) -> Answer:
+    def _route(
+        self,
+        path: str,
+        ip: str,
+        user_agent: str,
+        wants_html: bool,
+        now: float,
+        cookie: str | None,
+        query: dict[str, str] | None,
+    ) -> Answer:
         parts = [part for part in path.split("/") if part]
         if not parts or parts[0].lower() != self.alias:
             return MISSING
-        if not self.devices.visit(self.policy, ip, user_agent, now):
-            device = self.devices.get(ip)
-            waits = self.policy == gate.APPROVAL and device is not None and device.allowed is None
-            if wants_html and waits and device is not None and device.code:
-                return Answer(403, "waiting", data={"code": device.code})
-            return DENIED
+        browser = self.mode == BROWSER
+        # Only browser mode has pages a browser stays on, so only there is a cookie given.
+        seen = self.devices.admit(self.policy, ip, user_agent, now, cookie, browser and wants_html)
+        if seen.ok:
+            answer = self._admitted(parts, seen.device, wants_html, query)
+        else:
+            answer = self._refused(seen.device, wants_html)
+        if seen.cookie:
+            # A copy: MISSING and DENIED are shared.
+            answer = dataclasses.replace(answer, cookie=seen.cookie, saves=SAVE_NOW)
+        return answer
+
+    def _refused(self, device: gate.Device | None, wants_html: bool) -> Answer:
+        """A browser that waits for the owner sees its code; anything else is refused."""
+        waits = self.policy == gate.APPROVAL and device is not None and device.allowed is None
+        if wants_html and waits and device is not None and device.code:
+            return Answer(403, "waiting", data={"code": device.code})
+        return DENIED
+
+    def _admitted(
+        self,
+        parts: list[str],
+        device: gate.Device | None,
+        wants_html: bool,
+        query: dict[str, str] | None,
+    ) -> Answer:
         browser = self.mode == BROWSER
         if len(parts) == 1:
             if self.kind == "file":
-                return self._play(1, wants_html) if browser else self._video(1)
+                return self._play(1, wants_html, device) if browser else self._video(1)
             return self._listing("index" if wants_html else "playlist")
         head = parts[1].lower()
         if len(parts) == 2 and head == PLAYLIST and self.kind == "dir":
@@ -319,9 +367,13 @@ class Stream:
             return MISSING
         number = int(parts[1])
         if len(parts) == 2:
-            return self._play(number, wants_html) if browser else self._video(number)
+            if not browser:
+                return self._video(number)
+            return self._play(number, wants_html, device)
         if browser and len(parts) > 3 and parts[2] == HLS:
             return self._prepared_file(number, "/".join(parts[3:]))
+        if browser and len(parts) == 3 and parts[2] == player.REPORT:
+            return self._report(number, device, query)
         return MISSING
 
     def ready(self, number: int) -> bool:
@@ -342,12 +394,15 @@ class Stream:
     def master_url(self, number: int) -> str:
         return f"/{self.alias}/{number}/{HLS}/{prepared.BASE}/{player.MASTER}"
 
-    def _play(self, number: int, wants_html: bool) -> Answer:
-        """A browser gets the player page, any other player the HLS master playlist."""
+    def _play(self, number: int, wants_html: bool, device: gate.Device | None) -> Answer:
+        """A browser gets the player page, any other player the HLS master playlist. The
+        page starts where this browser left off, or where the owner said it should, with
+        the tracks it chose last."""
         if not self.ready(number):
             return Answer(503, "notready", number=number)
         if not wants_html:
             return Answer(302, "redirect", number=number, location=self.master_url(number))
+        client = device.client if device is not None and device.kind == gate.BROWSER else None
         settings = player.settings(
             Path(self.entries[number - 1]),
             alias=self.alias,
@@ -356,8 +411,25 @@ class Stream:
             folder=self.kind == "dir",
             audio=self.audio,
             sub=self.sub,
+            client=client,
         )
-        return Answer(200, "player", number=number, alias=self.alias, data=settings)
+        used = client is not None and client.start_at is not None and client.start_at[0] == number
+        if client is not None:
+            client.start_position(number)  # a start position set by the owner is used once
+        saves = SAVE_NOW if used else ""
+        return Answer(200, "player", number=number, alias=self.alias, data=settings, saves=saves)
+
+    def _report(
+        self, number: int, device: gate.Device | None, query: dict[str, str] | None
+    ) -> Answer:
+        """A player says where it is; the answer is what waits for it. Only a browser
+        known by its cookie has a record, so one browser never sees another's commands."""
+        if device is None or device.kind != gate.BROWSER or query is None:
+            return MISSING
+        if device.client is None:
+            device.client = clients.Client()
+        commands = device.client.report(number, query, device.last_seen)
+        return Answer(200, "client", number=number, data={"commands": commands}, saves=SAVE_LATER)
 
     def _prepared_file(self, number: int, rel: str) -> Answer:
         found = prepared.served_file(Path(self.entries[number - 1]), rel)
@@ -382,7 +454,7 @@ class Stream:
             "mode": self.mode,
             "policy": self.policy,
             "unlocked_policy": self.unlocked_policy,
-            "devices": self.devices.rows(),
+            "devices": self.devices.rows(private=True),
             "served": self.served,
             "indexing": sorted(self.indexing),
             "notes": {str(n): text for n, text in self.notes.items()},
@@ -439,7 +511,7 @@ class Stream:
                 mode=data["mode"],
                 policy=check_policy(data["policy"]),
                 unlocked_policy=check_policy(data["unlocked_policy"]),
-                devices=gate.Devices.from_rows(data.get("devices")),
+                devices=gate.Devices.from_rows(data.get("devices"), count),
             )
         except (KeyError, TypeError, ValueError) as exc:  # StreamError is a ValueError
             raise StreamError(f"the recorded stream is not usable: {exc}") from exc
@@ -474,6 +546,6 @@ class Stream:
             ],
             "devices": [
                 {**row, "passes": gate.allows(self.policy, row["allowed"])}
-                for row in self.devices.rows()
+                for row in self.devices.rows(now=now)
             ],
         }

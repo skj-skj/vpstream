@@ -160,19 +160,87 @@ def format_devices(stream: dict[str, Any], now: float) -> str:
     devices = stream.get("devices") or []
     if not devices:
         return "No device has asked for the stream yet."
-    rows = [["ADDRESS", "STATE", "CODE", "REQUESTS", "BLOCKED", "SENT", "LAST SEEN", "PLAYER"]]
+    rows = [
+        ["DEVICE", "ADDRESS", "STATE", "CODE", "REQUESTS", "BLOCKED", "SENT", "LAST SEEN", "PLAYER"]
+    ]
     for d in devices:
-        seen = d.get("last_seen") or 0
         rows.append(
             [
+                str(d.get("id") or d.get("ip")),
                 str(d.get("ip")),
                 device_state(d),
                 str(d.get("code") or "-"),
                 str(d.get("requests", 0)),
                 str(d.get("blocked", 0)),
                 text.size(float(d.get("bytes") or 0)),
-                f"{text.duration(max(0.0, now - seen))} ago" if seen else "never",
-                str(d.get("user_agent") or "-")[:60],
+                _ago(d.get("last_seen"), now),
+                _device_name(d)[:60],
+            ]
+        )
+    return "\n".join(text.table(rows))
+
+
+def _ago(when: Any, now: float) -> str:
+    return f"{text.duration(max(0.0, now - when))} ago" if when else "never"
+
+
+def _device_name(device: dict[str, Any]) -> str:
+    """The name the owner gave a device, else its user agent."""
+    return str(device.get("name") or device.get("user_agent") or "-")
+
+
+def _clock(seconds: float) -> str:
+    """1:02:03, or 2:03 under an hour: how a player shows a position."""
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    return f"{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"{rest // 60}:{rest % 60:02d}"
+
+
+def _track(menu: list[dict[str, Any]], value: Any) -> str:
+    """A client's audio or subtitle choice by its label in the video's menu."""
+    if value is None:
+        return "-"
+    if value in (0, "off"):
+        return "off"
+    return next((m["label"] for m in menu if m["value"] == str(value)), str(value))
+
+
+def format_clients(stream: dict[str, Any], now: float) -> str:
+    """The browsers of a browser stream: where each is, what it plays with, what waits."""
+    browsers = [d for d in stream.get("devices") or [] if d.get("kind") == "browser"]
+    if not browsers:
+        return "No browser has opened the stream yet."
+    videos = stream.get("videos") or []
+    rows = [["DEVICE", "STATE", "VIDEO", "AT", "AUDIO", "SUBTITLES", "WAITING", "NAME"]]
+    for d in browsers:
+        c = d.get("client") or {}
+        number = int(c.get("video") or 0)
+        menu = videos[number - 1].get("menu") or {} if 0 < number <= len(videos) else {}
+        if not d.get("passes"):
+            state = device_state(d)
+        elif not c.get("reported"):
+            state = "not playing yet"
+        elif not c.get("active"):
+            state = f"gone {_ago(c['reported'], now)}"
+        else:
+            state = "paused" if c.get("paused") else "playing"
+        at = _clock(float(c.get("position") or 0))
+        if c.get("duration"):
+            at += f" / {_clock(float(c['duration']))}"
+        waiting = [f"{k} {v}" for k, v in sorted((c.get("pending") or {}).items())]
+        if c.get("start_at"):
+            video, seconds = c["start_at"]
+            waiting.append(f"start {video} at {_clock(float(seconds))}")
+        rows.append(
+            [
+                str(d.get("id")),
+                state,
+                str(number or "-"),
+                at if number else "-",
+                _track(menu.get("audio", []), c.get("audio")),
+                _track(menu.get("subs", []), c.get("sub")),
+                ", ".join(waiting) or "-",
+                _device_name(d)[:40],
             ]
         )
     return "\n".join(text.table(rows))
@@ -339,13 +407,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _show(info: dict[str, Any] | None, devices: bool = False) -> int:
-    """Print what a change left behind: the stream, or its devices."""
+def _show(info: dict[str, Any] | None, devices: bool = False, clients: bool = False) -> int:
+    """Print what a change left behind: the stream, its devices or its browsers."""
     if info is None:
         return 1
     stream = info.get("stream")
     if not stream:
         print("No stream is running.")
+    elif clients:
+        print(format_clients(stream, float(info.get("now") or 0)))
     elif devices:
         print(f"Policy: {stream.get('policy')}")
         if stream.get("guessers"):
@@ -663,8 +733,8 @@ def cmd_devices(args: argparse.Namespace) -> int:
     action = args.action or "list"
     if action in ("enable", "disable"):
         if not args.ip:
-            return _error(f"give the address to {action}: vpstream devices {action} ADDRESS", 2)
-        info = _daemon("devices", {"ip": args.ip, "allowed": action == "enable"})
+            return _error(f"give the device to {action}: vpstream devices {action} DEVICE", 2)
+        info = _daemon("devices", {"device": args.ip, "allowed": action == "enable"})
     elif action == "lock":
         info = _daemon("stream/policy", {"policy": "locked"})
     elif action == "unlock":
@@ -672,6 +742,26 @@ def cmd_devices(args: argparse.Namespace) -> int:
     else:
         info = _daemon("status")
     return _show(info, devices=True)
+
+
+CLIENT_CHANGES = ("audio", "sub", "seek", "start_at", "name")
+
+
+def cmd_clients(args: argparse.Namespace) -> int:
+    if (args.action or "list") == "list":
+        if args.devices or args.all:
+            return _error("give devices to set: vpstream clients set DEVICE ... --audio 2", 2)
+        return _show(_daemon("status"), clients=True)
+    if bool(args.devices) == args.all:
+        return _error("name the devices to change (see vpstream clients), or give --all", 2)
+    payload: dict[str, Any] = {k: getattr(args, k) for k in CLIENT_CHANGES}
+    payload = {k: v for k, v in payload.items() if v is not None}
+    if not payload:
+        return _error("say what to change: --audio, --sub, --seek, --start-at or --name", 2)
+    if args.video is not None:
+        payload["video"] = args.video
+    payload.update({"all": True} if args.all else {"devices": args.devices})
+    return _show(_daemon("clients", payload), clients=True)
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -865,8 +955,27 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["list", "enable", "disable", "lock", "unlock"],
         help="(default list)",
     )
-    dv.add_argument("ip", nargs="?", metavar="ADDRESS", help="for enable and disable")
+    dv.add_argument(
+        "ip", nargs="?", metavar="DEVICE", help="for enable and disable: its id or IP address"
+    )
     dv.set_defaults(func=cmd_devices)
+    cl = sub.add_parser(
+        "clients",
+        help="list the browsers of a browser stream, or set their audio, subtitles, position "
+        "or name",
+    )
+    cl.add_argument("action", nargs="?", choices=["list", "set"], help="(default list)")
+    cl.add_argument("devices", nargs="*", metavar="DEVICE", help="for set: device ids")
+    cl.add_argument("--all", action="store_true", help="for set: every browser that gets in")
+    cl.add_argument("--audio", help="an audio track number, or off")
+    cl.add_argument("--sub", help="subtitles such as 2-soft or 3-burn, or off")
+    cl.add_argument("--seek", help="jump there now: seconds, or a time such as 10:10")
+    cl.add_argument(
+        "--start-at", dest="start_at", help="where the next load of the video starts, once"
+    )
+    cl.add_argument("--video", type=int, help="for --start-at: which video (default: its own)")
+    cl.add_argument("--name", help="what to call the device on the dashboard")
+    cl.set_defaults(func=cmd_clients)
 
     dm = sub.add_parser("daemon", help="run the daemon in the foreground (the service does this)")
     dm.set_defaults(func=cmd_daemon)

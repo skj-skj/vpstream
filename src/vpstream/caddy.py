@@ -21,6 +21,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from vpstream.checks import is_whole
 from vpstream.config import Paths
 from vpstream.files import write_atomic
 from vpstream.net import normal_ip
@@ -141,7 +142,7 @@ def log_entry(line: str) -> tuple[str, str, int] | None:
         size = data["size"]
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
-    if ip is None or isinstance(size, bool) or not isinstance(size, int):
+    if ip is None or not is_whole(size):
         return None
     return ip, port, size
 

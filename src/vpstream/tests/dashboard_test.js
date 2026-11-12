@@ -1,179 +1,23 @@
 // Runs the real dashboard page and script in node, against a stand-in API, and checks what
-// it shows and what it sends. A small DOM of its own, enough for this page: node has no
-// browser, and the package needs nothing from npm. Usage: node dashboard_test.js PAGE SCRIPT
+// it shows and what it sends, with the small DOM of dom.js. Usage: node dashboard_test.js
+// PAGE SCRIPT
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
+const { Node, parse, newDocument, settle, runner, eq, ok, text } = require("./dom.js");
 
 const [pagePath, scriptPath] = process.argv.slice(2);
 const PAGE = fs.readFileSync(pagePath, "utf8");
 const SCRIPT = fs.readFileSync(scriptPath, "utf8");
 
-// --- a small DOM
-
-class Node {
-  constructor() { this.childNodes = []; this.parentNode = null; }
-  get firstChild() { return this.childNodes[0] || null; }
-  appendChild(child) {
-    if (child.parentNode) { child.parentNode.removeChild(child); }
-    child.parentNode = this;
-    this.childNodes.push(child);
-    return child;
-  }
-  removeChild(child) {
-    this.childNodes = this.childNodes.filter((c) => c !== child);
-    child.parentNode = null;
-    return child;
-  }
-  remove() { if (this.parentNode) { this.parentNode.removeChild(this); } }
-  get textContent() { return this.childNodes.map((c) => c.textContent).join(""); }
-  set textContent(text) {
-    this.childNodes.forEach((c) => { c.parentNode = null; });
-    this.childNodes = [];
-    if (text !== "") { this.appendChild(new Text(String(text))); }
-  }
-}
-
-class Text extends Node {
-  constructor(data) { super(); this.data = data; }
-  get textContent() { return this.data; }
-  set textContent(text) { this.data = String(text); }
-}
-
-const PROPS = { className: "class", id: "id", type: "type", placeholder: "placeholder" };
-
-class Element extends Node {
-  constructor(tag, attrs) {
-    super();
-    this.tagName = tag.toUpperCase();
-    this.nodeName = this.tagName;
-    this.attrs = Object.assign({}, attrs || {});
-    this.listeners = {};
-    this.style = {};
-    this.onclick = null;
-    this._value = this.attrs.value || "";
-  }
-  getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; }
-  setAttribute(name, value) { this.attrs[name] = String(value); }
-  get hidden() { return "hidden" in this.attrs; }
-  set hidden(on) { if (on) { this.attrs.hidden = ""; } else { delete this.attrs.hidden; } }
-  get disabled() { return "disabled" in this.attrs; }
-  set disabled(on) { if (on) { this.attrs.disabled = ""; } else { delete this.attrs.disabled; } }
-  get value() { return this._value; }
-  set value(v) { this._value = String(v); }
-  addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
-  dispatch(type, init) {
-    let stopped = false;
-    const event = Object.assign({ type, target: this, preventDefault() {}, stopPropagation() { stopped = true; } }, init);
-    for (let node = this; node && !stopped; node = node.parentNode) {
-      (node.listeners && node.listeners[type] || []).forEach((fn) => fn(event));
-      if (type === "click" && node.onclick && node === this) { node.onclick(event); }
-    }
-    return event;
-  }
-  click() { this.dispatch("click"); }
-  focus() { document.activeElement = this; }
-  scrollIntoView() {}
-  matches(selector) { return matches(this, selector); }
-  closest(selector) {
-    for (let node = this; node instanceof Element; node = node.parentNode) {
-      if (matches(node, selector)) { return node; }
-    }
-    return null;
-  }
-  querySelectorAll(selector) { return all(this).filter((n) => n !== this && matches(n, selector)); }
-  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-  get classes() { return (this.attrs.class || "").split(/\s+/).filter(Boolean); }
-}
-Object.entries(PROPS).forEach(([prop, attr]) => {
-  Object.defineProperty(Element.prototype, prop, {
-    get() { return this.attrs[attr] || ""; },
-    set(v) { this.attrs[attr] = String(v); },
-  });
-});
-
-function all(root) {
-  const out = [];
-  (function walk(node) {
-    node.childNodes.forEach((c) => { if (c instanceof Element) { out.push(c); walk(c); } });
-  })(root);
-  return out;
-}
-
-// Selectors: compounds of tag, #id, .class and [attr] or [attr="value"], joined by spaces.
-function compound(node, part) {
-  const re = /^([a-z]+)?((?:#[\w-]+|\.[\w-]+|\[[\w-]+(?:="[^"]*")?\])*)$/i;
-  const m = re.exec(part);
-  if (!m) { throw new Error("selector not supported: " + part); }
-  if (m[1] && node.tagName !== m[1].toUpperCase()) { return false; }
-  const bits = m[2].match(/#[\w-]+|\.[\w-]+|\[[\w-]+(?:="[^"]*")?\]/g) || [];
-  return bits.every((bit) => {
-    if (bit[0] === "#") { return node.attrs.id === bit.slice(1); }
-    if (bit[0] === ".") { return node.classes.includes(bit.slice(1)); }
-    const a = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(bit);
-    return a[2] === undefined ? a[1] in node.attrs : node.attrs[a[1]] === a[2];
-  });
-}
-
-function matches(node, selector) {
-  const parts = selector.trim().split(/\s+/);
-  if (!compound(node, parts[parts.length - 1])) { return false; }
-  let at = node.parentNode;
-  for (let i = parts.length - 2; i >= 0; i--) {
-    while (at instanceof Element && !compound(at, parts[i])) { at = at.parentNode; }
-    if (!(at instanceof Element)) { return false; }
-    at = at.parentNode;
-  }
-  return true;
-}
-
-// The page's own HTML: tags, attributes, text. <style> and <script> bodies are skipped.
-const VOID = new Set(["meta", "input", "br", "img", "link"]);
-function parse(html) {
-  const root = new Element("html");
-  let at = root;
-  const token = /<!--[\s\S]*?-->|<!doctype[^>]*>|<\/([a-z0-9]+)\s*>|<([a-z0-9]+)((?:\s+[\w-]+(?:="[^"]*")?)*)\s*\/?>|([^<]+)/gi;
-  let m;
-  while ((m = token.exec(html))) {
-    if (m[1]) { if (at.parentNode) { at = at.parentNode; } continue; }
-    if (m[2]) {
-      const tag = m[2].toLowerCase();
-      const attrs = {};
-      (m[3].match(/[\w-]+(?:="[^"]*")?/g) || []).forEach((a) => {
-        const [k, v] = a.split(/=(.*)/s);
-        attrs[k] = v === undefined ? "" : v.slice(1, -1);
-      });
-      const el = new Element(tag, attrs);
-      at.appendChild(el);
-      if (tag === "style" || tag === "script") {
-        const end = html.indexOf("</" + tag, token.lastIndex);
-        token.lastIndex = html.indexOf(">", end) + 1;
-      } else if (!VOID.has(tag)) {
-        at = el;
-      }
-      continue;
-    }
-    if (m[4] && m[4].trim()) { at.appendChild(new Text(m[4].replace(/&#8722;/g, "-").replace(/&amp;/g, "&"))); }
-  }
-  return root;
-}
-
 // --- one page load, with a stand-in API
 
-let document;
 function load(answers) {
   const root = parse(PAGE);
   const sent = [];
-  document = {
-    hidden: false,
-    activeElement: null,
-    getElementById: (id) => root.querySelector("#" + id),
-    querySelector: (s) => root.querySelector(s),
-    querySelectorAll: (s) => root.querySelectorAll(s),
-    createElement: (tag) => new Element(tag),
-    createTextNode: (text) => new Text(text),
-  };
+  const document = newDocument(root);
   const timers = [];
+  const intervals = [];
   const fetch = (url, options) => {
     const route = url.replace("/api/v1/", "");
     const body = options && options.body ? JSON.parse(options.body) : undefined;
@@ -188,7 +32,7 @@ function load(answers) {
   const window = {
     localStorage: { getItem: () => null, setItem() {} },
     isSecureContext: false,
-    setInterval: () => 0,
+    setInterval: (fn) => { intervals.push(fn); return intervals.length; },
     setTimeout: (fn) => { timers.push(fn); return 0; },
     clearTimeout() {},
   };
@@ -197,10 +41,10 @@ function load(answers) {
   window.window = window;
   vm.createContext(context);
   vm.runInContext(SCRIPT, context);
-  return { root, sent, $: (id) => root.querySelector("#" + id), posts: () => sent.filter((s) => s.method === "POST") };
+  return { root, sent, $: (id) => root.querySelector("#" + id), posts: () => sent.filter((s) => s.method === "POST"),
+    refresh: () => intervals.forEach((fn) => fn()) };
 }
 
-const settle = () => new Promise((r) => setImmediate(r)).then(() => new Promise((r) => setImmediate(r)));
 
 // --- what the daemon says
 
@@ -223,9 +67,9 @@ function stream(over) {
       { number: 3, name: "E03.mkv", url: "http://h:1337/show/3", ready: false, preparing: false, note: "slow seek", job: null },
     ],
     devices: [
-      { ip: "192.0.2.1", allowed: null, passes: false, wl: true, code: "4821", user_agent: "JioSphere/2 Chrome/136",
+      { id: "b-0a0a0a", kind: "browser", ip: "192.0.2.1", name: "", allowed: null, passes: false, wl: true, code: "4821", user_agent: "JioSphere/2 Chrome/136",
         requests: 3, blocked: 3, bytes: 0, last_seen: NOW - 2 },
-      { ip: "192.0.2.2", allowed: true, passes: true, wl: false, code: "", user_agent: "VLC/3.0.25",
+      { id: "192.0.2.2", kind: "player", ip: "192.0.2.2", name: "", allowed: true, passes: true, wl: false, code: "", user_agent: "VLC/3.0.25",
         requests: 90, blocked: 0, bytes: 2e9, last_seen: NOW - 5 },
     ],
   }, over || {});
@@ -235,16 +79,7 @@ const job = (id, state, over) => Object.assign({ id, source: "/m/show/E02.mkv", 
 
 // --- the checks
 
-const results = [];
-async function check(name, fn) {
-  try { await fn(); results.push(["pass", name]); } catch (e) { results.push(["FAIL", name + ": " + (e.stack || e)]); }
-}
-function eq(a, b, what) {
-  const sa = JSON.stringify(a), sb = JSON.stringify(b);
-  if (sa !== sb) { throw new Error((what || "") + " " + sa + " != " + sb); }
-}
-function ok(v, what) { if (!v) { throw new Error(what || "expected true"); } }
-const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
+const { check, finish } = runner();
 
 (async () => {
   await check("a live stream: alias, address, time left, videos and their states", async () => {
@@ -269,23 +104,23 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     eq(page.$("waitcard").hidden, false); eq(text(page.$("waitbadge")), "1");
     const waiter = page.$("waiters").querySelector(".item");
     ok(text(waiter).includes("4821") && text(waiter).includes("JioSphere"));
-    waiter.querySelectorAll("button").find((b) => text(b) === "Let in").click();
+    Array.from(waiter.querySelectorAll("button")).find((b) => text(b) === "Let in").click();
     await settle();
-    eq(page.posts(), [{ method: "POST", route: "devices", body: { ip: "192.0.2.1", allowed: true } }]);
+    eq(page.posts(), [{ method: "POST", route: "devices", body: { device: "b-0a0a0a", allowed: true } }]);
     const other = page.$("devices").querySelectorAll(".item");
     eq(other.length, 1, "the waiting one is not listed twice");
     ok(text(other[0]).includes("2.0 GB sent") && text(other[0]).includes("watching now"));
-    other[0].querySelectorAll("button").find((b) => text(b) === "Deny").click();
+    Array.from(other[0].querySelectorAll("button")).find((b) => text(b) === "Deny").click();
     await settle();
-    eq(page.posts()[1].body, { ip: "192.0.2.2", allowed: false });
+    eq(page.posts()[1].body, { device: "192.0.2.2", allowed: false });
   });
 
   await check("a waiting device can be denied", async () => {
     const page = load({ status: status({ stream: stream() }), devices: status({ stream: stream() }) });
     await settle();
-    page.$("waiters").querySelectorAll("button").find((b) => text(b) === "Deny").click();
+    Array.from(page.$("waiters").querySelectorAll("button")).find((b) => text(b) === "Deny").click();
     await settle();
-    eq(page.posts(), [{ method: "POST", route: "devices", body: { ip: "192.0.2.1", allowed: false } }]);
+    eq(page.posts(), [{ method: "POST", route: "devices", body: { device: "b-0a0a0a", allowed: false } }]);
   });
 
   await check("policies: switch, lock and unlock", async () => {
@@ -328,7 +163,7 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     page.$("path").value = "/m/film.mkv";
     page.$("ttl").value = "60";
     page.$("alias").value = "film";
-    eq(page.root.querySelectorAll("label.browser").every((l) => l.hidden), true);
+    eq(Array.from(page.root.querySelectorAll("label.browser")).every((l) => l.hidden), true);
     page.$("start").dispatch("submit");
     await settle();
     eq(page.posts()[0].body, { ttl: 60, mode: "direct", file: "/m/film.mkv", alias: "film" });
@@ -427,14 +262,14 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     eq(items.length, 2 + 8);
     ok(text(items[0]).includes("50%, about 1m 00s left") && items[0].querySelector(".progress"));
     ok(text(items[2]).includes("failed: no room"));
-    const more = page.$("jobs").querySelectorAll("button").find((b) => text(b) === "Show 4 more");
+    const more = Array.from(page.$("jobs").querySelectorAll("button")).find((b) => text(b) === "Show 4 more");
     ok(more, "a button to show the rest");
     more.click();
     eq(page.$("jobs").querySelectorAll(".item").length, 14);
-    page.$("jobs").querySelectorAll("button").find((b) => text(b) === "Show fewer").click();
+    Array.from(page.$("jobs").querySelectorAll("button")).find((b) => text(b) === "Show fewer").click();
     eq(page.$("jobs").querySelectorAll(".item").length, 10);
     items = page.$("jobs").querySelectorAll(".item");
-    items[0].querySelectorAll("button").find((b) => text(b) === "Cancel").click();
+    Array.from(items[0].querySelectorAll("button")).find((b) => text(b) === "Cancel").click();
     await settle();
     eq(page.posts()[0], { method: "POST", route: "prepare/cancel", body: { path: "/m/show/E02.mkv" } });
   });
@@ -474,6 +309,205 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     ok(notes.includes("Firewall: ufw failed") && notes.includes("198.51.100.9"), notes);
   });
 
+  // --- viewers
+
+  const MENU = { audio: [{ value: "1", label: "English" }, { value: "2", label: "Japanese" }],
+    subs: [{ value: "1-soft", label: "English" }, { value: "3-burn", label: "Signs (burned in)" }] };
+  const MENU2 = { audio: [{ value: "1", label: "English" }], subs: [{ value: "2-soft", label: "Français" }] };
+  function record(over) {
+    return Object.assign({ video: 1, position: 610, duration: 5400, paused: false, audio: 2, sub: "off",
+      reported: NOW - 1, positions: {}, start_at: null, pending: {} }, over || {});
+  }
+  function client(over) {
+    const c = record(over);
+    c.active = NOW - c.reported <= 10;  // as the daemon says it
+    return c;
+  }
+  function viewer(id, name, over, client_) {
+    return Object.assign({ id, kind: "browser", ip: "192.0.2.30", name, allowed: true, passes: true, wl: true,
+      code: "1111", user_agent: "JioSphere/2", requests: 9, blocked: 1, bytes: 1e6, last_seen: NOW - 1,
+      client: client_ === undefined ? client() : client_ }, over || {});
+  }
+  function watched(devices) {
+    const s = stream({ devices });
+    s.videos[0].menu = MENU; s.videos[1].menu = MENU2; s.videos[2].menu = { audio: [], subs: [] };
+    return s;
+  }
+
+  await check("viewers: who plays what, where, with which tracks, and what waits for them", async () => {
+    const devices = [
+      viewer("b-000001", "Living-room TV", {}, client({ pending: { seek: 3723, audio: 0 }, start_at: [2, 65] })),
+      viewer("b-000002", "", { user_agent: "Mozilla/5.0 Chrome/120" }, client({ video: 2, paused: true, audio: 1, sub: "2-soft", position: 5, duration: 0 })),
+      viewer("b-000003", "Gone", {}, client({ reported: NOW - 3600 })),
+      viewer("b-000004", "New", {}, null),
+      viewer("b-000005", "Waiting", { allowed: null, passes: false }),
+      { id: "192.0.2.2", kind: "player", ip: "192.0.2.2", name: "", allowed: true, passes: true, wl: false, code: "",
+        user_agent: "VLC/3", requests: 1, blocked: 0, bytes: 0, last_seen: NOW, client: null },
+    ];
+    const page = load({ status: status({ stream: watched(devices) }) });
+    await settle();
+    const items = page.$("clients").querySelectorAll(".item");
+    eq(items.length, 4, "browsers that get in only: not the waiting one, not VLC");
+    eq(text(page.$("viewerbadge")), "2", "the two that report now");
+    const tv = text(items[0]);
+    ok(tv.includes("Living-room TV") && tv.includes("Playing") && tv.includes("1. E01 <b>bold</b>.mkv"), tv);
+    ok(tv.includes("10:10 / 1:30:00") && tv.includes("Audio: Japanese") && tv.includes("Subtitles: Off"), tv);
+    ok(tv.includes("asked: seek to 1:02:03") && tv.includes("asked: audio Off") && tv.includes("next start: video 2 at 1:05"), tv);
+    ok(items[0].querySelector(".progress"), "how far it got");
+    const phone = text(items[1]);
+    ok(phone.includes("Chrome/120") && phone.includes("Paused") && phone.includes("Audio: English") && phone.includes("Subtitles: Français"), phone);
+    ok(!items[1].querySelector(".progress"), "no bar without a duration");
+    ok(text(items[2]).includes("Left 1h 00m ago"), text(items[2]));
+    ok(text(items[3]).includes("Not playing yet"), text(items[3]));
+    eq(page.$("clientform").hidden, true, "nothing to change until one is ticked");
+  });
+
+  await check("viewers: tick some, then every change is sent for those ticked", async () => {
+    const devices = [viewer("b-000001", "TV"), viewer("b-000002", "Phone", {}, client({ video: 2, audio: 1 })), viewer("b-000003", "Other")];
+    const answer = () => status({ stream: watched(devices) });
+    // As the daemon does: what was asked for waits in each record, as the player will take it.
+    const asked = (body) => {
+      devices.filter((d) => body.devices.includes(d.id)).forEach((d) => {
+        if ("audio" in body) { d.client.pending.audio = body.audio === "off" ? 0 : Number(body.audio); }
+        if ("sub" in body) { d.client.pending.sub = body.sub; }
+      });
+      return answer();
+    };
+    const page = load({ status: answer, clients: asked });
+    await settle();
+    page.$("tabs").querySelector('[data-tab="viewers"]').click();
+    let items = page.$("clients").querySelectorAll(".item");
+    items[0].click();
+    items = page.$("clients").querySelectorAll(".item");
+    items[1].click();
+    eq(page.$("clientform").hidden, false); eq(text(page.$("tickedcount")), "2 ticked");
+    // The lists hold the tracks of both videos, each once, and Off.
+    const options = (id) => Array.from(page.$(id).querySelectorAll("option")).map((o) => o.getAttribute("value") || o.value);
+    eq(options("caudio"), ["", "1", "2", "off"]);
+    eq(options("csub"), ["", "1-soft", "3-burn", "2-soft", "off"]);
+    // Each list shows what the ticked viewers play with: Choose... where they differ.
+    eq(page.$("caudio").value, "", "Japanese on the TV, English on the phone");
+    eq(page.$("csub").value, "off", "both without subtitles");
+    page.$("caudio").focus();
+    page.$("caudio").value = "2";
+    page.$("caudio").dispatch("change");
+    await settle();
+    eq(page.posts()[0], { method: "POST", route: "clients", body: { audio: "2", devices: ["b-000001", "b-000002"] } });
+    eq(page.$("caudio").value, "2", "what was chosen stays shown");
+    page.$("csub").value = "3-burn";
+    page.$("csub").dispatch("change");
+    await settle();
+    eq(page.posts()[1].body, { sub: "3-burn", devices: ["b-000001", "b-000002"] });
+    page.refresh();
+    await settle();
+    eq([page.$("caudio").value, page.$("csub").value], ["2", "3-burn"], "and through the next status");
+    // Ticking only the TV shows what the TV plays with.
+    Array.from(page.$("clients").querySelectorAll(".item"))[1].click();
+    eq(text(page.$("tickedcount")), "1 ticked");
+    eq(page.$("caudio").value, "2");
+    // A list that is being used is left as the viewer set it.
+    page.$("csub").focus();
+    page.$("csub").value = "off";
+    page.refresh();
+    await settle();
+    eq(page.$("csub").value, "off");
+    page.$("csub").blur();
+    Array.from(page.$("clients").querySelectorAll(".item"))[1].click();  // both again
+    page.$("seeknow").click();
+    eq(page.posts().length, 2, "no position, nothing sent");
+    eq(page.$("cat").getAttribute("inputmode"), null, "a keyboard that has a colon (Android's number pad has none)");
+    eq(page.$("cat").getAttribute("type"), "text");
+    page.$("cat").value = " 10:10 ";
+    page.$("seeknow").click();
+    await settle();
+    eq(page.posts()[2].body, { seek: "10:10", devices: ["b-000001", "b-000002"] });
+    page.$("startat").click();
+    await settle();
+    eq(page.posts()[3].body, { start_at: "10:10", devices: ["b-000001", "b-000002"] });
+    page.$("cname").value = "Kids";
+    page.$("rename").click();
+    await settle();
+    eq(page.posts()[4].body, { name: "Kids", devices: ["b-000001", "b-000002"] });
+    // The ticks stay through the next status.
+    eq(page.$("clients").querySelectorAll(".item.ticked").length, 2);
+  });
+
+  await check("viewers: the lists start on what the ticked viewers play with", async () => {
+    const devices = [viewer("b-000001", "TV", {}, client({ audio: 1, sub: "1-soft" })),
+      viewer("b-000002", "Phone", {}, client({ audio: 1, sub: "off", pending: { sub: "1-soft", audio: 0 } }))];
+    const page = load({ status: status({ stream: watched(devices) }) });
+    await settle();
+    page.$("tickall").click();
+    eq(page.$("csub").value, "1-soft", "what waits counts: the phone was asked for English");
+    eq(page.$("caudio").value, "", "the phone was asked for Off, the TV plays English");
+    Array.from(page.$("clients").querySelectorAll(".item"))[1].click();
+    eq(page.$("caudio").value, "1", "the TV alone");
+  });
+
+  await check("viewers: tick all, untick all; a viewer that is gone loses its tick", async () => {
+    let devices = [viewer("b-000001", "TV"), viewer("b-000002", "Phone")];
+    const page = load({ status: () => status({ stream: watched(devices) }), clients: () => status({ stream: watched(devices) }) });
+    await settle();
+    page.$("tickall").click();
+    eq(page.$("clients").querySelectorAll(".item.ticked").length, 2); eq(text(page.$("tickall")), "Untick all");
+    devices = [viewer("b-000002", "Phone")];
+    page.$("cname").value = "x";
+    page.$("rename").click();  // its answer has one viewer left
+    await settle();
+    eq(page.posts()[0].body.devices, ["b-000001", "b-000002"]);
+    eq(text(page.$("tickedcount")), "1 ticked");
+    page.$("tickall").click();
+    eq(page.$("clients").querySelectorAll(".item.ticked").length, 0, "the one left was all of them: untick");
+    eq(text(page.$("tickall")), "Tick all"); eq(page.$("clientform").hidden, true);
+    page.$("tickall").click();
+    eq(page.$("clients").querySelectorAll(".item.ticked").length, 1);
+  });
+
+  await check("viewers: the lists keep what is chosen while the status refreshes", async () => {
+    const devices = [viewer("b-000001", "TV")];
+    const page = load({ status: () => status({ stream: watched(devices) }) });
+    await settle();
+    page.$("clients").querySelector(".item").click();
+    const select = page.$("caudio");
+    const before = select.querySelectorAll("option")[1];
+    // A refresh with the same tracks leaves the list as it is (a phone's open picker stays).
+    page.refresh();
+    await settle();
+    ok(select.querySelectorAll("option")[1] === before, "not rebuilt");
+  });
+
+  await check("viewers: a refused change is shown", async () => {
+    const devices = [viewer("b-000001", "TV")];
+    const page = load({ status: status({ stream: watched(devices) }), clients: { status: 400, data: { error: "not a time: 'x'" } } });
+    await settle();
+    page.$("clients").querySelector(".item").click();
+    page.$("cat").value = "x";
+    page.$("seeknow").click();
+    await settle();
+    ok(text(page.$("toasts")).includes("not a time"), text(page.$("toasts")));
+  });
+
+  await check("viewers: in direct mode and with no stream, the tab says why it is empty", async () => {
+    const direct = load({ status: status({ stream: stream({ mode: "direct" }) }) });
+    await settle();
+    ok(text(direct.$("clients")).includes("Direct mode"));
+    const idle = load({ status: status() });
+    await settle();
+    ok(text(idle.$("clients")).includes("No stream") && idle.$("viewerbadge").hidden);
+  });
+
+  await check("devices: a browser shows its name, its id, and is decided by id", async () => {
+    const devices = [viewer("b-000001", "Living-room TV", { allowed: true })];
+    const page = load({ status: status({ stream: watched(devices) }), devices: status({ stream: watched(devices) }) });
+    await settle();
+    const item = page.$("devices").querySelector(".item");
+    ok(text(item).includes("Living-room TV") && text(item).includes("browser b-000001") && text(item).includes("192.0.2.30"), text(item));
+    Array.from(item.querySelectorAll("button")).find((b) => text(b) === "Deny").click();
+    await settle();
+    eq(page.posts()[0].body, { device: "b-000001", allowed: false });
+    ok(text(page.$("toasts")).includes("Shut out Living-room TV"));
+  });
+
   await check("with nothing running, the other tabs say so", async () => {
     const page = load({ status: status() });
     await settle();
@@ -481,6 +515,5 @@ const text = (node) => node.textContent.replace(/\s+/g, " ").trim();
     ok(text(page.$("jobs")).includes("Nothing to do"));
   });
 
-  results.forEach(([state, name]) => console.log(state + " " + name));
-  process.exit(results.some(([state]) => state === "FAIL") ? 1 : 0);
+  finish();
 })();

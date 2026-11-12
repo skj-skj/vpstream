@@ -504,7 +504,7 @@ def test_command_line_refusals(
     assert cli.main(["devices", "enable", "192.0.2.1"]) == 1
     assert "no stream is running" in capsys.readouterr().err
     assert cli.main(["devices", "enable"]) == 2
-    assert "give the address" in capsys.readouterr().err
+    assert "give the device" in capsys.readouterr().err
     assert cli.main(["alias", "x"]) == 1
     assert cli.main(["start", "--file", str(tmp_path / "nope.mkv")]) == 1
     assert "not a file" in capsys.readouterr().err
@@ -660,10 +660,20 @@ def test_format_devices_and_states() -> None:
             },
             {"ip": "192.0.2.3", "allowed": True, "passes": True, "wl": True},
             {"ip": "192.0.2.4", "allowed": False, "passes": False, "wl": False},
+            {
+                "id": "b-0a1b2c",
+                "kind": "browser",
+                "ip": "192.0.2.5",
+                "name": "Living-room TV",
+                "allowed": True,
+                "passes": True,
+                "user_agent": "JioSphere",
+            },
         ]
     }
     lines = cli.format_devices(stream, 100.0).splitlines()
     assert lines[0].split() == [
+        "DEVICE",
         "ADDRESS",
         "STATE",
         "CODE",
@@ -675,6 +685,7 @@ def test_format_devices_and_states() -> None:
         "PLAYER",
     ]
     assert lines[1].split() == [
+        "192.0.2.1",
         "192.0.2.1",
         "allowed",
         "-",
@@ -688,6 +699,7 @@ def test_format_devices_and_states() -> None:
     ]
     assert lines[2].split() == [
         "2001:db8::1",
+        "2001:db8::1",
         "waiting",
         "WL",
         "0420",
@@ -699,6 +711,9 @@ def test_format_devices_and_states() -> None:
         "-",
     ]
     assert "enabled WL" in lines[3] and "disabled" in lines[4]
+    # A browser is listed by its id, and by the name the owner gave it.
+    assert lines[5].split()[:3] == ["b-0a1b2c", "192.0.2.5", "enabled"]
+    assert lines[5].endswith("Living-room TV")
     assert "No device" in cli.format_devices({"devices": []}, 1.0)
 
 
@@ -750,3 +765,75 @@ def test_format_stream_shows_what_is_being_prepared() -> None:
     assert (
         lines[6] == "note: video 2: its seek index has no audio entries, so VLC resumes it slowly"
     )
+
+
+def test_format_clients() -> None:
+    menu = {
+        "audio": [{"value": "1", "label": "English"}, {"value": "2", "label": "Japanese"}],
+        "subs": [{"value": "3-burn", "label": "Signs (burned in)"}],
+    }
+    client = {"video": 1, "position": 610, "duration": 5400, "paused": False, "audio": 2}
+    stream = {
+        "videos": [{"number": 1, "menu": menu}],
+        "devices": [
+            {"id": "192.0.2.2", "kind": "player", "passes": True},
+            {
+                "id": "b-000001",
+                "kind": "browser",
+                "passes": True,
+                "name": "Living-room TV",
+                "client": {
+                    **client,
+                    "sub": "3-burn",
+                    "reported": 99,
+                    "active": True,
+                    "pending": {"seek": 3723},
+                    "start_at": [1, 65],
+                },
+            },
+            {
+                "id": "b-000002",
+                "kind": "browser",
+                "passes": True,
+                "user_agent": "Chrome",
+                "client": {**client, "reported": 10, "paused": True, "sub": "off"},
+            },
+            {"id": "b-000003", "kind": "browser", "passes": True, "client": None},
+            {"id": "b-000004", "kind": "browser", "passes": False, "allowed": None, "wl": True},
+        ],
+    }
+    lines = cli.format_clients(stream, 100.0).splitlines()
+    assert lines[0].split()[:3] == ["DEVICE", "STATE", "VIDEO"] and len(lines) == 5
+    tv = lines[1]
+    assert tv.startswith("b-000001") and "playing" in tv and "10:10 / 1:30:00" in tv
+    assert "Japanese" in tv and "Signs (burned in)" in tv and "Living-room TV" in tv
+    assert "seek 3723, start 1 at 1:05" in tv
+    assert "gone 1m 30s ago" in lines[2] and "off" in lines[2] and lines[2].endswith("Chrome")
+    assert "not playing yet" in lines[3]
+    assert "waiting WL" in lines[4]
+    assert "No browser" in cli.format_clients({"devices": stream["devices"][:1]}, 1.0)
+
+
+def test_clients_command_refusals(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["clients", "set", "--seek", "10"]) == 2
+    assert "--all" in capsys.readouterr().err
+    assert cli.main(["clients", "set", "b-000001", "--all", "--seek", "10"]) == 2
+    capsys.readouterr()
+    assert cli.main(["clients", "set", "b-000001"]) == 2
+    assert "say what to change" in capsys.readouterr().err
+    assert cli.main(["clients", "list", "b-000001"]) == 2
+
+
+def test_clients_command_sends_the_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[object] = []
+    monkeypatch.setattr(cli, "_daemon", lambda route, payload=None: sent.append((route, payload)))
+    cli.main(
+        ["clients", "set", "b-1", "b-2", "--start-at", "10:10", "--video", "2", "--sub", "off"]
+    )
+    cli.main(["clients", "set", "--all", "--name", "TV"])
+    cli.main(["clients"])
+    assert sent == [
+        ("clients", {"sub": "off", "start_at": "10:10", "video": 2, "devices": ["b-1", "b-2"]}),
+        ("clients", {"name": "TV", "all": True}),
+        ("status", None),
+    ]

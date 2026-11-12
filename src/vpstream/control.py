@@ -10,8 +10,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import mkv, net, prepare, prepared, reindex, state, text, tracks
+from vpstream import (
+    clients,
+    gate,
+    mkv,
+    net,
+    player,
+    prepare,
+    prepared,
+    reindex,
+    state,
+    text,
+    tracks,
+)
 from vpstream.caddy import CaddyError, Server, link_video, link_videos, unlink_videos
+from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import under
 from vpstream.firewall import Firewall, FirewallError
@@ -20,6 +33,7 @@ from vpstream.stream import (
     BROWSER,
     DIRECT,
     MISSING,
+    SAVE_NOW,
     Answer,
     NeedsConfirm,
     Stream,
@@ -33,6 +47,10 @@ from vpstream.tools import NO_PROGRAMS, Runner, ToolMissing
 from vpstream.traffic import Traffic
 
 BOOT_ID = "/proc/sys/kernel/random/boot_id"
+# Where players are is written down at most this often; a new cookie or a used start
+# position on the next tick, and what the owner changes at once.
+SAVE_SECONDS = 10.0
+NOW_SECONDS = 1.0  # what must be written at once is, at most this often
 
 
 class ControlError(RuntimeError):
@@ -71,6 +89,8 @@ class Control:
     _indexer: threading.Thread | None = None
     _cancel: threading.Event = field(default_factory=threading.Event)
     _host: str = ""
+    _save_by: float | None = None  # when what viewers changed must be written down
+    _saved_at: float = 0.0
 
     # --- the pieces
 
@@ -81,6 +101,28 @@ class Control:
     def _save(self) -> None:
         recorded = None if self.stream is None else {**self.stream.to_dict(), "boot": self.boot}
         state.save(self._state_file, state.State(stream=recorded))
+        self._save_by, self._saved_at = None, self.clock()
+
+    def _save_due(self, how: str) -> None:
+        """Note that viewers changed the stream. SAVE_NOW is written down at once, or on
+        the next tick when the last write was less than a second ago (however many ask, it
+        is at most once a second); SAVE_LATER within SAVE_SECONDS. Called with `_lock`
+        held."""
+        now = self.clock()
+        by = now + (0.0 if how == SAVE_NOW else SAVE_SECONDS)
+        self._save_by = by if self._save_by is None else min(self._save_by, by)
+        if how == SAVE_NOW and now - self._saved_at >= NOW_SECONDS:
+            self._save_soon()
+
+    def _save_soon(self) -> None:
+        """Write down what viewers changed, when it is due. Called with `_lock` held."""
+        if self._save_by is None or self.clock() < self._save_by:
+            return
+        try:
+            self._save()
+        except OSError as exc:
+            self._save_by = self.clock() + SAVE_SECONDS  # tried; not again at once
+            self.log(f"WARNING: recording the stream failed: {exc}")
 
     def _port(self, action: str) -> None:
         """Open or close the stream port. Without a helper (a trial run) nothing is done."""
@@ -311,6 +353,7 @@ class Control:
             if self._traffic is not None:
                 for ip, size in self._traffic.read():
                     stream.devices.add_bytes(ip, size)
+            self._save_soon()
             # The wall clock, because the time limit must hold across a restart of the
             # daemon; a clock that is set while a stream runs moves its end with it.
             if stream.expires is not None and stream.expires <= self.clock():
@@ -365,19 +408,62 @@ class Control:
     def unlock(self) -> dict[str, Any]:
         return self._change(lambda s: s.unlock())
 
-    def set_device(self, ip: Any, allowed: Any) -> dict[str, Any]:
-        if not isinstance(ip, str) or not isinstance(allowed, bool):
-            raise StreamError("a device change needs an ip and allowed (true or false)")
-        return self._change(lambda s: s.devices.decide(ip, allowed, self.clock()))
+    def set_device(self, device: Any, allowed: Any) -> dict[str, Any]:
+        if not isinstance(device, str) or not isinstance(allowed, bool):
+            raise StreamError(
+                "a device change needs a device (its id or IP address) and allowed (true or false)"
+            )
+        return self._change(lambda s: s.devices.decide(device, allowed, self.clock()))
+
+    def set_clients(self, options: dict[str, Any]) -> dict[str, Any]:
+        """Change the browsers of a browser stream: `devices` (ids) or `all`, and any of
+        `audio`, `sub`, `seek` (commands to their players), `start_at` (where the next load
+        of `video`, by default the one each is on, starts) and `name`."""
+        known = {"devices", "all", "audio", "sub", "seek", "start_at", "video", "name"}
+        if extra := sorted(set(options) - known):
+            raise StreamError(f"unknown option: {', '.join(extra)}")
+        try:
+            values = {
+                key: read(options[key])
+                for key, read in _CLIENT_VALUES.items()
+                if options.get(key) is not None
+            }
+        except clients.ClientError as exc:
+            raise StreamError(str(exc)) from exc
+        if not values:
+            raise StreamError("say what to change: audio, sub, seek, start_at or name")
+        if options.get("video") is not None and "start_at" not in values:
+            raise StreamError("a video goes with start_at: it says which video starts there")
+
+        def change(stream: Stream) -> None:
+            if stream.mode != BROWSER and set(values) - {"name"}:
+                raise StreamError("players are told what to do in browser mode only")
+            video = options.get("video")
+            if video is not None and not (is_whole(video) and 0 < video <= len(stream.videos)):
+                raise StreamError(f"not a video of this stream: {video!r}")
+            for device in _chosen(stream, options.get("devices"), options.get("all") is True):
+                _apply(device, values, video, self.clock())
+
+        return self._change(change)
 
     # --- what viewers ask for
 
-    def visit(self, path: str, ip: str, user_agent: str, wants_html: bool) -> Answer:
+    def visit(
+        self,
+        path: str,
+        ip: str,
+        user_agent: str,
+        wants_html: bool,
+        cookie: str | None = None,
+        query: dict[str, str] | None = None,
+    ) -> Answer:
         with self._lock:
             stream = self.stream
             if stream is None:
                 return MISSING
-            answer = stream.visit(path, ip, user_agent, wants_html, self.clock())
+            answer = stream.visit(path, ip, user_agent, wants_html, self.clock(), cookie, query)
+            if answer.saves:
+                self._save_due(answer.saves)
         if answer.kind == "notready" and self.preparer is not None:
             job = self.preparer.job_for(Path(stream.entries[answer.number - 1]))
             if job is not None:
@@ -399,8 +485,11 @@ class Control:
                 "prepare_run": None if self.preparer is None else self.preparer.run,
             }
         if described is not None and stream is not None and stream.mode == BROWSER:
+            used = _videos_in_use(stream)
             for video, entry in zip(described["videos"], stream.entries, strict=True):
                 video["job"] = self.preparer.job_for(Path(entry)) if self.preparer else None
+                # Read from the cache on every poll, so only for the videos browsers are on.
+                video["menu"] = player.menu(Path(entry)) if video["number"] in used else None
         return info
 
     # --- browser mode and its prepared versions (see `prepare`)
@@ -586,6 +675,59 @@ class Control:
         if self.preparer is not None:
             return self.preparer.take(folder)
         return prepared.take(folder)
+
+
+_CLIENT_VALUES: dict[str, Callable[[Any], Any]] = {
+    "audio": clients.audio_value,
+    "sub": clients.sub_value,
+    "seek": clients.seconds_value,
+    "start_at": clients.seconds_value,
+    "name": clients.name_value,
+}
+
+
+def _videos_in_use(stream: Stream) -> set[int]:
+    """The videos the dashboard offers tracks of: those browsers are on or will start,
+    and the first, for a browser that has not played anything yet."""
+    used = {1}
+    for device in stream.devices.browsers():
+        if device.client is not None:
+            used.add(device.client.video or 1)
+            if device.client.start_at is not None:
+                used.add(device.client.start_at[0])
+    return used
+
+
+def _chosen(stream: Stream, ids: Any, every: bool) -> list[gate.Device]:
+    """The browsers a client change is for: those named, or with `every` all that get in."""
+    if every:
+        found = [d for d in stream.devices.browsers() if gate.allows(stream.policy, d.allowed)]
+        if not found:
+            raise StreamError("no browser watches this stream yet")
+        return found
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        raise StreamError("name the devices to change (their ids), or give all")
+    chosen = []
+    for key in dict.fromkeys(ids):
+        device = stream.devices.get(key)
+        if device is None or device.kind != gate.BROWSER:
+            raise StreamError(f"not a browser of this stream: {key!r}")
+        chosen.append(device)
+    return chosen
+
+
+def _apply(device: gate.Device, values: dict[str, Any], video: int | None, now: float) -> None:
+    """One client change on one browser."""
+    if "name" in values:
+        device.name = values["name"]
+    if not set(values) - {"name"}:
+        return
+    client = device.client = device.client or clients.Client()
+    for kind in clients.COMMANDS:
+        if kind in values:
+            client.command(kind, values[kind], now)
+    if "start_at" in values:
+        client.set_start(video or client.video or 1, values["start_at"])
 
 
 def _path_option(options: dict[str, Any]) -> str | None:

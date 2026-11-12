@@ -41,7 +41,7 @@
   .dot.on { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); }
   .dot.off { background: var(--bad); }
   nav { display: flex; gap: 4px; margin-top: 10px; overflow-x: auto; scrollbar-width: none; }
-  nav button { flex: 1; min-width: 90px; border: 0; background: none; padding: 10px 8px 12px; cursor: pointer;
+  nav button { flex: 1; min-width: 76px; border: 0; background: none; padding: 10px 8px 12px; cursor: pointer;
     color: var(--muted); font-weight: 600; border-bottom: 2px solid transparent; position: relative; }
   nav button.on { color: var(--text); border-color: var(--accent); }
   .badge { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 6px; border-radius: 10px;
@@ -131,6 +131,15 @@
   .device .meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 6px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
+  /* --- viewers */
+  .client { grid-template-columns: auto 1fr; cursor: pointer; }
+  .client.ticked { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--surface-2)); }
+  .tick { width: 26px; height: 26px; border-radius: 8px; border: 2px solid var(--line); display: grid;
+    place-items: center; font-weight: 800; color: var(--accent-ink); }
+  .ticked .tick { background: var(--accent); border-color: var(--accent); }
+  .client .meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .client .chips { margin-top: 6px; }
+
   /* --- prepare */
   .chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .job { display: grid; gap: 6px; }
@@ -174,6 +183,7 @@
     <nav id="tabs" role="tablist">
       <button data-tab="stream" class="on" role="tab">Stream</button>
       <button data-tab="devices" role="tab">Devices<span id="waitbadge" class="badge" hidden></span></button>
+      <button data-tab="viewers" role="tab">Viewers<span id="viewerbadge" class="badge" hidden></span></button>
       <button data-tab="prepare" role="tab">Prepare<span id="jobbadge" class="badge" hidden></span></button>
     </nav>
   </div>
@@ -264,6 +274,33 @@
     <div class="card">
       <h2>Devices <span id="devicecount" class="muted"></span></h2>
       <div id="devices" class="list"></div>
+    </div>
+  </section>
+
+  <!-- Viewers: the browsers of a browser stream, and what to ask of them -->
+  <section data-panel="viewers" class="stack" hidden>
+    <div class="card">
+      <h2>Viewers <span id="clientcount" class="muted"></span>
+        <button id="tickall" class="btn sm ghost" type="button" style="margin-left:auto">Tick all</button></h2>
+      <div id="clients" class="list"></div>
+    </div>
+    <div id="clientform" class="card" hidden>
+      <h2>Change <span id="tickedcount" class="muted"></span></h2>
+      <div class="stack">
+        <div class="grid2">
+          <label class="field">Audio <select id="caudio"></select></label>
+          <label class="field">Subtitles <select id="csub"></select></label>
+        </div>
+        <label class="field">Position, such as 10:10 or 1:02:03
+          <input id="cat" type="text" placeholder="10:10" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+        <div class="row">
+          <button id="seeknow" class="btn primary grow" type="button">Seek now</button>
+          <button id="startat" class="btn grow" type="button">Start there next time</button>
+        </div>
+        <label class="field">Name
+          <input id="cname" type="text" placeholder="Living-room TV" maxlength="40" spellcheck="false"></label>
+        <button id="rename" class="btn wide" type="button">Rename</button>
+      </div>
     </div>
   </section>
 
