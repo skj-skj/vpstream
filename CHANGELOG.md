@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.10.1 (2026-11-12)
+
+### Bug Fixes
+
+- A prepared video whose file cannot be looked at is kept, not stale
+  ([#19](https://github.com/skj-skj/vpstream/pull/19),
+  [`6389c4f`](https://github.com/skj-skj/vpstream/commit/6389c4fe0939a9661c025a63e39fe9dc72cfc17e))
+
+
 ## v0.10.0 (2026-11-11)
 
 ### Features
