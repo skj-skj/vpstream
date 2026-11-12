@@ -332,6 +332,7 @@
       if (e.soft.length) { chips.push(pill("soft " + e.soft.join(","), "accent")); }
       if (e.burn.length) { chips.push(pill("burned in " + e.burn.join(","), "accent")); }
       if (e.stale) { chips.push(pill("stale", "warn")); }
+      if (e.unchecked) { chips.push(pill("cannot check", "")); }
       if (e.in_use) { chips.push(pill("in use", "ok")); }
       if (e.busy) { chips.push(pill("preparing", "warn")); }
       var rm = e.in_use || e.busy ? null : button("Remove", function () {

@@ -270,19 +270,24 @@ def burn_master(base_text: str, burn_text: str, base_prefix: str = "../../base/"
 # --- the whole cache, for `vpstream prepared`
 
 
-def stale(entry: Path, source: str) -> bool:
-    """Whether `entry` no longer belongs to `source`: it is gone or was changed."""
+def stale(entry: Path, source: str) -> bool | None:
+    """Whether `entry` no longer belongs to `source`: True when the file is gone or was
+    changed, False when it is the same file, None when it cannot be looked at now (the
+    service's access to it was taken back), which says nothing about whether it changed."""
     try:
         return source_key(source) != entry.name
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return True
+    except OSError:
+        return None
 
 
 @dataclass
 class Entry:
     key: str
     source: str
-    stale: bool
+    stale: bool  # gone or changed: safe to remove
+    unchecked: bool  # the file cannot be looked at now, so it is kept as it is
     base: str  # COPY, TRANSCODE or "" when the base version is not there
     soft: list[int]
     burn: list[int]
@@ -304,12 +309,14 @@ def entries(cache_dir: Path) -> list[Entry]:
             continue
         meta = read_meta(folder) or {}
         source = str(meta.get("source") or "")
+        state = stale(folder, source) if source else True
         have = versions(folder)
         found.append(
             Entry(
                 key=folder.name,
                 source=source,
-                stale=not source or stale(folder, source),
+                stale=not source or state is True,
+                unchecked=bool(source) and state is None,
                 base=str(meta.get("base") or "") if have.base else "",
                 soft=have.soft,
                 burn=have.burn,

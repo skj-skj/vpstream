@@ -322,6 +322,8 @@ def test_prepared_lists_the_cache_and_the_prepares(
          "burn": [7], "bytes": 2.5e9, "in_use": True, "busy": False},
         {"key": "k2", "source": "/m/old.mkv", "stale": True, "base": "", "soft": [],
          "burn": [], "bytes": 1e6, "in_use": False, "busy": False},
+        {"key": "k3", "source": "/m/locked/c.mkv", "stale": False, "unchecked": True,
+         "base": "copy", "soft": [], "burn": [], "bytes": 1e6, "in_use": False, "busy": False},
     ]  # fmt: skip
     jobs = [job(1, "failed", error="x"), job(2, "done")]
     use(monkeypatch, Daemon(prepared=[{"prepared": rows}], status=[{"prepare": jobs}]))
@@ -330,7 +332,8 @@ def test_prepared_lists_the_cache_and_the_prepares(
     assert lines[0].split() == ["BASE", "SOFT", "BURNED", "IN", "SIZE", "SOURCE"]
     assert lines[1].split() == ["copy", "1,3", "7", "2.5", "GB", "/m/a.mkv", "(in", "use)"]
     assert lines[2].split()[:3] == ["-", "-", "-"] and lines[2].endswith("(stale)")
-    assert lines[3] == "2 videos, 2.5 GB in all"
+    assert lines[3].endswith("/m/locked/c.mkv  (cannot check)")
+    assert lines[4] == "3 videos, 2.5 GB in all"
     assert "film.mkv: base version (copy): failed: x" in lines[-1]
     assert not any("done" in line for line in lines)
 

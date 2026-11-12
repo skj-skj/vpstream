@@ -259,3 +259,34 @@ def test_a_whole_version_has_no_problems(entry: Path) -> None:
     (part / "video.m3u8").write_text('#EXT-X-MAP:URI="video_init.mp4"\nvideo_00000.m4s\n')
     (part / "master.m3u8").write_text("#EXTM3U\nvideo.m3u8\n")
     assert prepared.playlist_problems(entry, part, "base") == []
+
+
+# --- found on the VPS: a file the service cannot look at is not stale
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root looks at everything")
+def test_a_file_that_cannot_be_looked_at_is_kept_not_stale(
+    tmp_path: Path, entry: Path, film: Path
+) -> None:
+    # `vpstream stop` takes back the service's access; a folder of mode 2770 then cannot
+    # be entered, and every video in it looked "stale" (gone or changed) though it was not.
+    film.parent.chmod(0)
+    try:
+        (row,) = prepared.entries(tmp_path / "cache")
+        assert prepared.stale(entry, str(film)) is None
+    finally:
+        film.parent.chmod(0o755)
+    assert (row.stale, row.unchecked) == (False, True)
+    assert prepared.entries(tmp_path / "cache")[0].unchecked is False  # looked at again
+
+
+def test_gone_and_changed_files_are_stale(tmp_path: Path, entry: Path, film: Path) -> None:
+    assert prepared.stale(entry, str(film)) is False
+    st = os.stat(film)
+    os.utime(film, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
+    assert prepared.stale(entry, str(film)) is True
+    film.unlink()
+    assert prepared.stale(entry, str(film)) is True
+    assert prepared.stale(entry, str(film / "x")) is True  # a path through a file
+    (row,) = prepared.entries(tmp_path / "cache")
+    assert (row.stale, row.unchecked) == (True, False)
