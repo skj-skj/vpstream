@@ -26,6 +26,13 @@ from vpstream.tests.fakes import (
 )
 
 
+@pytest.fixture(autouse=True)
+def no_host_ipv6(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public dashboard also serves this host's global IPv6 address, when it has one
+    (a VPS does; a phone or a CI runner often not). The tests must not depend on that."""
+    monkeypatch.setattr(daemon.net, "outgoing_address6", lambda: "")
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
