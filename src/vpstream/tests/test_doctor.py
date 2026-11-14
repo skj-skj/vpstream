@@ -394,6 +394,7 @@ def test_without_the_daemon_the_port_is_read_from_the_helpers_record(tmp_path: P
     check = _by_name(doctor.run_checks(runner, status=None, **kwargs))["dashboard port"]
     assert check.status == "warning" and "did not open 1338" in check.detail
     record.write_text("1338\n")
+    record.chmod(0o644)  # as the helper leaves it; the umask may let the group write it
     check = _by_name(doctor.run_checks(runner, status=None, **kwargs))["dashboard port"]
     assert "opened 1338" in check.detail
 
