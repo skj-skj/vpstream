@@ -4,6 +4,11 @@ Both run as root and are safe to repeat. `init` writes down what it created in a
 `uninstall` removes only that, so a user, a group membership or a served port that was there
 before is left alone. Neither ever enables, disables, resets or reloads ufw, and neither
 resets `tailscale serve` or touches a port of it that is not vpstream's.
+
+`init` also sets where the dashboard is: on the tailnet through `tailscale serve` (the
+default), or public (`--no-tailscale`), over HTTPS through the daemon's own Caddy and behind
+a password. Switching either way undoes what the other mode set up: the served port, or the
+password and the dashboard port in ufw (which the daemon opens while it serves).
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from vpstream import config, doctor, firewall, tailscale
+from vpstream import caddy, client, config, doctor, firewall, login, net, tailscale
 from vpstream.files import write_atomic
 from vpstream.tools import Result, Runner, tail
 
@@ -37,8 +42,10 @@ NEEDED = (
     "gpasswd",
     "id",
     "chown",
-    "tailscale",
 )
+# What each place of the dashboard needs as well: public (True) or the tailnet (False).
+NEEDED_FOR = {False: ("tailscale",), True: ("caddy",)}
+CERT_SECONDS = 30  # how long init waits for the public dashboard's Caddy to make its authority
 # A path goes into the sudoers rule and the unit file as it is, so it must need no quoting.
 _PLAIN_PATH = re.compile(r"/[A-Za-z0-9_./+-]+")
 
@@ -131,6 +138,7 @@ RuntimeDirectoryMode=0750
 UMask=0027
 ExecStart={vpstream_bin} daemon
 ExecStopPost=+{helper} close
+ExecStopPost=+{helper} dash-close
 Restart=on-failure
 RestartSec=5
 
@@ -161,6 +169,10 @@ class Service:
     )
     program_problem: Callable[[Path], str | None] = doctor.program_problem
     port_busy: Callable[[int], bool] = port_busy
+    outgoing_address: Callable[[], str] = net.outgoing_address
+    ask_daemon: Callable[[Path, str], object] = lambda socket, route: client.call(
+        socket, "POST", route, {}
+    )
     owner_uid: int = 0  # who must own the files root trusts; tests are not root
     say: Callable[[str], None] = print
     pause: Callable[[float], None] = time.sleep
@@ -200,9 +212,34 @@ class Service:
 
     # --- init
 
-    def check_host(self) -> None:
+    def _config(self) -> config.Config:
+        try:
+            return config.load(self.layout.paths.config_file)
+        except config.ConfigError as exc:
+            raise ServiceError(f"fix the configuration first: {exc}") from exc
+
+    def dashboard_public(self, public: bool | None = None) -> bool:
+        """Where init puts the dashboard: as asked, or where it is now."""
+        return self._config().dashboard_public if public is None else public
+
+    def password_problem(self) -> str | None:
+        """Why there is no password the daemon can use, or None when there is one."""
+        try:
+            if login.load_verifier(self.layout.paths.dashboard_key) is None:
+                return "no password is set"
+        except login.PasswordError as exc:
+            return f"the password file cannot be used ({exc})"
+        return None
+
+    def wants_password(self, public: bool | None = None) -> bool:
+        """Whether init must be given a password: the dashboard goes public without a
+        usable one."""
+        return self.dashboard_public(public) and self.password_problem() is not None
+
+    def check_host(self, public: bool = False) -> None:
         """Refuse before changing anything when init could not finish on this host."""
-        missing = [name for name in NEEDED if not self.runner.which(name)]
+        needed = (*NEEDED, *NEEDED_FOR[public])
+        missing = [name for name in needed if not self.runner.which(name)]
         if missing:
             raise ServiceError(
                 f"missing on this host: {', '.join(missing)}. Run `vpstream doctor` for the fixes"
@@ -221,19 +258,23 @@ class Service:
                 raise ServiceError(f"cannot use the path {path}: it has unusual characters")
             if not path.is_file():
                 raise ServiceError(f"{path} is missing; reinstall vpstream")
-        try:
-            cfg = config.load(self.layout.paths.config_file)
-        except config.ConfigError as exc:
-            raise ServiceError(f"fix the configuration first: {exc}") from exc
+        cfg = self._config()
         port = cfg.dashboard_port
-        published = self._check_serve(port)
-        if self.port_busy(port) and not (
-            (published or Manifest.load(self.layout.manifest).serve_port == port)
-            and self._succeeds("systemctl", "is-active", "--quiet", UNIT)
-        ):
-            # Publishing it would put that other program on the tailnet.
+        if public and not net.public_host(cfg.stream_host, self.outgoing_address):
             raise ServiceError(
-                f"port {port} on 127.0.0.1 is already used by another program. "
+                "this host's public address is not known, and the dashboard's certificate is "
+                f"made for it. Set it as host under [stream] in {self.layout.paths.config_file}"
+            )
+        published = False if public else self._check_serve(port)
+        recorded = Manifest.load(self.layout.manifest).serve_port == port
+        ours = published or recorded or cfg.dashboard_public
+        if self.port_busy(port) and not (
+            ours and self._succeeds("systemctl", "is-active", "--quiet", UNIT)
+        ):
+            # Publishing it would put that other program on the tailnet, or the internet.
+            where = "" if public else " on 127.0.0.1"
+            raise ServiceError(
+                f"port {port}{where} is already used by another program. "
                 f"Set another port under [dashboard] in {self.layout.paths.config_file}"
             )
 
@@ -261,9 +302,19 @@ class Service:
             )
         return proxy is not None
 
-    def init(self) -> None:
+    def init(self, public: bool | None = None, password: str | None = None) -> None:
+        """Set the service up. `public` moves the dashboard (None keeps it where it is);
+        `password` sets the public dashboard's, which it must have."""
         self._require_root("init")
-        self.check_host()
+        public = self.dashboard_public(public)
+        self.check_host(public)
+        if password is not None and (problem := login.password_problem(password)):
+            raise ServiceError(problem)
+        if self.wants_password(public) and password is None:
+            raise ServiceError(
+                f"the public dashboard needs a password ({self.password_problem()}): run init "
+                "in a terminal to be asked for one, or give it with --dash-pass-file FILE"
+            )
         lay = self.layout
         lay.etc_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
         lay.etc_dir.chmod(0o755)
@@ -271,20 +322,125 @@ class Service:
         manifest.save(lay.manifest)
 
         self._init_user(manifest)
-        self._init_config()
+        self._init_config(public)
         cfg = config.load(lay.paths.config_file)
         for folder in (lay.paths.state_dir, lay.paths.cache_dir):
             folder.mkdir(mode=0o750, parents=True, exist_ok=True)
             folder.chmod(0o750)
             self._run("chown", "-R", f"{USER}:{USER}", folder, what=f"giving {folder} to {USER}")
         self._init_sudoers()
-        self._init_serve(manifest, cfg.dashboard_port)
+        if public:
+            if password is not None:
+                self._write_password(password)
+            self._unpublish(manifest)
+        else:
+            self._remove_password()
+            self._close_recorded(lay.paths.open_dashboard_ports_file, "dashboard port")
+            self._init_serve(manifest, cfg.dashboard_port)
         self._init_member(manifest)
         self._init_unit()
+        if public:
+            self._report_public(cfg)
         self.say(
             f"vpstream is set up. The stream port {cfg.stream_port} stays closed until a stream "
             "runs.\nCheck it with: vpstream status"
         )
+
+    # --- the public dashboard
+
+    def _write_password(self, password: str) -> None:
+        """Keep only the verifier, readable by root and the service's group. Failed logins
+        counted so far are forgotten with the old password."""
+        path = self.layout.paths.dashboard_key
+        try:
+            verifier = login.Verifier.make(password)
+        except login.PasswordError as exc:
+            raise ServiceError(str(exc)) from exc
+
+        def give_to_group(tmp: Path) -> None:  # before it takes the old file's place
+            self._run("chown", f"root:{USER}", tmp, what=f"giving {path} to the group {USER}")
+            tmp.chmod(0o640)
+
+        login.write_verifier(path, verifier, before=give_to_group)
+        # The old password's failed logins and known devices go with it.
+        for old in (self.layout.paths.login_record, self.layout.paths.device_key):
+            old.unlink(missing_ok=True)
+        self.say(f"{path}: dashboard password set (only a verifier of it is kept)")
+
+    def _remove_password(self) -> None:
+        paths = self.layout.paths
+        for path in (paths.dashboard_key, paths.login_record, paths.device_key):
+            if path.exists():
+                path.unlink()
+                self.say(f"{path}: removed (the dashboard is on the tailnet only)")
+
+    def _close_recorded(self, record: Path, what: str, also: Sequence[int] = ()) -> None:
+        """Close in ufw every port the helper wrote down in `record`, and `also`."""
+        for port in dict.fromkeys([*firewall.recorded_ports(record, self.owner_uid), *also]):
+            self._run("ufw", *firewall.ufw_args("close", port), what=f"closing the {what}")
+            self.say(f"ufw: {what} {port} is closed")
+        record.unlink(missing_ok=True)
+
+    def _unpublish(self, manifest: Manifest) -> None:
+        """Stop publishing the dashboard on the tailnet, if init published it."""
+        port = manifest.serve_port
+        if port is None or not self.runner.which("tailscale"):
+            return
+        try:
+            if self._serve_off(port):
+                self.say(f"tailscale serve: port {port} is no longer published")
+        except tailscale.TailscaleDown as exc:
+            self.say(f"note: could not check tailscale serve ({exc})")
+            return
+        manifest.serve_port = None
+        manifest.save(self.layout.manifest)
+
+    def _report_public(self, cfg: config.Config) -> None:
+        """The address, and the fingerprint of the certificate authority, which Caddy makes
+        when the service starts it."""
+        host = net.public_host(cfg.stream_host, self.outgoing_address)
+        port = cfg.dashboard_port
+        self.say(f"dashboard: public at {net.url('https', host, port)}/ (password)")
+        path = caddy.dashboard_root_cert(self.layout.paths)
+        for _ in range(CERT_SECONDS):
+            if cert := caddy.read_certificate(path):
+                break
+            self.pause(1.0)
+        if cert is None:
+            self.say("The certificate is not made yet; see it later with: vpstream status")
+        else:
+            self.say(
+                "Its certificate comes from this host's own authority, which your browser does "
+                "not know. Install that authority on your phone once, before you first log "
+                "in: until then, someone on the way to this host could show you a login page "
+                "of their own.\n"
+                "  vpstream dashboard-cert > vpstream-ca.crt\n"
+                "  (Android: Settings, Security, Install a certificate, CA certificate)\n"
+                f"Check that it is this one: SHA-256 {cert['fingerprint']}"
+            )
+        self.say(
+            f"The service opens {port}/tcp in ufw while it runs. If your provider has a "
+            f"firewall of its own, let {port}/tcp in there too."
+        )
+
+    def set_password(self, password: str) -> None:
+        """`vpstream dash-pass`: a new password for the public dashboard. The running daemon
+        takes it at once and logs every browser out; a running stream goes on."""
+        self._require_root("dash-pass")
+        if not self._config().dashboard_public:
+            raise ServiceError(
+                "the dashboard is not public, so it has no password. Make it public with: "
+                "sudo vpstream init --no-tailscale"
+            )
+        if not self._group_exists():
+            raise ServiceError("vpstream is not set up here: sudo vpstream init --no-tailscale")
+        self._write_password(password)
+        try:
+            self.ask_daemon(self.layout.paths.socket, "dashboard/reload")
+        except (client.DaemonUnavailable, client.DaemonRefused) as exc:
+            self.say(f"the daemon did not take it now ({exc}); it does when it starts")
+        else:
+            self.say("the daemon took it: every browser must log in again; a stream goes on")
 
     def _init_user(self, manifest: Manifest) -> None:
         if self._user_exists():
@@ -309,13 +465,21 @@ class Service:
         )
         self.say(f"user {USER}: created")
 
-    def _init_config(self) -> None:
+    def _init_config(self, public: bool) -> None:
         path = self.layout.paths.config_file
         if path.exists():
             self.say(f"{path}: kept")
         else:
             path.write_text(config.DEFAULT_TEXT, encoding="utf-8")
             self.say(f"{path}: written")
+        text = path.read_text(encoding="utf-8")
+        if config.parse(text).dashboard_public != public:
+            try:
+                write_atomic(path, config.with_public_dashboard(text, public))
+            except config.ConfigError as exc:
+                raise ServiceError(f"{path}: {exc}") from exc
+            where = "public, behind a password" if public else "on the tailnet only"
+            self.say(f"{path}: the dashboard is now {where}")
         # The firewall helper trusts this file, so only root may write it.
         path.chmod(0o644)
 
@@ -403,8 +567,10 @@ class Service:
         lay = self.layout
         manifest = Manifest.load(lay.manifest)
         record = lay.paths.open_ports_file
+        dash_record = lay.paths.open_dashboard_ports_file
         # Without any trace of an install, a rule for the stream port is not vpstream's.
-        installed = any(p.exists() for p in (lay.manifest, lay.unit_file, lay.sudoers_file, record))
+        traces = (lay.manifest, lay.unit_file, lay.sudoers_file, record, dash_record)
+        installed = any(p.exists() for p in traces)
         port: int | None = None
         port_problem = ""
         try:
@@ -423,23 +589,16 @@ class Service:
             self.say("service: stopped and removed")
 
         if installed and self.runner.which("ufw"):
-            # After the stop: the service's own close has normally emptied the record.
-            opened = firewall.recorded_ports(record, self.owner_uid)
-            for one in dict.fromkeys([*opened, *([] if port is None else [port])]):
-                self._run("ufw", *firewall.ufw_args("close", one), what="closing the stream port")
-                self.say(f"ufw: stream port {one} is closed")
+            # After the stop: the service's own close has normally emptied the records.
+            self._close_recorded(record, "stream port", also=[] if port is None else [port])
+            self._close_recorded(dash_record, "dashboard port")
             if port is None:
                 self.say(
                     f"WARNING: the stream port is not known ({port_problem}), so its ufw rule "
                     "could not be removed. Look for one with: sudo ufw status"
                 )
 
-        if manifest.serve_port is not None and self.runner.which("tailscale"):
-            try:
-                if self._serve_off(manifest.serve_port):
-                    self.say(f"tailscale serve: port {manifest.serve_port} is no longer published")
-            except tailscale.TailscaleDown as exc:
-                self.say(f"note: could not check tailscale serve ({exc})")
+        self._unpublish(manifest)
 
         if lay.sudoers_file.exists():
             lay.sudoers_file.unlink()

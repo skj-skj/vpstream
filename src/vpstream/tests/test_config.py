@@ -97,3 +97,62 @@ def test_media_folder() -> None:
     for bad in ('"films"', "3", '""'):
         with pytest.raises(config.ConfigError, match="full path"):
             config.parse(f"[media]\nfolder = {bad}\n")
+
+
+# --- where the dashboard is
+
+
+def test_the_dashboard_is_on_the_tailnet_unless_the_file_says_public() -> None:
+    assert config.parse("").dashboard_public is False
+    assert config.parse(config.DEFAULT_TEXT).dashboard_public is False
+    assert config.parse("[dashboard]\npublic = true\n").dashboard_public is True
+
+
+@pytest.mark.parametrize("value", ['"yes"', "1", "0", '"true"'])
+def test_public_must_be_true_or_false(value: str) -> None:
+    with pytest.raises(config.ConfigError, match="true or false"):
+        config.parse(f"[dashboard]\npublic = {value}\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "expect"),
+    [
+        (config.DEFAULT_TEXT, None),  # the line written by init: changed in place
+        ("", "[dashboard]\npublic = true\n"),
+        ("[stream]\nport = 2000", "[stream]\nport = 2000\n\n[dashboard]\npublic = true\n"),
+        ("[dashboard]\nport = 1400\n", "[dashboard]\npublic = true\nport = 1400\n"),
+        (
+            "[ dashboard ]  # mine\nport = 1400\n",
+            "[ dashboard ]  # mine\npublic = true\nport = 1400\n",
+        ),
+        (
+            "[dashboard]\n# public = false\npublic=false # off\n[media]\n",
+            "[dashboard]\n# public = false\npublic = true\n[media]\n",
+        ),
+        ("[media]\npublic_x = 1\n", None),  # an unknown key elsewhere stays an error
+    ],
+)
+def test_init_sets_public_and_leaves_every_other_line(text: str, expect: str | None) -> None:
+    if "public_x" in text:
+        with pytest.raises(config.ConfigError):
+            config.with_public_dashboard(text, True)
+        return
+    result = config.with_public_dashboard(text, True)
+    assert config.parse(result).dashboard_public is True
+    if expect is not None:
+        assert result == expect
+    else:
+        changed = [
+            (a, b) for a, b in zip(text.splitlines(), result.splitlines(), strict=True) if a != b
+        ]
+        assert changed == [("public = false", "public = true")]
+    back = config.with_public_dashboard(result, False)
+    assert config.parse(back).dashboard_public is False
+    assert config.with_public_dashboard(back, False) == back
+
+
+def test_a_public_setting_written_another_way_is_not_guessed_at() -> None:
+    with pytest.raises(config.ConfigError, match="cannot set"):
+        config.with_public_dashboard("dashboard.public = false\n", True)
+    with pytest.raises(config.ConfigError, match="cannot set"):
+        config.with_public_dashboard('[dashboard]\n"public" = false\n', True)

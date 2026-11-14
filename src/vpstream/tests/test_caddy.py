@@ -256,3 +256,81 @@ def test_running_notices_a_caddy_that_died(tmp_path: Path, program: Path) -> Non
     server._proc.wait()
     assert not server.running()
     server.stop()
+
+
+# --- the public dashboard's Caddy
+
+
+def test_the_dashboard_config_is_https_for_the_address_and_never_touches_trust_stores(
+    tmp_path: Path,
+) -> None:
+    cfg = caddy.dashboard_config(1338, ["203.0.113.5"], tmp_path / "d.sock")
+    assert cfg["admin"]["disabled"] is True
+    assert cfg["apps"]["pki"]["certificate_authorities"]["local"]["install_trust"] is False
+    tls = cfg["apps"]["tls"]
+    assert tls["certificates"]["automate"] == ["203.0.113.5"]
+    assert tls["automation"]["policies"] == [
+        {"subjects": ["203.0.113.5"], "issuers": [{"module": "internal"}]}
+    ]
+    [server] = cfg["apps"]["http"]["servers"].values()
+    assert server["listen"] == ["203.0.113.5:1338"]
+    assert server["tls_connection_policies"] == [{"default_sni": "203.0.113.5"}]
+    assert server["automatic_https"] == {"disable_redirects": True}
+    [proxy] = server["routes"][0]["handle"]
+    assert proxy["upstreams"] == [{"dial": f"unix/{tmp_path / 'd.sock'}"}]
+    assert proxy["headers"]["request"]["set"] == {caddy.HEADER_IP: ["{http.request.remote.host}"]}
+
+
+def test_both_caddies_hand_on_the_address_the_same_way(tmp_path: Path) -> None:
+    stream = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v")
+    gate = stream["apps"]["http"]["servers"]["vpstream"]["routes"][1]["handle"][0]
+    dash = caddy.dashboard_config(1338, ["h"], tmp_path / "g.sock")
+    proxy = dash["apps"]["http"]["servers"][caddy.DASHBOARD_SERVER]["routes"][0]["handle"][0]
+    assert proxy["headers"] == gate["headers"] and proxy["upstreams"] == gate["upstreams"]
+
+
+def test_the_fingerprint_is_the_one_openssl_shows() -> None:
+    pem = (Path(__file__).parent / "data" / "caddy-root.crt").read_text()
+    # openssl x509 -in caddy-root.crt -noout -fingerprint -sha256
+    expect = (
+        "AD:4D:AC:19:E9:B2:B3:B7:B7:41:5B:6D:AC:68:69:53:"
+        "E1:10:AF:FA:3F:7D:B3:3B:4F:CF:A2:E6:63:FC:D6:61"
+    )
+    assert caddy.certificate_fingerprint(pem) == expect
+    assert caddy.certificate_fingerprint("junk before\n" + pem + "\njunk after") == expect
+
+
+@pytest.mark.parametrize(
+    "pem",
+    ["", "no certificate", "-----BEGIN CERTIFICATE-----\n@@@\n-----END CERTIFICATE-----\n"],
+)
+def test_a_file_without_a_certificate_has_no_fingerprint(pem: str) -> None:
+    with pytest.raises(ValueError):
+        caddy.certificate_fingerprint(pem)
+
+
+def test_the_dashboard_caddy_keeps_its_files_apart_from_the_streams(tmp_path: Path) -> None:
+    paths = config.Paths.under(tmp_path)
+    dash = caddy.DashboardCaddy(FakeRunner(), 1338, ["203.0.113.5"], paths)
+    stream = caddy.CaddyServer(FakeRunner(), 1337, paths)
+    assert dash.work_dir != stream.work_dir
+    assert dash.root_cert == caddy.dashboard_root_cert(paths)
+    assert dash.root_cert.is_relative_to(dash.data_dir)
+    assert dash.config() == caddy.dashboard_config(1338, ["203.0.113.5"], paths.dashboard_socket)
+    assert dash.probe_host == "203.0.113.5" and stream.probe_host == "127.0.0.1"
+
+
+def test_each_address_gets_a_listener_whose_certificate_is_its_own(tmp_path: Path) -> None:
+    """No SNI is sent for an address, so a listener can pick only one certificate."""
+    hosts = ["vps.example.org", "203.0.113.5", "2001:db8::5"]
+    cfg = caddy.dashboard_config(1338, hosts, tmp_path / "d.sock")
+    servers = cfg["apps"]["http"]["servers"]
+    assert [(s["listen"], s["tls_connection_policies"]) for s in servers.values()] == [
+        (["203.0.113.5:1338"], [{"default_sni": "203.0.113.5"}]),
+        (["[2001:db8::5]:1338"], [{"default_sni": "2001:db8::5"}]),
+    ]
+    assert cfg["apps"]["tls"]["certificates"]["automate"] == hosts, "the name by its SNI"
+    only_a_name = caddy.dashboard_config(1338, ["vps.example.org"], tmp_path / "d.sock")
+    [server] = only_a_name["apps"]["http"]["servers"].values()
+    assert server["listen"] == [":1338"]
+    assert server["tls_connection_policies"] == [{"default_sni": "vps.example.org"}]

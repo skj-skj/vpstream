@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, TypeGuard
 
 
@@ -24,3 +25,11 @@ def is_whole(value: Any) -> TypeGuard[int]:
 def is_digits(text: str) -> bool:
     """Only the digits 0-9. `str.isdigit` also takes "²" and other digits `int` refuses."""
     return text.isascii() and text.isdecimal()
+
+
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")  # secrets.token_urlsafe(32)
+
+
+def is_token(value: Any) -> TypeGuard[str]:
+    """A cookie value of the form vpstream gives out: secrets.token_urlsafe(32)."""
+    return isinstance(value, str) and _TOKEN.fullmatch(value) is not None

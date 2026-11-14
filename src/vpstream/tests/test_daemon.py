@@ -5,15 +5,19 @@ import re
 import socket
 import stat
 import threading
+import time
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from vpstream import __version__, api, cli, client, config, daemon, state
+from vpstream import __version__, api, cli, client, config, daemon, firewall, state
 from vpstream.tests.fakes import (
     NAME,
+    EventFirewall,
+    FakeDashboard,
     FakeFirewall,
     FakeRunner,
     FakeServer,
@@ -409,13 +413,18 @@ def test_daemon_command_reports_a_folder_it_cannot_use(
 def test_a_trial_daemon_gets_no_firewall_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[object] = []
-    monkeypatch.setattr(daemon, "run", lambda cfg, paths, runner, fw: seen.append(fw) or 0)
+    seen: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        daemon, "run", lambda cfg, paths, runner, fw, dash: seen.append((fw, dash)) or 0
+    )
     monkeypatch.setenv(config.ROOT_ENV, str(tmp_path))
     assert cli.main(["daemon"]) == 0
     monkeypatch.delenv(config.ROOT_ENV)
     assert cli.main(["daemon"]) == 0
-    assert seen[0] is None and type(seen[1]).__name__ == "SudoFirewall"
+    assert seen[0] == (None, None)
+    stream_fw, dash_fw = seen[1]
+    assert isinstance(stream_fw, firewall.SudoFirewall) and stream_fw.port == firewall.STREAM
+    assert isinstance(dash_fw, firewall.SudoFirewall) and dash_fw.port == firewall.DASHBOARD
 
 
 # --- a stream, from the command line to the gate socket
@@ -837,3 +846,241 @@ def test_clients_command_sends_the_change(monkeypatch: pytest.MonkeyPatch) -> No
         ("clients", {"name": "TV", "all": True}),
         ("status", None),
     ]
+
+
+# --- the public dashboard (its real Caddy: test_dashboard_integration)
+
+
+class PublicRun(Running):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        password: bool = True,
+        host: str = "203.0.113.5",
+        fail: str = "",
+        fw_fail: str = "",
+    ) -> None:
+        from vpstream import login
+        from vpstream.tests.test_login import verifier
+
+        cfg = config.Config(
+            stream_port=_free_port(),
+            dashboard_port=_free_port(),
+            dashboard_public=True,
+            stream_host=host,
+        )
+        paths = config.Paths.under(root)
+        paths.config_file.parent.mkdir(parents=True)
+        paths.state_dir.mkdir(parents=True)  # init makes it on a host
+        if password:
+            login.write_verifier(paths.dashboard_key, verifier())
+        super().__init__(root, FakeRunner(()), cfg)
+        self.events: list[str] = []
+        self.caddy = FakeDashboard(root / "root.crt", self.events, fail)
+        self.daemon.dashboard_server = self.caddy
+        self.daemon.dashboard_firewall = EventFirewall(self.events, fw_fail)
+
+    def dashboard(self, route: str) -> tuple[int, Any]:
+        conn = client._UnixConnection(self.paths.dashboard_socket, 5)
+        try:
+            conn.request("GET", f"{api.API}/{route}", headers={"Connection": "close"})
+            answer = conn.getresponse()
+            return answer.status, json.loads(answer.read())
+        finally:
+            conn.close()
+
+    def wait(self, what: Any, seconds: float = 10.0) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if what():
+                return
+            self.stop.wait(0.02)
+        raise AssertionError(f"waited in vain: {self.events} {self.log}")
+
+
+def test_a_public_daemon_serves_its_dashboard_behind_the_password(short_tmp: Path) -> None:
+    run = PublicRun(short_tmp).start()
+    try:
+        run.wait_for_dashboard()
+        assert run.events == ["start", "port open"], "the port opens once Caddy listens"
+        assert run.dashboard("status") == (401, {"error": "log in first", "login": True})
+        # The command line's socket is the same daemon, without a password.
+        info = client.call(run.paths.socket, "GET", "status")
+        dash = info["dashboard"]
+        assert dash["mode"] == "public" and dash["password"] is True
+        assert dash["url"] == f"https://203.0.113.5:{run.daemon.config.dashboard_port}/"
+        assert dash["port_state"] == "open" and dash["certificate"] is None
+        pem = (Path(__file__).parent / "data" / "caddy-root.crt").read_text()
+        run.caddy.root_cert.write_text(pem)
+        from vpstream.caddy import certificate_fingerprint
+
+        info = client.call(run.paths.socket, "GET", "status")
+        assert info["dashboard"]["certificate"] == certificate_fingerprint(pem)
+        assert client.call(run.paths.socket, "GET", "certificate")["pem"] == pem
+    finally:
+        run.close()
+    assert run.events == ["start", "port open", "port close", "stop"]
+    assert not run.paths.dashboard_socket.exists()
+
+
+def test_a_public_dashboard_whose_caddy_dies_is_taken_down_and_up_again(short_tmp: Path) -> None:
+    run = PublicRun(short_tmp).start()
+    try:
+        run.wait_for_dashboard()
+        run.caddy.up = False  # Caddy exits by itself
+        run.wait(lambda: run.events.count("port open") == 2)
+        assert run.events[:5] == ["start", "port open", "port close", "stop", "start"]
+        assert any("Caddy for the dashboard stopped: it was killed" in m for m in run.log)
+    finally:
+        run.close()
+
+
+def test_a_caddy_that_will_not_start_never_gets_the_port_opened(short_tmp: Path) -> None:
+    run = PublicRun(short_tmp, fail="port 1338 is already used").start()
+    try:
+        run.wait(lambda: run.events.count("start") >= 2)
+        assert [e for e in run.events if e.startswith("port")] == [], "no sudo on each retry"
+        info = client.call(run.paths.socket, "GET", "status")["dashboard"]
+        assert info["url"] is None and "already used" in info["problem"]
+        assert info["port_state"] == "closed"
+    finally:
+        run.close()
+
+
+def test_a_port_that_will_not_open_takes_caddy_down_again(short_tmp: Path) -> None:
+    run = PublicRun(short_tmp, fw_fail="sudo: a password is required").start()
+    try:
+        run.wait(lambda: run.events.count("stop") >= 1)
+        # A port that failed to open is not closed again by sudo; dash-close on stop is.
+        assert run.events[:3] == ["start", "port open", "stop"]
+        info = client.call(run.paths.socket, "GET", "status")["dashboard"]
+        assert "password is required" in info["problem"]
+        assert info["port_state"] == "unknown"
+    finally:
+        run.close()
+
+
+def test_a_public_daemon_without_a_password_lets_nobody_in_and_says_so(short_tmp: Path) -> None:
+    run = PublicRun(short_tmp, password=False).start()
+    try:
+        run.wait_for_dashboard()
+        info = client.call(run.paths.socket, "GET", "status")["dashboard"]
+        assert info["password"] is False
+        assert any("no dashboard password is set" in m for m in run.log)
+        conn = client._UnixConnection(run.paths.dashboard_socket, 5)
+        conn.request(
+            "POST",
+            f"{api.API}/login/challenge",
+            body="{}",
+            headers={"Content-Type": "application/json", "Connection": "close"},
+        )
+        assert conn.getresponse().status == 503
+        conn.close()
+    finally:
+        run.close()
+
+
+def test_a_public_daemon_that_does_not_know_its_address_says_so(
+    short_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon.net, "outgoing_address", lambda: "")
+    run = PublicRun(short_tmp, host="").start()
+    try:
+        run.wait(lambda: "set [stream] host" in (run.daemon.dashboard_problem or ""))
+        run.stop.wait(0.3)  # several retries
+        assert [e for e in run.events if e.startswith("port")] == [], "no sudo on each retry"
+    finally:
+        run.close()
+
+
+def test_a_tailnet_daemon_says_where_its_dashboard_is(running: Running) -> None:
+    info = client.call(running.paths.socket, "GET", "status")["dashboard"]
+    assert info["mode"] == "tailnet" and "port_state" not in info and "certificate" not in info
+    assert client.call(running.paths.socket, "GET", "session") == {"login": False}
+    with pytest.raises(client.DaemonRefused, match="not public"):
+        client.call(running.paths.socket, "GET", "certificate")
+
+
+def test_an_address_found_only_after_boot_is_the_one_the_certificate_is_for(
+    short_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = iter(["", "", "203.0.113.7"])
+    monkeypatch.setattr(daemon.net, "outgoing_address", lambda: next(found, "203.0.113.7"))
+    run = PublicRun(short_tmp, host="").start()
+    try:
+        run.wait_for_dashboard()
+        assert run.caddy.hosts == ["203.0.113.7"]
+        info = client.call(run.paths.socket, "GET", "status")["dashboard"]
+        assert info["url"] == f"https://203.0.113.7:{run.daemon.config.dashboard_port}/"
+    finally:
+        run.close()
+
+
+def test_a_public_dashboard_that_keeps_failing_is_tried_less_and_less_often(
+    short_tmp: Path,
+) -> None:
+    class Waits(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waits: list[float | None] = []
+
+        def wait(self, timeout: float | None = None) -> bool:
+            if threading.current_thread().name == "dash":  # the public dashboard's loop
+                self.waits.append(timeout)
+            return super().wait(timeout)
+
+    run = PublicRun(short_tmp, fw_fail="sudo: a password is required")
+    run.stop = Waits()
+    run.thread = threading.Thread(target=run.daemon.serve, args=(run.stop,), daemon=True)
+    run.start()
+    try:
+        run.wait(lambda: len(run.stop.waits) >= 4)
+    finally:
+        run.close()
+    # retry_seconds (0.05) first, then each failure in a row doubles the wait.
+    assert run.stop.waits[:4] == [0.05, 0.1, 0.2, 0.4], run.stop.waits
+    assert daemon.MAX_RETRY_SECONDS == 300.0
+
+
+def test_the_socket_takes_a_new_password_and_unblocks_without_a_restart(
+    short_tmp: Path,
+) -> None:
+    from vpstream import login
+    from vpstream.tests.test_login import verifier
+
+    run = PublicRun(short_tmp).start()
+    try:
+        run.wait_for_dashboard()
+        auth = run.daemon.login
+        assert auth is not None
+        old_secret, old_key = auth.device_secret, auth.verifier
+        auth.limiter.failed(login.Who("192.0.2.1"))
+        login.write_verifier(run.paths.dashboard_key, verifier("a brand new password"))
+        info = client.call(run.paths.socket, "POST", "dashboard/reload", {})
+        assert info["password"] is True and "stream" in info
+        assert auth.verifier != old_key and auth.device_secret != old_secret
+        assert run.paths.device_key.read_bytes() == auth.device_secret
+        assert auth.limiter.wait(login.Who("192.0.2.1")) == 0
+        for _ in range(login.FAILS_PER_ADDRESS):
+            auth.limiter.failed(login.Who("192.0.2.1"))
+        client.call(run.paths.socket, "POST", "dashboard/unblock", {})
+        assert auth.limiter.wait(login.Who("192.0.2.1")) == 0
+        assert run.events.count("start") == 1, "the dashboard was not restarted"
+        # Only the command line's socket takes these, never the dashboard's own.
+        conn = client._UnixConnection(run.paths.dashboard_socket, 5)
+        conn.request(
+            "POST",
+            f"{api.API}/dashboard/unblock",
+            body="{}",
+            headers={"Content-Type": "application/json", "Connection": "close"},
+        )
+        assert conn.getresponse().status == 401
+        conn.close()
+    finally:
+        run.close()
+
+
+def test_a_tailnet_daemon_has_no_password_to_take(running: Running) -> None:
+    with pytest.raises(client.DaemonRefused):
+        client.call(running.paths.socket, "POST", "dashboard/reload", {})

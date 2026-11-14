@@ -215,7 +215,7 @@ def test_cli_doctor_prints_the_report_and_exits_by_it(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str, code: int
 ) -> None:
     check = doctor.Check("caddy", status, "detail here", "the fix")  # type: ignore[arg-type]
-    monkeypatch.setattr(doctor, "run_checks", lambda runner: [check])
+    monkeypatch.setattr(doctor, "run_checks", lambda runner, status: [check])
     assert cli.main(["doctor"]) == code
     assert "caddy  detail here" in capsys.readouterr().out
 
@@ -322,3 +322,103 @@ def test_the_caddy_packages_own_service_is_a_warning(tmp_path: Path) -> None:
     runner, kwargs = _host(tmp_path / "other", without)
     runner.on("systemctl", "is-active", "--quiet", "caddy", returncode=0)
     assert "caddy service" not in _by_name(doctor.run_checks(runner, **kwargs))
+
+
+# --- the public dashboard
+
+
+def _public(tmp_path: Path, available: tuple[str, ...] = ALL_TOOLS) -> tuple[FakeRunner, dict]:
+    runner, kwargs = _host(tmp_path, available)
+    paths = kwargs["paths"]
+    paths.config_file.parent.mkdir(parents=True)
+    paths.config_file.write_text("[dashboard]\npublic = true\n")
+    from vpstream import login
+    from vpstream.tests.test_login import verifier
+
+    key = paths.dashboard_key
+    login.write_verifier(key, verifier())
+    key.chmod(0o640)
+    kwargs["owner_uid"] = os.getuid()
+    return runner, kwargs
+
+
+LIVE = {
+    "dashboard": {"mode": "public", "port_state": "open", "problem": None, "certificate": "AB:CD"}
+}
+
+
+def test_a_public_dashboard_needs_no_tailscale(tmp_path: Path) -> None:
+    without = tuple(t for t in ALL_TOOLS if t != "tailscale")
+    runner, kwargs = _public(tmp_path, without)
+    checks = _by_name(doctor.run_checks(runner, status=LIVE, **kwargs))
+    assert checks["tailscale"].status == "warning" and "public" in checks["tailscale"].detail
+    assert not {"tailscale up", "tailnet https"} & set(checks)
+    assert checks["dashboard"].status == "ok" and "public" in checks["dashboard"].detail
+    assert checks["dashboard password"].status == "ok"
+    assert checks["dashboard port"] == doctor.Check("dashboard port", "ok", "open")
+    assert "AB:CD" in checks["dashboard certificate"].detail
+    assert not [c for c in runner.calls if c[0] == "tailscale"]
+
+
+def test_a_tailnet_dashboard_still_needs_tailscale(tmp_path: Path) -> None:
+    without = tuple(t for t in ALL_TOOLS if t != "tailscale")
+    runner, kwargs = _host(tmp_path, without)
+    assert _by_name(doctor.run_checks(runner, **kwargs))["tailscale"].status == "problem"
+
+
+@pytest.mark.parametrize(
+    ("mode", "status"), [(0o640, "ok"), (0o644, "problem"), (0o660, "problem")]
+)
+def test_the_password_file_must_be_hidden_from_other_users(
+    tmp_path: Path, mode: int, status: str
+) -> None:
+    runner, kwargs = _public(tmp_path)
+    kwargs["paths"].dashboard_key.chmod(mode)
+    check = _by_name(doctor.run_checks(runner, status=LIVE, **kwargs))["dashboard password"]
+    assert check.status == status, check
+    if status == "problem":
+        assert check.fix == "sudo vpstream dash-pass"
+
+
+def test_a_public_dashboard_without_a_password_is_a_problem(tmp_path: Path) -> None:
+    runner, kwargs = _public(tmp_path)
+    kwargs["paths"].dashboard_key.unlink()
+    checks = doctor.run_checks(runner, status=LIVE, **kwargs)
+    assert _by_name(checks)["dashboard password"].status == "problem"
+    assert doctor.exit_code(checks) == 1
+
+
+def test_without_the_daemon_the_port_is_read_from_the_helpers_record(tmp_path: Path) -> None:
+    runner, kwargs = _public(tmp_path)
+    record = kwargs["paths"].open_dashboard_ports_file
+    check = _by_name(doctor.run_checks(runner, status=None, **kwargs))["dashboard port"]
+    assert check.status == "warning" and "did not open 1338" in check.detail
+    record.write_text("1338\n")
+    check = _by_name(doctor.run_checks(runner, status=None, **kwargs))["dashboard port"]
+    assert "opened 1338" in check.detail
+
+
+def test_a_public_dashboard_that_does_not_come_up_is_a_problem(tmp_path: Path) -> None:
+    runner, kwargs = _public(tmp_path)
+    down = {"dashboard": {"mode": "public", "port_state": "closed", "problem": "caddy failed"}}
+    checks = _by_name(doctor.run_checks(runner, status=down, **kwargs))
+    assert (
+        checks["dashboard port"].status == "problem"
+        and "caddy failed" in checks["dashboard port"].detail
+    )
+    assert checks["dashboard certificate"].status == "warning"
+
+
+@pytest.mark.parametrize("text", ["garbage", "pbkdf2-sha256$...", ""])
+def test_a_password_file_the_daemon_cannot_use_is_a_problem(tmp_path: Path, text: str) -> None:
+    runner, kwargs = _public(tmp_path)
+    kwargs["paths"].dashboard_key.write_text(text)
+    check = _by_name(doctor.run_checks(runner, status=LIVE, **kwargs))["dashboard password"]
+    assert check.status == "problem" and "nobody can log in" in check.detail
+
+
+def test_the_daemon_saying_it_has_no_password_is_a_problem(tmp_path: Path) -> None:
+    runner, kwargs = _public(tmp_path)
+    live = {"dashboard": {**LIVE["dashboard"], "password": False}}
+    check = _by_name(doctor.run_checks(runner, status=live, **kwargs))["dashboard password"]
+    assert check.status == "problem" and check.fix == "sudo vpstream dash-pass"

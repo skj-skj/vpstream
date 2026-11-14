@@ -139,8 +139,8 @@ class Control:
 
     def base_url(self) -> str:
         if not self._host:  # asked again while there is no route yet
-            self._host = self.config.stream_host or net.outgoing_address()
-        return f"http://{net.url_host(self._host)}:{self.config.stream_port}"
+            self._host = net.public_host(self.config.stream_host)
+        return net.url("http", self._host, self.config.stream_port)
 
     def _running(self) -> Stream:
         if self.stream is None:

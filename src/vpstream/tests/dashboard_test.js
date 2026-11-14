@@ -1,20 +1,27 @@
 // Runs the real dashboard page and script in node, against a stand-in API, and checks what
-// it shows and what it sends, with the small DOM of dom.js. Usage: node dashboard_test.js
-// PAGE SCRIPT
+// it shows and what it sends, with the small DOM of dom.js; the same for the public
+// dashboard's login page. Usage: node dashboard_test.js PAGE SCRIPT LOGIN_PAGE LOGIN_SCRIPT
+// PBKDF2_SCRIPT
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
+const nodeCrypto = require("crypto");
 const { Node, parse, newDocument, settle, runner, eq, ok, text } = require("./dom.js");
 
-const [pagePath, scriptPath] = process.argv.slice(2);
+const [pagePath, scriptPath, loginPagePath, loginScriptPath, pbkdf2Path] = process.argv.slice(2);
 const PAGE = fs.readFileSync(pagePath, "utf8");
 const SCRIPT = fs.readFileSync(scriptPath, "utf8");
+const LOGIN_PAGE = fs.readFileSync(loginPagePath, "utf8");
+const LOGIN_SCRIPT = fs.readFileSync(loginScriptPath, "utf8");
+const PBKDF2 = fs.readFileSync(pbkdf2Path, "utf8");
 
 // --- one page load, with a stand-in API
 
 function load(answers) {
   const root = parse(PAGE);
   const sent = [];
+  const headers = [];
+  const location = { replaced: [], replace(url) { this.replaced.push(url); } };
   const document = newDocument(root);
   const timers = [];
   const intervals = [];
@@ -22,6 +29,7 @@ function load(answers) {
     const route = url.replace("/api/v1/", "");
     const body = options && options.body ? JSON.parse(options.body) : undefined;
     sent.push({ method: options.method, route, body });
+    headers.push(options.headers || {});
     let answer = answers[route];
     if (typeof answer === "function") { answer = answer(body); }
     if (answer === undefined) { return Promise.reject(new Error("no answer for " + route)); }
@@ -30,6 +38,7 @@ function load(answers) {
     return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(data) });
   };
   const window = {
+    location,
     localStorage: { getItem: () => null, setItem() {} },
     isSecureContext: false,
     setInterval: (fn) => { intervals.push(fn); return intervals.length; },
@@ -41,8 +50,68 @@ function load(answers) {
   window.window = window;
   vm.createContext(context);
   vm.runInContext(SCRIPT, context);
-  return { root, sent, $: (id) => root.querySelector("#" + id), posts: () => sent.filter((s) => s.method === "POST"),
+  return { root, sent, headers, location, $: (id) => root.querySelector("#" + id), posts: () => sent.filter((s) => s.method === "POST"),
     refresh: () => intervals.forEach((fn) => fn()) };
+}
+
+// --- the login page, with a stand-in API and, when `secure`, node's WebCrypto
+
+function loadLogin(answers, options) {
+  const opts = options || {};
+  const root = parse(LOGIN_PAGE);
+  const sent = [];
+  const document = newDocument(root);
+  const location = { replaced: [], replace(url) { this.replaced.push(url); } };
+  const fetch = (url, fetchOptions) => {
+    const route = url.replace("/api/v1/", "");
+    sent.push({ method: fetchOptions.method, route, raw: fetchOptions.body, body: JSON.parse(fetchOptions.body) });
+    let answer = answers[route];
+    if (typeof answer === "function") { answer = answer(JSON.parse(fetchOptions.body)); }
+    const status = answer.status || 200;
+    const data = answer.data || answer;
+    return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(data) });
+  };
+  let subtle = null;
+  if (opts.secure) {
+    subtle = opts.subtleFails
+      ? { importKey: () => Promise.reject(new Error("no PBKDF2 here")) }
+      : nodeCrypto.webcrypto.subtle;
+  }
+  const window = {
+    location,
+    isSecureContext: !!opts.secure,
+    crypto: subtle ? { subtle } : undefined,
+    setTimeout: (fn) => { setImmediate(fn); return 0; },
+  };
+  const context = { window, document, fetch, Node, console, JSON, Math, Object, Array, String,
+    Number, Error, Promise, Uint8Array, Int32Array };
+  window.window = window;
+  vm.createContext(context);
+  vm.runInContext(PBKDF2, context);
+  vm.runInContext(LOGIN_SCRIPT, context);
+  return { root, sent, location, $: (id) => root.querySelector("#" + id) };
+}
+
+// What a browser that knows `password` answers to `challenge`, worked out with node's own crypto.
+function expectedProof(password, challenge) {
+  const key = nodeCrypto.pbkdf2Sync(Buffer.from(password.normalize("NFC"), "utf8"),
+    Buffer.from(challenge.salt, "hex"), challenge.iterations, 32, "sha256");
+  return nodeCrypto.createHmac("sha256", key).update(challenge.label + challenge.nonce).digest("hex");
+}
+
+const CHALLENGE = { nonce: "ab".repeat(32), salt: "00112233445566778899aabbccddeeff", iterations: 1000,
+  label: "vpstream-login:" };
+
+// Submit the form and wait until the page is done: gone on, or ready for another try.
+// WebCrypto works in node's thread pool, so this waits on the clock, not only on promises.
+async function submit(page, password) {
+  page.$("password").value = password;
+  page.$("login").dispatch("submit");
+  for (let i = 0; i < 300; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    if (page.location.replaced.length || !page.$("go").disabled) { return; }
+  }
+  throw new Error("the login page never finished");
 }
 
 
@@ -513,6 +582,115 @@ const { check, finish } = runner();
     await settle();
     ok(text(page.$("devices")).includes("No stream") && text(page.$("policytext")).includes("No stream"));
     ok(text(page.$("jobs")).includes("Nothing to do"));
+  });
+
+  // --- the public dashboard's login page, and the dashboard behind it
+
+  await check("login: the page answers the challenge and the password never leaves it", async () => {
+    const password = "caf\u00e9 is open \u{1f600}";
+    for (const opts of [{}, { secure: true }, { secure: true, subtleFails: true }]) {
+      const page = loadLogin({ "login/challenge": CHALLENGE, login: { csrf: "t", expires_in: 1 } }, opts);
+      await submit(page, password);
+      eq(page.sent.map((s) => s.route), ["login/challenge", "login"], JSON.stringify(opts));
+      eq(page.sent[1].body, { nonce: CHALLENGE.nonce, proof: expectedProof(password, CHALLENGE) }, JSON.stringify(opts));
+      ok(page.sent.every((s) => !s.raw.includes(password) && !s.raw.includes("caf")), "no password on the wire");
+      eq(page.location.replaced, ["/"]);
+      eq(page.$("password").value, "");
+    }
+  });
+
+  await check("login: a password typed decomposed is the same password", async () => {
+    const page = loadLogin({ "login/challenge": CHALLENGE, login: {} });
+    await submit(page, "cafe\u0301 is open");
+    eq(page.sent[1].body.proof, expectedProof("caf\u00e9 is open", CHALLENGE));
+  });
+
+  await check("login: a wrong password says so and lets you try again", async () => {
+    const page = loadLogin({ "login/challenge": CHALLENGE, login: { status: 401, data: { error: "wrong password" } } });
+    await submit(page, "not it at all");
+    eq(text(page.$("message")), "wrong password");
+    eq(page.$("message").className, "small error");
+    eq(page.$("go").disabled, false);
+    eq(page.$("password").value, "");
+    eq(page.location.replaced, []);
+  });
+
+  await check("login: a locked-out address is told how long to wait, without a second call", async () => {
+    const page = loadLogin({ "login/challenge": { status: 429, data: { error: "too many wrong passwords; try again in about 15 min" } } });
+    await submit(page, "anything at all");
+    ok(text(page.$("message")).includes("15 min"));
+    eq(page.sent.map((s) => s.route), ["login/challenge"]);
+  });
+
+  await check("login: an empty password sends nothing", async () => {
+    const page = loadLogin({});
+    await submit(page, "");
+    eq(page.sent, []);
+  });
+
+  await check("login: every element the script looks up is on the page", async () => {
+    const ids = Array.from(LOGIN_SCRIPT.matchAll(/\$\("([a-z]+)"\)/g), (m) => m[1]);
+    ok(ids.length >= 3);
+    const page = loadLogin({});
+    ids.forEach((id) => ok(page.$(id), "missing #" + id));
+  });
+
+  await check("public dashboard: changes carry the token, and Log out ends the session", async () => {
+    const page = load({ session: { login: true, csrf: "tok" }, status: status(), "stream/stop": status(), logout: { login: true } });
+    await settle();
+    eq(page.$("logout").hidden, false);
+    page.$("logout").click();
+    await settle(); await settle();
+    const i = page.sent.findIndex((s) => s.route === "logout");
+    ok(i >= 0, "logout sent");
+    eq(page.headers[i]["X-Vpstream-Csrf"], "tok");
+    eq(page.location.replaced, ["/login"]);
+    const gets = page.sent.map((s, n) => [s, page.headers[n]]).filter(([s]) => s.method === "GET");
+    ok(gets.every(([, h]) => !("X-Vpstream-Csrf" in h)), "reads carry no token");
+  });
+
+  await check("public dashboard: a session asked for in vain at load is asked again before a change", async () => {
+    let asked = 0;
+    const page = load({
+      session: () => { asked += 1; return asked === 1 ? { status: 502, data: { error: "bad gateway" } } : { login: true, csrf: "tok" }; },
+      status: status({ stream: stream() }), devices: status({ stream: stream() }),
+    });
+    await settle();
+    Array.from(page.$("waiters").querySelector(".item").querySelectorAll("button")).find((b) => text(b) === "Let in").click();
+    await settle(); await settle(); await settle();
+    eq(asked, 2);
+    const i = page.sent.findIndex((s) => s.route === "devices");
+    ok(i >= 0, "the change was sent");
+    eq(page.headers[i]["X-Vpstream-Csrf"], "tok");
+    eq(page.location.replaced, []);
+  });
+
+  await check("public dashboard: an ended session goes back to the login page", async () => {
+    const page = load({ session: { status: 401, data: { error: "log in first", login: true } },
+      status: { status: 401, data: { error: "log in first", login: true } } });
+    await settle();
+    ok(page.location.replaced.includes("/login"), JSON.stringify(page.location.replaced));
+  });
+
+  await check("tailnet dashboard: no login, no Log out, no token", async () => {
+    const page = load({ session: { login: false }, status: status({ stream: stream() }), devices: status({ stream: stream() }) });
+    await settle();
+    eq(page.$("logout").hidden, true);
+    Array.from(page.$("waiters").querySelector(".item").querySelectorAll("button")).find((b) => text(b) === "Let in").click();
+    await settle();
+    const i = page.sent.findIndex((s) => s.route === "devices");
+    ok(i >= 0 && !("X-Vpstream-Csrf" in page.headers[i]));
+    eq(page.location.replaced, []);
+  });
+
+  await check("a 400 that is not about the login does not leave the page", async () => {
+    const page = load({ session: { login: true, csrf: "tok" }, status: status({ stream: stream() }),
+      devices: { status: 400, data: { error: "no such device" } } });
+    await settle();
+    Array.from(page.$("waiters").querySelector(".item").querySelectorAll("button")).find((b) => text(b) === "Let in").click();
+    await settle(); await settle();
+    eq(page.location.replaced, []);
+    ok(text(page.$("toasts")).includes("no such device"));
   });
 
   finish();

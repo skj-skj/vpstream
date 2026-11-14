@@ -9,11 +9,11 @@ import os
 import stat
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from vpstream import config, firewall, tailscale
+from vpstream import config, firewall, login, tailscale
 from vpstream.tools import PACKAGES, Runner
 
 Status = Literal["ok", "problem", "warning"]
@@ -145,7 +145,9 @@ def check_dashboard(runner: Runner, port: int) -> Check:
     except tailscale.TailscaleDown as exc:
         return Check("dashboard", "problem", str(exc))
     if proxy == tailscale.local_target(port):
-        return Check("dashboard", "ok", f"published by tailscale serve on port {port}")
+        return Check(
+            "dashboard", "ok", f"tailnet only: published by tailscale serve on port {port}"
+        )
     if proxy is None:
         return Check("dashboard", "warning", "not published on the tailnet", "sudo vpstream init")
     return Check(
@@ -154,6 +156,64 @@ def check_dashboard(runner: Runner, port: int) -> Check:
         f"tailscale serve already uses port {port} for {proxy or 'another service'}",
         "set another port under [dashboard] in the configuration, then: sudo vpstream init",
     )
+
+
+def check_password_file(path: Path, owner_uid: int = 0) -> Check:
+    """The public dashboard's verifier: there, root's, hidden from other users, and one the
+    daemon can use. Read as this user, who is normally in the service's group."""
+    name, fix = "dashboard password", "sudo vpstream dash-pass"
+    if not path.exists():
+        return Check(name, "problem", "none is set, so nobody can log in", fix)
+    # Root's and written by root only, as the firewall helper wants of its files.
+    if problem := firewall.config_file_problem(path, owner_uid):
+        return Check(name, "problem", problem, fix)
+    if path.stat().st_mode & stat.S_IRWXO:
+        return Check(
+            name, "problem", f"{path} can be read by every user; it is enough to log in", fix
+        )
+    try:
+        login.load_verifier(path)
+    except login.PasswordError as exc:
+        if isinstance(exc.__cause__, PermissionError):
+            return Check(name, "warning", f"set, but cannot be read as this user: {exc}")
+        return Check(name, "problem", f"{exc}; nobody can log in", fix)
+    return Check(name, "ok", f"set ({path}, only a verifier)")
+
+
+def check_public_dashboard(
+    paths: config.Paths, port: int, status: dict[str, Any] | None, owner_uid: int = 0
+) -> list[Check]:
+    """The public dashboard: its password, its port and its certificate. The last two are
+    the daemon's to know; without it the port is read from the helper's record."""
+    checks = [
+        Check("dashboard", "ok", f"public on port {port}: HTTPS through Caddy, with a password"),
+        check_password_file(paths.dashboard_key, owner_uid),
+    ]
+    dash = (status or {}).get("dashboard") or {}
+    if dash.get("password") is False and checks[-1].status == "ok":
+        checks[-1] = Check(
+            checks[-1].name, "problem", "the daemon has none it can use", "sudo vpstream dash-pass"
+        )
+    if dash.get("mode") != "public":
+        opened = port in firewall.recorded_ports(paths.open_dashboard_ports_file, owner_uid)
+        detail = "the service does not answer, or still runs the tailnet mode; "
+        detail += f"the firewall helper {'opened' if opened else 'did not open'} {port}/tcp"
+        checks.append(Check("dashboard port", "warning", detail, "sudo vpstream init"))
+        return checks
+    state = str(dash.get("port_state") or "unknown")
+    if dash.get("problem"):
+        checks.append(Check("dashboard port", "problem", f"{state}: {dash['problem']}"))
+    else:
+        checks.append(Check("dashboard port", "ok" if state == "open" else "warning", state))
+    if dash.get("certificate"):
+        checks.append(
+            Check("dashboard certificate", "ok", f"authority SHA-256 {dash['certificate']}")
+        )
+    else:
+        checks.append(
+            Check("dashboard certificate", "warning", "not made yet; Caddy makes it when it starts")
+        )
+    return checks
 
 
 def check_fonts(runner: Runner) -> list[Check]:
@@ -272,11 +332,27 @@ def run_checks(
     systemd_marker: Path = Path("/run/systemd/system"),
     ufw_conf: Path = Path("/etc/ufw/ufw.conf"),
     unit_file: Path = Path("/etc/systemd/system/vpstream.service"),
+    status: dict[str, Any] | None = None,
+    owner_uid: int = 0,
 ) -> list[Check]:
-    """Run every check. Nothing here changes the host or needs root."""
+    """Run every check. Nothing here changes the host or needs root. `status` is what the
+    daemon said, when it answers."""
     paths = paths or config.Paths()
+    try:
+        cfg: config.Config | None = config.load(paths.config_file)
+    except config.ConfigError:
+        cfg = None
+    public = cfg is not None and cfg.dashboard_public
     checks = [check_python(python_version or tuple(sys.version_info[:3]))]
-    checks += [check_tool(runner, tool) for tool in TOOLS]
+    for tool in TOOLS:
+        check = check_tool(runner, tool)
+        if public and tool.name == "tailscale" and check.status == "problem":
+            check = replace(
+                check,
+                status="warning",
+                detail="not found; not needed while the dashboard is public",
+            )
+        checks.append(check)
     found = {c.name for c in checks if c.status == "ok"}
     if "systemctl" in found:
         checks.append(check_systemd(systemd_marker))
@@ -284,7 +360,7 @@ def run_checks(
             checks.append(extra)
     if "ufw" in found:
         checks.append(check_ufw_enabled(ufw_conf))
-    if "tailscale" in found:
+    if "tailscale" in found and not public:
         checks.append(check_tailscale(runner))
         checks.append(check_tailnet_https(runner))
     checks += check_fonts(runner)
@@ -295,13 +371,10 @@ def run_checks(
     checks.append(check_config(paths.config_file))
     if "systemctl" in found:
         checks.append(check_service(runner, unit_file))
-    if "tailscale" in found and unit_file.exists():
-        try:
-            port = config.load(paths.config_file).dashboard_port
-        except config.ConfigError:
-            port = None
-        if port is not None:
-            checks.append(check_dashboard(runner, port))
+    if cfg is not None and public:
+        checks += check_public_dashboard(paths, cfg.dashboard_port, status, owner_uid)
+    elif cfg is not None and "tailscale" in found and unit_file.exists():
+        checks.append(check_dashboard(runner, cfg.dashboard_port))
     return checks
 
 
