@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.13.1 (2026-11-14)
+
+### Bug Fixes
+
+- Selftest on hosts with a global IPv6 address and a group-writable umask
+  ([#23](https://github.com/skj-skj/vpstream/pull/23),
+  [`c839e48`](https://github.com/skj-skj/vpstream/commit/c839e486b8ef4f37a3fbf482fedda18d73e19194))
+
+
 ## v0.13.0 (2026-11-14)
 
 ### Features
