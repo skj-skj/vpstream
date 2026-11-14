@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.13.0 (2026-11-14)
+
+### Features
+
+- Public dashboard over HTTPS with a password (--no-tailscale)
+  ([#22](https://github.com/skj-skj/vpstream/pull/22),
+  [`33fd9e8`](https://github.com/skj-skj/vpstream/commit/33fd9e8a630fa5b2dc1d82f77eec3422582cd569))
+
+
 ## v0.12.0 (2026-11-12)
 
 ### Features
