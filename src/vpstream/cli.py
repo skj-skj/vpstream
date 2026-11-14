@@ -133,12 +133,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from vpstream import doctor
     from vpstream.tools import SystemRunner
 
-    checks = doctor.run_checks(SystemRunner())
+    checks = doctor.run_checks(SystemRunner(), status=_status_quietly())
     print(doctor.format_report(checks))
     return doctor.exit_code(checks)
 
 
 def _dashboard_line(dash: dict[str, Any]) -> str:
+    if dash.get("mode") == "public":
+        notes = [f"public, port {dash.get('port_state') or 'unknown'}"]
+        if not dash.get("password"):
+            notes.append("NO PASSWORD: sudo vpstream dash-pass")
+        line = f"{dash.get('url') or dash.get('problem')} ({'; '.join(notes)})"
+        if dash.get("certificate"):
+            line += f"\n              certificate authority SHA-256 {dash['certificate']}"
+        return line
     if dash.get("url"):
         return f"{dash['url']} (Tailscale only)"
     if dash.get("address"):
@@ -773,9 +781,11 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     # The helper always works on the real host, so a daemon tried out under $VPSTREAM_ROOT
     # gets none: it must not close the real stream port.
     trial = bool(os.environ.get(config.ROOT_ENV))
-    fw = None if trial else firewall.SudoFirewall(runner, firewall.helper_path())
+    helper = firewall.helper_path()
+    fw = None if trial else firewall.SudoFirewall(runner, helper)
+    dash_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.DASHBOARD)
     try:
-        return daemon.run(config.load(paths.config_file), paths, runner, fw)
+        return daemon.run(config.load(paths.config_file), paths, runner, fw, dash_fw)
     except (config.ConfigError, daemon.DaemonError) as exc:
         return _error(str(exc))
     except OSError as exc:  # the run folder cannot be made, for example
@@ -789,13 +799,89 @@ def _service(args: argparse.Namespace) -> Any:
     return service.Service(SystemRunner(), sudo_user=os.environ.get("SUDO_USER"))
 
 
+def _password(args: argparse.Namespace, ask: bool) -> str | None:
+    """The dashboard password from --dash-pass, --dash-pass-file (- for standard input), or
+    asked twice on the terminal when `ask`. None when there is none to take. Raises
+    ValueError with what is wrong."""
+    if args.dash_pass is not None:
+        print(
+            "note: a password given on the command line stays in your shell history; "
+            "--dash-pass-file or the prompt keep it out",
+            file=sys.stderr,
+        )
+        return str(args.dash_pass)
+    if args.dash_pass_file is not None:
+        try:
+            if args.dash_pass_file == "-":
+                first = sys.stdin.readline()
+            else:
+                with open(args.dash_pass_file, encoding="utf-8") as fh:
+                    first = fh.readline()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"cannot read the password file: {exc}") from exc
+        password = first.rstrip("\r\n")
+        if not password:
+            raise ValueError("the password file's first line is empty")
+        return password
+    if not ask or not sys.stdin.isatty():
+        return None
+    import getpass
+
+    password = getpass.getpass("New dashboard password: ")
+    if getpass.getpass("The same again: ") != password:
+        raise ValueError("the two passwords are not the same")
+    return password
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     from vpstream import service
 
+    svc = _service(args)
     try:
-        _service(args).init()
+        public = svc.dashboard_public(args.public)
+        given = args.dash_pass is not None or args.dash_pass_file is not None
+        if given and not public:
+            return _error("a password is for the public dashboard only (--no-tailscale)", 2)
+        # Not asked for a password that a refusal for want of root would throw away.
+        ask = os.geteuid() == 0 and svc.wants_password(public)
+        svc.init(public, _password(args, ask))
+    except ValueError as exc:
+        return _error(str(exc))
     except (service.ServiceError, OSError) as exc:
         return _error(str(exc))
+    return 0
+
+
+def cmd_dash_pass(args: argparse.Namespace) -> int:
+    from vpstream import service
+
+    if os.geteuid() != 0:
+        return _error("this needs root: sudo vpstream dash-pass")
+    try:
+        password = _password(args, ask=True)
+        if password is None:
+            return _error("no terminal to ask on; give the password with --dash-pass-file FILE", 2)
+        _service(args).set_password(password)
+    except ValueError as exc:
+        return _error(str(exc))
+    except (service.ServiceError, OSError) as exc:
+        return _error(str(exc))
+    return 0
+
+
+def cmd_dash_unblock(args: argparse.Namespace) -> int:
+    if _daemon("dashboard/unblock", {}) is None:
+        return 1
+    print("Failed logins are forgotten: the dashboard takes logins from everyone again.")
+    return 0
+
+
+def cmd_dashboard_cert(args: argparse.Namespace) -> int:
+    info = _daemon("certificate")
+    if info is None:
+        return 1
+    print(f"SHA-256 {info['fingerprint']}", file=sys.stderr)
+    print(info["pem"], end="" if info["pem"].endswith("\n") else "\n")
     return 0
 
 
@@ -848,6 +934,18 @@ def cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _password_options(parser: argparse.ArgumentParser) -> None:
+    given = parser.add_mutually_exclusive_group()
+    given.add_argument(
+        "--dash-pass", metavar="PASSWORD", help="the dashboard password (stays in shell history)"
+    )
+    given.add_argument(
+        "--dash-pass-file",
+        metavar="FILE",
+        help="read the password from a file's first line (- for stdin)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vpstream", description="On-demand video streaming from a VPS."
@@ -869,9 +967,35 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="check this host for the programs vpstream needs")
     d.set_defaults(func=cmd_doctor)
 
-    sub.add_parser(
+    ini = sub.add_parser(
         "init", help="set the service up on this host (as root; safe to run again)"
-    ).set_defaults(func=cmd_init)
+    )
+    where = ini.add_mutually_exclusive_group()
+    where.add_argument(
+        "--no-tailscale",
+        dest="public",
+        action="store_const",
+        const=True,
+        help="put the dashboard on the internet, over HTTPS with a password",
+    )
+    where.add_argument(
+        "--tailscale",
+        dest="public",
+        action="store_const",
+        const=False,
+        help="put the dashboard back on the tailnet only (the default)",
+    )
+    _password_options(ini)
+    ini.set_defaults(func=cmd_init, public=None)
+    dp = sub.add_parser("dash-pass", help="set a new password for the public dashboard (as root)")
+    _password_options(dp)
+    dp.set_defaults(func=cmd_dash_pass)
+    sub.add_parser(
+        "dashboard-cert", help="print the public dashboard's certificate authority, to install"
+    ).set_defaults(func=cmd_dashboard_cert)
+    sub.add_parser(
+        "dash-unblock", help="forget the public dashboard's failed logins, to log in again"
+    ).set_defaults(func=cmd_dash_unblock)
     un = sub.add_parser("uninstall", help="remove what init created (as root)")
     un.add_argument("--purge", action="store_true", help="also remove the prepared videos")
     un.add_argument("--yes", action="store_true", help="do not ask first")

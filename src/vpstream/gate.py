@@ -17,7 +17,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
-from vpstream.checks import is_finite
+from vpstream.checks import is_finite, is_token
 from vpstream.clients import Client, name_value
 from vpstream.net import normal_ip
 
@@ -34,7 +34,6 @@ MAX_USER_AGENT = 200
 MAX_MISSES = 20  # wrong addresses one viewer may try before it is shut out as a guesser
 MAX_GUESSERS = 5000
 COOKIE = "vpstream"
-_COOKIE_VALUE = re.compile(r"[A-Za-z0-9_-]{43}")  # secrets.token_urlsafe(32)
 _BROWSER_ID = re.compile(r"b-[0-9a-f]{6}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 
@@ -134,7 +133,7 @@ class Devices:
 
     def browser(self, cookie: str | None) -> Device | None:
         """The browser that holds this cookie, or None."""
-        if not cookie or not _COOKIE_VALUE.fullmatch(cookie):
+        if not is_token(cookie):
             return None
         found = self._tokens.get(_hash(cookie))
         return self._rows.get(found) if found else None

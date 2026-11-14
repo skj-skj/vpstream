@@ -1,7 +1,8 @@
 # vpstream
 
 On-demand video streaming from a VPS. The public port is open only while a stream runs, and
-everything is controlled over SSH or a dashboard on your tailnet.
+everything is controlled over SSH or a dashboard on your tailnet (or, if you choose, a public
+dashboard over HTTPS behind a password).
 
 Status: early development. Streams a file or a folder as it is, for players such as VLC and
 mpv (direct mode), or as prepared HLS versions with a player page for TV browsers (browser
@@ -9,7 +10,8 @@ mode).
 
 ## Install
 
-Needs Linux, Python 3.12+, Caddy, ufw, Tailscale (with HTTPS certificates) and systemd.
+Needs Linux, Python 3.12+, Caddy, ufw, systemd, and Tailscale with HTTPS certificates (not
+needed for a public dashboard).
 ffmpeg is used by browser mode, `bench` and `caps`; mkvtoolnix and the `acl` package are
 optional (see below). `vpstream doctor` checks all of it and prints the fix for anything missing.
 
@@ -38,6 +40,10 @@ prefix and `pipx upgrade vpstream`, then `sudo vpstream init` again.
 | `vpstream revoke` | Takes back file access a stream that ended by itself left behind |
 | `vpstream doctor` | Checks this host |
 | `sudo vpstream init` / `uninstall` | Sets the service up, or removes it (`--purge` also the cache) |
+| `sudo vpstream init --no-tailscale` / `--tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
+| `sudo vpstream dash-pass` | Sets a new password for the public dashboard (logs every browser out; a stream goes on) |
+| `vpstream dash-unblock` | Forgets the public dashboard's failed logins, to log in from a new browser |
+| `vpstream dashboard-cert` | Prints the public dashboard's certificate authority, to install on your phone |
 | `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles |
 | `vpstream caps` | Serves a page that tests what a TV browser can play |
 | `vpstream install ffmpeg` / `update ffmpeg` | Installs or updates a current static ffmpeg build |
@@ -114,6 +120,35 @@ Restart the service after a change.
 The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale serve` at
 `https://<tailnet name>:1338/`. The stream port is opened and closed by a small root helper,
 `vpstream-fw`, which only runs `ufw allow` / `ufw delete allow` for that one port.
+
+## Public dashboard
+
+`sudo vpstream init --no-tailscale` asks for a password (or takes `--dash-pass-file FILE`, or
+`--dash-pass`, which stays in shell history) and puts the dashboard on the internet at
+`https://<ip>:1338/`, through a Caddy of its own with a certificate from a local authority
+(`tls internal`). Only a salted PBKDF2 verifier of the password is kept, in
+`/etc/vpstream/dashboard.key` (readable by root and the service's group only).
+
+- **Certificate:** what Caddy serves lasts 12 hours and renews itself, so `init` prints the
+  authority's SHA-256 instead. Install the authority on your phone once, before the first
+  login (`vpstream dashboard-cert > vpstream-ca.crt`; Android: Settings, Security, Install a
+  certificate, CA certificate) and the browser trusts the dashboard with no warning. Each
+  public address, IPv4 and IPv6, gets a certificate of its own.
+- **Login:** challenge-response. The page derives a key from the password (WebCrypto, or plain
+  JavaScript where the page has none) and answers a one-time nonce with an HMAC of it; the
+  password never crosses the wire and a captured answer cannot be used again. That protects
+  against someone who only listens. Before the authority is installed, someone who can change
+  the traffic could serve a fake login page, so install it first.
+- **Session:** a `__Host-` cookie (HTTPS only, HttpOnly, SameSite=Strict) for 12 hours, a CSRF
+  token on every change, and Log out. A restart of the service logs everyone out.
+- **Limits:** 5 wrong passwords from one address (one /64 for IPv6) in 15 minutes, or 50 from
+  all addresses in an hour, and logins wait. A browser that logged in before keeps a signed
+  device cookie (a year) and is counted on its own, so guessing from elsewhere does not lock
+  it out. The count survives restarts; `vpstream dash-unblock` and `dash-pass` clear it.
+- **Firewall:** the service opens the dashboard port in ufw while it serves it, and closes it
+  on stop, crash or reboot. Open it in your provider's firewall too, if it has one.
+- The command line keeps talking to the daemon over its socket, with no password.
+  `sudo vpstream init --tailscale` goes back: the password is removed and the port closed.
 
 ## Development
 

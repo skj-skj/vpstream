@@ -17,6 +17,7 @@ def _helper(argv: list[str], runner: FakeRunner, config_file: Path, **kwargs: ob
     options = {
         "config_file": config_file,
         "record_file": config_file.parent / "open-ports",
+        "dashboard_record_file": config_file.parent / "open-dashboard-ports",
         "euid": 0,
         "ufw": UFW,
         "owner_uid": ME,
@@ -262,3 +263,69 @@ def test_a_sudo_that_cannot_be_run_is_a_firewall_error() -> None:
     fw = firewall.SudoFirewall(NoSudo(), Path("/opt/x/bin/vpstream-fw"))
     with pytest.raises(firewall.FirewallError, match="could not close the stream port"):
         fw.close()
+
+
+# --- the dashboard port, in public mode only
+
+
+@pytest.fixture
+def public_config(config_file: Path) -> Path:
+    config_file.write_text("[stream]\nport = 2000\n[dashboard]\nport = 2001\npublic = true\n")
+    return config_file
+
+
+def test_dash_open_opens_the_dashboard_port_and_writes_it_down(public_config: Path) -> None:
+    runner = FakeRunner()
+    code, message = _helper(["dash-open"], runner, public_config)
+    assert code == 0 and "2001/tcp" in message, message
+    assert runner.calls == [[UFW, "allow", "2001/tcp"]]
+    assert firewall.recorded_ports(public_config.parent / "open-dashboard-ports", ME) == [2001]
+    assert not (public_config.parent / "open-ports").exists(), "the stream's record is apart"
+
+
+def test_dash_open_refuses_while_the_dashboard_is_on_the_tailnet(config_file: Path) -> None:
+    runner = FakeRunner()
+    code, message = _helper(["dash-open"], runner, config_file)
+    assert code == 1 and "not public" in message and runner.calls == []
+
+
+def test_dash_open_does_not_trust_a_config_others_can_write(public_config: Path) -> None:
+    public_config.chmod(0o666)
+    runner = FakeRunner()
+    code, message = _helper(["dash-open"], runner, public_config)
+    assert code == 1 and "writable" in message and runner.calls == []
+
+
+def test_dash_close_closes_only_what_dash_open_wrote_down(public_config: Path) -> None:
+    runner = FakeRunner()
+    code, message = _helper(["dash-close"], runner, public_config)
+    assert (code, runner.calls) == (0, []), "a rule it did not add is not its to remove"
+    assert "nothing to close" in message
+    _helper(["dash-open"], runner, public_config)
+    # The dashboard went back to the tailnet, or its port was changed, while it was open.
+    public_config.write_text("[dashboard]\nport = 2002\n")
+    runner.calls.clear()
+    code, _ = _helper(["dash-close"], runner, public_config)
+    assert code == 0 and runner.calls == [[UFW, "delete", "allow", "2001/tcp"]]
+    assert not (public_config.parent / "open-dashboard-ports").exists()
+
+
+def test_stream_close_leaves_the_dashboard_port_alone(public_config: Path) -> None:
+    runner = FakeRunner()
+    _helper(["dash-open"], runner, public_config)
+    _helper(["open"], runner, public_config)
+    runner.calls.clear()
+    _helper(["close"], runner, public_config)
+    assert runner.calls == [[UFW, "delete", "allow", "2000/tcp"]]
+    assert firewall.recorded_ports(public_config.parent / "open-dashboard-ports", ME) == [2001]
+
+
+def test_the_daemon_side_names_the_dashboard_actions() -> None:
+    runner = FakeRunner()
+    dash = firewall.SudoFirewall(runner, Path("/opt/v/bin/vpstream-fw"), firewall.DASHBOARD)
+    dash.open()
+    dash.close()
+    assert [c[-1] for c in runner.calls] == ["dash-open", "dash-close"]
+    runner.on("sudo", returncode=1, stderr="the dashboard is not public")
+    with pytest.raises(firewall.FirewallError, match="open the dashboard port: the dashboard"):
+        dash.open()

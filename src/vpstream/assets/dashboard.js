@@ -19,6 +19,8 @@
   var RECENT = 8;
   var ticked = {};  // the viewers a change is for: device id -> true
   var menuKey = "";  // what the audio and subtitle lists hold now
+  var CSRF_HEADER = "X-Vpstream-Csrf";
+  var session = null;  // the public dashboard's login, once asked: a promise of {login, csrf}
 
   function $(id) { return document.getElementById(id); }
 
@@ -79,14 +81,24 @@
 
   // --- talking to the daemon
 
+  // Out of the public dashboard's session (it ended, or another tab logged out): to the login.
+  function loggedOut() { window.location.replace("/login"); }
+
+  // A change also carries the session's CSRF token, which the public dashboard asks for. On
+  // the tailnet there is no login and no token.
   function request(method, route, payload) {
-    var options = { method: method, headers: {} };
+    var options = { method: method, headers: {}, credentials: "same-origin" };
     if (payload !== undefined) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(payload);
     }
-    return fetch(API + route, options).then(function (response) {
+    var ready = method === "GET" ? Promise.resolve(null) : askSession();
+    return ready.then(function (s) {
+      if (s && s.csrf) { options.headers[CSRF_HEADER] = s.csrf; }
+      return fetch(API + route, options);
+    }).then(function (response) {
       return response.json().then(function (data) {
+        if (data && data.login && (response.status === 401 || response.status === 403)) { loggedOut(); }
         if (!response.ok) {
           var error = new Error(data.error || ("error " + response.status));
           error.data = data;
@@ -690,6 +702,21 @@
   $("dropplan").addEventListener("click", function () { planned = null; $("plan").hidden = true; });
   $("rmstale").addEventListener("click", function () {
     change("prepared/rm", { stale: true }, function (info) { loadCache(); toast("Removed " + info.removed); });
+  });
+
+  // Asked once; asked again before a change if it failed (the daemon or Caddy was
+  // restarting), so a change never goes out without the token it needs.
+  function askSession() {
+    if (session) { return session; }
+    session = request("GET", "session").then(function (s) {
+      $("logout").hidden = !s.login;
+      return s;
+    }, function () { session = null; return null; });
+    return session;
+  }
+  askSession();
+  $("logout").addEventListener("click", function () {
+    request("POST", "logout", {}).then(loggedOut, loggedOut);
   });
 
   var saved = "stream";

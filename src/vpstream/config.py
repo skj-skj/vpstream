@@ -56,6 +56,38 @@ class Paths:
         folder only root can write: the helper trusts it as much as the configuration."""
         return self.config_file.parent / "open-ports"
 
+    @property
+    def open_dashboard_ports_file(self) -> Path:
+        """The same record for the dashboard port, which is open only in public mode."""
+        return self.config_file.parent / "open-dashboard-ports"
+
+    @property
+    def dashboard_key(self) -> Path:
+        """The public dashboard's password verifier: root's, readable by the service's group
+        only, because it is enough to log in (see `login`)."""
+        return self.config_file.parent / "dashboard.key"
+
+    @property
+    def dashboard_socket(self) -> Path:
+        """Where the public dashboard's Caddy hands on every request."""
+        return self.run_dir / "dashboard.sock"
+
+    @property
+    def dashboard_caddy_dir(self) -> Path:
+        """The public dashboard's Caddy: its configuration, its certificate authority, its log."""
+        return self.state_dir / "caddy-dashboard"
+
+    @property
+    def device_key(self) -> Path:
+        """What the public dashboard signs its device cookies with. A new password makes a
+        new one, so every browser must log in again."""
+        return self.state_dir / "dashboard-device.key"
+
+    @property
+    def login_record(self) -> Path:
+        """Failed logins to the public dashboard, kept across restarts of the daemon."""
+        return self.state_dir / "dashboard-logins.json"
+
     @classmethod
     def under(cls, root: Path) -> Paths:
         default = cls()
@@ -80,6 +112,9 @@ def default_paths() -> Paths:
 class Config:
     stream_port: int = 1337
     dashboard_port: int = 1338
+    # False: the dashboard is on the tailnet only, through `tailscale serve`. True: it is on
+    # the internet, over HTTPS through Caddy, behind a password.
+    dashboard_public: bool = False
     stream_host: str = ""  # the address in the URLs shown; "" means: find it
     # How fast this host prepares, in times real time (see prepare.Speeds): a copy, and an
     # encode of 1080p at 24 fps. `vpstream bench` measures them.
@@ -93,6 +128,7 @@ _KEYS = {
     ("stream", "port"): "stream_port",
     ("stream", "host"): "stream_host",
     ("dashboard", "port"): "dashboard_port",
+    ("dashboard", "public"): "dashboard_public",
     ("prepare", "copy_speed"): "copy_speed",
     ("prepare", "encode_speed"): "encode_speed",
     ("media", "folder"): "media_folder",
@@ -110,9 +146,13 @@ port = 1337
 # host = "203.0.113.5"
 
 [dashboard]
-# The dashboard port. It listens on this host only (127.0.0.1); `vpstream init` publishes it
-# on your tailnet with `tailscale serve`, as https://<this host's tailnet name>:<port>/.
+# The dashboard port. By default it listens on this host only (127.0.0.1), and `vpstream init`
+# publishes it on your tailnet with `tailscale serve`, as https://<tailnet name>:<port>/.
 port = 1338
+# true: the dashboard is on the internet instead, over HTTPS (Caddy, its own certificate)
+# with a password. Switch with `sudo vpstream init --no-tailscale` and back with
+# `sudo vpstream init --tailscale`, which also set the password and the firewall.
+public = false
 
 [prepare]
 # How fast this host prepares videos for browser mode, in times real time, for the time
@@ -147,6 +187,12 @@ def _speed_problem(name: str, value: Any) -> str | None:
     return None
 
 
+def _bool_problem(name: str, value: Any) -> str | None:
+    if not isinstance(value, bool):
+        return f"{name} must be true or false, not {value!r}"
+    return None
+
+
 def _folder_problem(name: str, value: Any) -> str | None:
     if not isinstance(value, str) or not value.startswith("/") or "\0" in value:
         return f"{name} must be a full path, starting with /, not {value!r}"
@@ -155,6 +201,7 @@ def _folder_problem(name: str, value: Any) -> str | None:
 
 _CHECKS = {
     "stream_host": _host_problem,
+    "dashboard_public": _bool_problem,
     "media_folder": _folder_problem,
     "copy_speed": _speed_problem,
     "encode_speed": _speed_problem,
@@ -202,3 +249,38 @@ def load(path: Path) -> Config:
         return parse(text)
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
+
+
+_SECTION = re.compile(r"\s*\[\s*([A-Za-z0-9_-]+)\s*\]\s*(#.*)?")
+_PUBLIC = re.compile(r"\s*public\s*=")
+
+
+def with_public_dashboard(text: str, public: bool) -> str:
+    """The configuration text with `[dashboard] public` set to `public`. Every other line
+    stays as it was written. Raises ConfigError when the result would not say so, for
+    example because the setting is written in a way this does not look for."""
+    value = f"public = {'true' if public else 'false'}\n"
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    section, header = "", None
+    for number, line in enumerate(lines):
+        if found := _SECTION.fullmatch(line.rstrip("\n")):
+            section = found.group(1)
+            header = number if section == "dashboard" and header is None else header
+        elif section == "dashboard" and _PUBLIC.match(line):
+            lines[number] = value
+            break
+    else:
+        if header is None:
+            lines += ["\n" if lines else "", "[dashboard]\n", value]
+        else:
+            lines.insert(header + 1, value)
+    result = "".join(lines)
+    try:
+        written = parse(result).dashboard_public
+    except ConfigError as exc:
+        raise ConfigError(f"cannot set [dashboard] public: {exc}") from exc
+    if written is not public:
+        raise ConfigError("cannot set [dashboard] public; set it by hand")
+    return result

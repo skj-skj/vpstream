@@ -249,3 +249,28 @@ class FakeFfmpeg(SystemRunner):
         if args[0] == "ffmpeg":
             return super().run([str(self.program), *args[1:]], timeout=timeout)
         return Result(127, "", f"{args[0]}: not here")
+
+
+class FakeDashboard(FakeServer):
+    """Stands in for the public dashboard's Caddy. Its calls go in `events`, which a test
+    can share with a firewall to see the order of both."""
+
+    def __init__(self, root_cert: Path, events: list[str] | None = None, fail: str = "") -> None:
+        super().__init__(fail)
+        self.root_cert = root_cert
+        self.hosts: list[str] = []
+        self.calls = events if events is not None else []
+
+    def why_stopped(self) -> str:
+        return "it was killed"
+
+
+class EventFirewall(FakeFirewall):
+    """A firewall whose calls go in a shared list of events, as dash-open and dash-close."""
+
+    def __init__(self, events: list[str], fail: str = "") -> None:
+        super().__init__(fail)
+        self.calls = events
+
+    def _call(self, action: str) -> None:
+        super()._call(f"port {action}")

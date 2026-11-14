@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>vpstream: log in</title>
+<link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand" style="padding-bottom:12px">
+      <div class="logo">v</div>
+      <h1>vpstream</h1>
+    </div>
+  </div>
+</header>
+<main style="max-width:440px">
+  <div class="card">
+    <h2>Log in to the dashboard</h2>
+    <form id="login" class="stack">
+      <label class="field">Password
+        <input id="password" type="password" autocomplete="current-password" required autofocus>
+      </label>
+      <button id="go" class="btn primary wide" type="submit">Log in</button>
+      <div id="message" class="small muted" role="status"></div>
+    </form>
+  </div>
+  <p class="small muted">The password never leaves this page: the page proves it knows it,
+    and that proof is good for this one login only.</p>
+</main>
+<script src="/assets/pbkdf2.js"></script>
+<script src="/assets/login.js"></script>
+</body>
+</html>

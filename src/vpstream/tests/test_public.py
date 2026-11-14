@@ -413,7 +413,8 @@ def test_the_dashboard_uses_every_route_the_api_offers(dash: FlaskClient) -> Non
     rules = [rule.rule for rule in dash.application.url_map.iter_rules()]
     routes = {rule.removeprefix(api.API + "/") for rule in rules if rule.startswith(api.API)}
     used = set(re.findall(r'(?:change|request)\((?:"(?:GET|POST)", )?"([a-z/]+)"', script))
-    assert routes and routes <= used, routes - used
+    cli_only = {"certificate"}  # `vpstream dashboard-cert`; the status carries its fingerprint
+    assert routes and routes - cli_only <= used, routes - cli_only - used
 
 
 def test_every_element_the_dashboard_script_looks_up_is_on_the_page(dash: FlaskClient) -> None:
@@ -429,7 +430,15 @@ def test_every_element_the_dashboard_script_looks_up_is_on_the_page(dash: FlaskC
 def test_the_dashboard_behaves() -> None:
     """The real page and script in node with a small DOM of their own (dashboard_test.js):
     what they show for a status, and what each button and form sends."""
-    harness.run("dashboard_test.js", "dashboard.html", "dashboard.js", at_least=15)
+    harness.run(
+        "dashboard_test.js",
+        "dashboard.html",
+        "dashboard.js",
+        "login.html",
+        "login.js",
+        "pbkdf2.js",
+        at_least=25,
+    )
 
 
 def test_the_player_behaves() -> None:
