@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.14.0 (2026-11-15)
+
+### Features
+
+- Optional HTTPS for streams with a Let's Encrypt IP certificate
+  ([#25](https://github.com/skj-skj/vpstream/pull/25),
+  [`fc1c8b1`](https://github.com/skj-skj/vpstream/commit/fc1c8b1f9b24953fae8df496209136508166c177))
+
+
 ## v0.13.2 (2026-11-15)
 
 ### Bug Fixes
