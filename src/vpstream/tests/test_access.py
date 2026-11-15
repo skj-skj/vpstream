@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -153,8 +154,16 @@ def test_grant_names_the_command_for_files_of_another_owner(library: Path) -> No
     runner = FakeRunner(("setfacl",))
     with pytest.raises(access.AccessError, match="not your file") as caught:
         access.grant(runner, "vpstream", "file", library / "film.mkv", uid=ME + 1)
-    assert f"sudo setfacl -m u:vpstream:rX {library / 'film.mkv'}" in str(caught.value)
+    command = access.setfacl_command("vpstream", "rX", library / "film.mkv")
+    assert f"Its owner can: {command} (root: with sudo)" in str(caught.value)
     assert runner.calls == []  # nothing is changed halfway
+
+
+@pytest.mark.parametrize("name", ["I want to eat your pancreas.mkv", "it's $HOME; rm.mkv", "a.mkv"])
+def test_the_setfacl_command_can_be_copied_for_any_file_name(tmp_path: Path, name: str) -> None:
+    path = tmp_path / name
+    command = access.setfacl_command("vpstream", "rX", path)
+    assert shlex.split(command) == ["setfacl", "-m", "u:vpstream:rX", str(path)]
 
 
 @pytest.mark.parametrize("user", ["", "root; rm -rf /", "a b", "-m", "u:x", "A" * 40, "None"])

@@ -374,7 +374,7 @@ class Control:
                 raise StreamError(
                     f"a stream is already running (/{self.stream.alias}); stop it first"
                 )
-            stream = Stream.create(options, self.clock())
+            stream = Stream.create(options, self.clock(), self._has_base)
             plans: list[prepare.VideoPlan] = []
             if stream.mode == BROWSER:
                 plans = self._browser(stream, options.get("confirmed") is True)
@@ -529,6 +529,13 @@ class Control:
                 added = self._preparer().submit(plan.source, plan.entry, plan.info, plan.tasks)
                 ids += [job.id for job in added]
         return ids
+
+    def _has_base(self, video: str) -> bool:
+        """Whether `video` has a base version in the cache (it can be looked at, not read)."""
+        try:
+            return prepared.base_ready(prepared.entry_dir(self.paths.cache_dir, video))
+        except OSError:
+            return False
 
     def _missing_bases(self, stream: Stream) -> list[prepare.VideoPlan]:
         """Plans for the videos of a browser stream that have no base version yet: the base

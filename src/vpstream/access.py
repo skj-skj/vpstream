@@ -17,6 +17,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +34,11 @@ _USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")  # goes into a command, so nothing
 
 class AccessError(RuntimeError):
     """Access could not be given; the message says why and what to do."""
+
+
+def setfacl_command(user: str, perms: str, path: Path | str) -> str:
+    """The command that gives `user` access to `path`, to copy: the path quoted for a shell."""
+    return f"setfacl -m u:{user}:{perms} {shlex.quote(str(path))}"
 
 
 def service_user() -> str:
@@ -192,7 +198,7 @@ def grant(
         perms = "x" if first.is_dir() and first != source else "rX"
         raise AccessError(
             f"the vpstream service (user {user}) cannot read {first}, and it is not your file "
-            f"to open up. Its owner or root can: sudo setfacl -m u:{user}:{perms} {first}"
+            f"to open up. Its owner can: {setfacl_command(user, perms, first)} (root: with sudo)"
         )
     if not todo.grants:
         return 0

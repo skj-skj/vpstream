@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import string
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -87,18 +88,25 @@ class Unreadable(StreamError):
 
     CODE = "unreadable"
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path | str, prepared: bool = False) -> None:
         self.path = str(path)
         self.user = access.service_user()
+        self.prepared = prepared
+        hint = (
+            "It is prepared for browser mode, which plays what was prepared and needs no "
+            "access: start it in browser mode. Or: "
+            if prepared
+            else ""
+        )
         super().__init__(
-            f"the vpstream service (user {self.user}) cannot read {path}. `vpstream start`, run "
-            "by the owner of the files, gives it access by itself; anyone else can with: "
-            f"sudo setfacl -m u:{self.user}:rX {path}"
+            f"the vpstream service (user {self.user}) cannot read {path}. {hint}`vpstream "
+            "start`, run by the owner of the files, gives it access by itself, or the owner "
+            f"can run: {access.setfacl_command(self.user, 'rX', path)} (anyone else: with sudo)"
         )
 
     @property
     def details(self) -> dict[str, Any]:
-        return {"code": self.CODE, "path": self.path, "user": self.user}
+        return {"code": self.CODE, "path": self.path, "user": self.user, "prepared": self.prepared}
 
 
 def _is(path: Path, check: str) -> bool:
@@ -138,9 +146,18 @@ def check_choice(name: str, value: Any, many: bool = False) -> str | None:
     return value
 
 
-def videos_of(kind: str, path: Path) -> list[str]:
+def _always(video: str) -> bool:
+    return True
+
+
+def _never(video: str) -> bool:
+    return False
+
+
+def videos_of(kind: str, path: Path, needs_read: Callable[[str], bool] = _always) -> list[str]:
     """The videos a file or folder stream would serve, as full paths with links followed.
-    Raises StreamError (Unreadable when the daemon's user cannot read them)."""
+    Raises StreamError (Unreadable when the daemon's user cannot read one of them that
+    `needs_read`)."""
     if not path.is_absolute():
         raise StreamError(f"give the full path, starting with /: {path}")
     if kind == "file":
@@ -170,7 +187,7 @@ def videos_of(kind: str, path: Path) -> list[str]:
             else f"not a video file: {path}"
         )
     for video in found:
-        if not os.access(video, os.R_OK):
+        if needs_read(str(video)) and not os.access(video, os.R_OK):
             raise Unreadable(video)
     return [str(video) for video in found]
 
@@ -241,8 +258,12 @@ class Stream:
             self.served = list(self.videos)
 
     @classmethod
-    def create(cls, options: dict[str, Any], now: float) -> Stream:
-        """A new stream from what `start` was given. Raises StreamError for anything wrong."""
+    def create(
+        cls, options: dict[str, Any], now: float, has_base: Callable[[str], bool] = _never
+    ) -> Stream:
+        """A new stream from what `start` was given. Raises StreamError for anything wrong.
+        `has_base` tells whether a video's base version is prepared: a browser stream plays
+        only what was prepared, so the service need not read such a video itself."""
         known = {"file", "dir", "mode", "alias", "ttl", "policy", "audio", "sub", "confirmed"}
         if extra := sorted(set(options) - known):
             raise StreamError(f"unknown option: {', '.join(extra)}")
@@ -257,10 +278,18 @@ class Stream:
         sub = check_choice("sub", options.get("sub"))
         if mode == DIRECT and (audio or sub):
             raise StreamError("audio and subtitle choices are for browser mode (--mode browser)")
+        try:
+            videos = videos_of(
+                kind, Path(source), (lambda v: not has_base(v)) if mode == BROWSER else _always
+            )
+        except Unreadable as exc:
+            if mode == DIRECT and not exc.prepared and has_base(exc.path):
+                raise Unreadable(exc.path, prepared=True) from None
+            raise
         stream = cls(
             kind=kind,
             source=source,
-            videos=videos_of(kind, Path(source)),
+            videos=videos,
             alias=alias,
             started=now,
             expires=now + ttl if ttl else None,
