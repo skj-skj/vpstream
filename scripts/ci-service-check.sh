@@ -62,7 +62,7 @@ head -c 1000 /dev/urandom | sudo tee "$MEDIA/roots.mkv" > /dev/null
 sudo chmod 600 "$MEDIA/roots.mkv"
 no as_group "$BIN/vpstream start --file $MEDIA/roots.mkv" 2> /tmp/refused.txt
 cat /tmp/refused.txt
-grep -q "sudo setfacl -m u:vpstream:rX $MEDIA/roots.mkv" /tmp/refused.txt
+grep -qF "Its owner can: setfacl -m u:vpstream:rX $MEDIA/roots.mkv (root: with sudo)" /tmp/refused.txt
 no has_rule 1337
 # The caller's own private library: no chmod and no group change, start gives the service
 # access by itself, to its user alone.
