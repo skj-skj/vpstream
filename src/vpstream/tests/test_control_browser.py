@@ -189,6 +189,69 @@ def test_a_file_ffprobe_cannot_read_is_noted_not_fatal(rig: Rig) -> None:
     assert answer["jobs"] == [] and "no video track" in answer["plans"][0]["notes"][0]
 
 
+needs_no_root = pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
+
+
+@needs_no_root
+def test_a_prepared_video_streams_in_browser_mode_without_read_access(rig: Rig) -> None:
+    rig.start()
+    assert rig.preparer.wait()
+    rig.control.stop()
+    rig.film.chmod(0)  # the service may look at it, no longer read it
+    before = len(rig.preparer.status())
+    rig.start()
+    assert len(rig.preparer.status()) == before  # nothing to make, nothing read
+    assert rig.control.visit("aaa", "192.0.2.1", "TV", True).kind == "player"
+
+
+@needs_no_root
+def test_a_video_that_is_not_prepared_must_be_readable_for_browser_mode(rig: Rig) -> None:
+    rig.film.chmod(0)
+    with pytest.raises(StreamError, match="cannot read") as caught:
+        rig.start()
+    assert caught.value.details == {
+        "code": api.UNREADABLE,
+        "path": str(rig.film),
+        "user": caught.value.details["user"],
+        "prepared": False,
+    }
+    assert rig.control.stream is None and rig.fw.calls == []
+
+
+@needs_no_root
+def test_a_folder_needs_access_only_to_the_episodes_not_prepared(rig: Rig) -> None:
+    rig.film.unlink()
+    e1, e2 = rig.media / "e1.mkv", rig.media / "e2.mkv"
+    e1.write_bytes(b"one")
+    e2.write_bytes(b"two")
+    folder = {"dir": str(rig.media), "alias": "aaa", "mode": "browser", "policy": "open"}
+    rig.control.prepare({"file": str(e1)})
+    assert rig.preparer.wait()
+    e1.chmod(0)
+    rig.control.start(folder)  # e2 is readable: its base is made now
+    assert rig.preparer.wait()
+    rig.control.stop()
+    e2.chmod(0)
+    rig.control.start(folder)  # both prepared
+    rig.control.stop()
+    (rig.media / "e3.mkv").write_bytes(b"three")
+    (rig.media / "e3.mkv").chmod(0)
+    with pytest.raises(StreamError, match=r"cannot read .*e3\.mkv"):
+        rig.control.start(folder)
+
+
+@needs_no_root
+def test_direct_mode_says_a_prepared_video_can_play_in_browser_mode(rig: Rig) -> None:
+    rig.start()
+    assert rig.preparer.wait()
+    rig.control.stop()
+    rig.film.chmod(0)
+    with pytest.raises(StreamError, match="prepared for browser mode") as caught:
+        rig.start(mode="direct", policy=None)
+    assert caught.value.details["prepared"] is True
+    assert "setfacl" in str(caught.value)  # still says how to give access
+
+
 def test_without_a_preparer_browser_mode_cannot_start(rig: Rig) -> None:
     rig.control.preparer = None
     with pytest.raises(ControlError, match="cannot prepare"):

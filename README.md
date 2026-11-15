@@ -65,7 +65,8 @@ vpstream stop
 - **Time limit:** `--ttl MINUTES`, default 180, 0 for none.
 - **Your files:** the service reads videos as its own user. If it cannot, `start` gives it
   read access with an ACL entry for that user alone (needs the `acl` package and you owning
-  the files); `stop` takes it back.
+  the files); `stop` takes it back. A browser stream of a prepared video plays only what was
+  prepared, so it needs no access: the dashboard can start it for any file you prepared.
 - **Seeking:** MKV files whose seek index has no audio entries (most of them) make VLC for
   Android resume by reading from the start. vpstream serves such a file from a copy with a full
   index, made once with mkvmerge (no re-encoding, about a minute per GB) and kept in
