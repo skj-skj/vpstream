@@ -778,6 +778,26 @@ def test_back_on_the_tailnet_the_known_devices_go_too(setup: Setup) -> None:
 
 # --- HTTPS for streams
 
+# Let's Encrypt certifies public addresses only, and the tests use documentation ones: a test
+# authority, written before init, as an owner trying things out would.
+# The rule as the fake ufw keeps it: IPv4 only.
+PORT_80 = "proto tcp from 0.0.0.0/0 to any port 80"
+TEST_CA = '[acme]\nca = "https://ca.test/dir"\n'
+
+
+def _https_ready(setup: Setup, **changes: object) -> service.Service:
+    config_file = setup.layout.paths.config_file
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    if not config_file.exists():
+        config_file.write_text(TEST_CA)
+    return setup.service(**changes)
+
+
+def test_lets_encrypt_needs_a_public_address(setup: Setup) -> None:
+    with pytest.raises(service.ServiceError, match=r"203\.0\.113\.5 is not a public address"):
+        setup.service().init(https=True)
+    assert setup.files() == [], "refused before anything changed"
+
 
 def test_the_unit_may_bind_port_80_only_with_https() -> None:
     args = (Path("/opt/v/bin/vpstream"), Path("/opt/v/bin/vpstream-fw"))
@@ -785,7 +805,8 @@ def test_the_unit_may_bind_port_80_only_with_https() -> None:
     assert "CAP_NET_BIND_SERVICE" not in plain
     https = service.unit_text(*args, https=True)
     assert "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" in https
-    assert "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n" in https
+    # A bounding set would hold sudo, which runs the firewall helper, to that one capability.
+    assert "CapabilityBoundingSet" not in https
     for text in (plain, https):  # whatever the mode, a stop closes what the helper opened
         assert "ExecStopPost=+/opt/v/bin/vpstream-fw acme-close\n" in text
     assert "NoNewPrivileges" not in https
@@ -793,7 +814,7 @@ def test_the_unit_may_bind_port_80_only_with_https() -> None:
 
 def _acme_opened(setup: Setup) -> None:
     """What the daemon's `acme-open` leaves when it is cut off: the rule, and its record."""
-    setup.host.rules.add("80/tcp")
+    setup.host.rules.add(PORT_80)
     record = setup.layout.paths.open_acme_ports_file
     record.write_text("80\n")
     record.chmod(0o644)
@@ -807,7 +828,7 @@ def _keep_certificate(setup: Setup) -> Path:
 
 
 def test_init_https_switches_streams_to_https_and_says_what_to_open(setup: Setup) -> None:
-    setup.service().init(https=True)
+    _https_ready(setup).init(https=True)
     paths = setup.layout.paths
     assert config.load(paths.config_file).stream_https is True
     assert "CAP_NET_BIND_SERVICE" in setup.layout.unit_file.read_text()
@@ -824,11 +845,11 @@ def test_init_https_switches_streams_to_https_and_says_what_to_open(setup: Setup
 
 def test_init_never_removes_the_certificate_and_uninstall_does(setup: Setup) -> None:
     before = setup.snapshot()
-    setup.service().init(https=True)
+    _https_ready(setup).init(https=True)
     kept = _keep_certificate(setup)
     setup.service().init()  # an upgrade
     setup.service().init(https=False)
-    setup.service().init(https=True)
+    _https_ready(setup).init(https=True)
     assert (kept / "203.0.113.5.crt").is_file()
     setup.service().uninstall()
     assert not kept.exists() and setup.files() == []
@@ -837,11 +858,11 @@ def test_init_never_removes_the_certificate_and_uninstall_does(setup: Setup) -> 
 
 def test_no_https_closes_port_80_if_a_request_left_it_open(setup: Setup) -> None:
     before = setup.snapshot()
-    setup.service().init(https=True)
+    _https_ready(setup).init(https=True)
     _acme_opened(setup)
     setup.service().init(https=False)
     assert config.load(setup.layout.paths.config_file).stream_https is False
-    assert "80/tcp" not in setup.host.rules
+    assert PORT_80 not in setup.host.rules
     assert not setup.layout.paths.open_acme_ports_file.exists()
     assert "CAP_NET_BIND_SERVICE" not in setup.layout.unit_file.read_text()
     setup.service().uninstall()
@@ -851,42 +872,42 @@ def test_no_https_closes_port_80_if_a_request_left_it_open(setup: Setup) -> None
 def test_uninstall_closes_port_80_the_helper_opened_and_leaves_one_it_did_not(
     setup: Setup,
 ) -> None:
-    setup.service().init(https=True)
+    _https_ready(setup).init(https=True)
     _acme_opened(setup)
     setup.service().uninstall()
-    assert "80/tcp" not in setup.host.rules
-    setup.host.rules.add("80/tcp")  # a web server's, by hand
-    setup.service().init(https=True)
+    assert PORT_80 not in setup.host.rules
+    setup.host.rules.add(PORT_80)  # a web server's, by hand
+    _https_ready(setup).init(https=True)
     setup.service().uninstall()
-    assert "80/tcp" in setup.host.rules
+    assert PORT_80 in setup.host.rules
 
 
 def test_https_needs_a_caddy_with_acme_profiles(setup: Setup) -> None:
     setup.host.caddy = "2.6.2\n"
     with pytest.raises(service.ServiceError, match=r"Caddy 2\.6\.2 cannot.*2\.10 or newer"):
-        setup.service().init(https=True)
-    assert setup.files() == [], "refused before anything changed"
+        _https_ready(setup).init(https=True)
+    assert setup.files() == ["etc/vpstream/config.toml"], "refused before anything changed"
     setup.service().init()  # plain HTTP works with it
     setup.host.available.discard("caddy")
     with pytest.raises(service.ServiceError, match="missing on this host: caddy"):
-        setup.service().init(https=True)
+        _https_ready(setup).init(https=True)
 
 
 @pytest.mark.parametrize("found", ["", "2001:db8::5"])
 def test_https_needs_the_public_ipv4_address(setup: Setup, found: str) -> None:
     with pytest.raises(service.ServiceError, match="public IPv4 address"):
-        setup.service(outgoing_address=lambda: found).init(https=True)
+        _https_ready(setup, outgoing_address=lambda: found).init(https=True)
     paths = setup.layout.paths
     paths.config_file.parent.mkdir(parents=True, exist_ok=True)
-    paths.config_file.write_text('[stream]\nhost = "media.example.org"\n')
-    with pytest.raises(service.ServiceError, match=r"'media\.example\.org'"):
-        setup.service().init(https=True)
-    paths.config_file.write_text('[stream]\nhost = "203.0.113.9"\n')
-    setup.service(outgoing_address=lambda: found).init(https=True)
+    paths.config_file.write_text('[stream]\nhost = "media.example.org"\n' + TEST_CA)
+    with pytest.raises(service.ServiceError, match=r"media\.example\.org is not an IPv4 address"):
+        _https_ready(setup).init(https=True)
+    paths.config_file.write_text('[stream]\nhost = "203.0.113.9"\n' + TEST_CA)
+    _https_ready(setup, outgoing_address=lambda: found).init(https=True)
     assert any("https://203.0.113.9:1337/" in line for line in setup.said)
 
 
 def test_https_and_the_public_dashboard_go_together(setup: Setup) -> None:
-    setup.service().init(public=True, password=GOOD, https=True)
+    _https_ready(setup).init(public=True, password=GOOD, https=True)
     cfg = config.load(setup.layout.paths.config_file)
     assert cfg.dashboard_public is True and cfg.stream_https is True

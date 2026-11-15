@@ -221,7 +221,9 @@ class Daemon:
     def __init__(self, refusals: int, code: str = api.UNREADABLE, running: bool = False) -> None:
         self.refusals, self.code, self.asked, self.running = refusals, code, 0, running
 
-    def __call__(self, socket: Path, method: str, route: str, payload: Any = None) -> Any:
+    def __call__(
+        self, socket: Path, method: str, route: str, payload: Any = None, timeout: Any = None
+    ) -> Any:
         if route == "status":
             return {"stream": {"alias": "aaa"} if self.running else None}
         if route == "stream/stop":

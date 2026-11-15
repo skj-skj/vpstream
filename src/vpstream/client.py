@@ -12,6 +12,10 @@ from vpstream import api
 
 TIMEOUT = 10.0
 CHANGE_TIMEOUT = 90.0  # a start or a stop waits for Caddy and for the firewall helper
+# A start may also wait for a certificate: up to caddy.OBTAIN_SECONDS, and the helper's
+# open and close of port 80 (firewall.TIMEOUT each). Left shorter, the command would say the
+# daemon did not answer while the stream starts, and a second try could ask again.
+START_TIMEOUT = 300.0
 
 
 class DaemonUnavailable(RuntimeError):

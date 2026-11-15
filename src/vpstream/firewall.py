@@ -46,13 +46,15 @@ class FirewallError(RuntimeError):
     pass
 
 
-def ufw_args(action: str, port: int) -> list[str]:
-    """The ufw arguments that open or close one TCP port. Both are safe to repeat."""
-    if action == "open":
-        return ["allow", f"{port}/tcp"]
-    if action == "close":
-        return ["delete", "allow", f"{port}/tcp"]
-    raise ValueError(f"not an action: {action!r}")
+def ufw_args(action: str, port: int, ipv4: bool = False) -> list[str]:
+    """The ufw arguments that open or close one TCP port, for IPv4 and IPv6, or with `ipv4`
+    for IPv4 alone (one rule, so ufw's "existing rule" answer is about that rule only).
+    Both are safe to repeat."""
+    if action not in ("open", "close"):
+        raise ValueError(f"not an action: {action!r}")
+    rule = ["proto", "tcp", "from", "0.0.0.0/0", "to", "any", "port", str(port)]
+    allow = ["allow", *rule] if ipv4 else ["allow", f"{port}/tcp"]
+    return allow if action == "open" else ["delete", *allow]
 
 
 def config_file_problem(path: Path, owner_uid: int = 0) -> str | None:
@@ -185,6 +187,7 @@ def _apply(
     ports: Sequence[int],
     recorded: Sequence[int],
     record_file: Path,
+    ipv4: bool = False,
 ) -> tuple[str, dict[int, str]]:
     """Open or close `ports` in ufw, keeping `record_file` true: a port is written down
     before it is opened, and the record is emptied once every port in it is closed.
@@ -199,7 +202,7 @@ def _apply(
     said: dict[int, str] = {}
     theirs: list[int] = []
     for one in ports:
-        res = runner.run([ufw, *ufw_args(action, one)], timeout=TIMEOUT)
+        res = runner.run([ufw, *ufw_args(action, one, ipv4)], timeout=TIMEOUT)
         if res.returncode != 0:
             return f"ufw failed: {tail(res, stdout=True)}", said
         said[one] = _first_line(res)
@@ -238,6 +241,7 @@ class RecordedPort:
     enabled: Callable[[config.Config], bool]
     refusal: str  # why it is not opened when `enabled` says no
     port: Callable[[config.Config], int]
+    ipv4: bool = False  # IPv4 only (see `ufw_args`)
 
 
 DASHBOARD_PORT = RecordedPort(
@@ -253,6 +257,7 @@ ACME_PORT = RecordedPort(
     lambda cfg: cfg.stream_https,
     "streams are not served over HTTPS ([stream] https = false); not opening",
     lambda cfg: cfg.acme_port,
+    ipv4=True,  # the certificate is for the IPv4 address: IPv6 has nothing to check
 )
 _RECORDED = (DASHBOARD_PORT, ACME_PORT)
 
@@ -281,7 +286,7 @@ def _recorded(
         if not ports:
             return 0, f"{spec.name}: nothing to close"
     ufw_action = "open" if action == spec.actions[0] else "close"
-    problem, said = _apply(runner, ufw, ufw_action, ports, recorded, record_file)
+    problem, said = _apply(runner, ufw, ufw_action, ports, recorded, record_file, spec.ipv4)
     if problem:
         return 1, problem
     listed = "; ".join(f"{p}/tcp: {line}" for p, line in said.items())

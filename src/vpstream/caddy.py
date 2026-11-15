@@ -19,6 +19,7 @@ a reload.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -386,8 +387,8 @@ class CaddyProcess:
         if self.running():
             return
         binary = require(self.runner, "caddy", self.needed_for)
-        if self.port_used():
-            raise CaddyError(f"port {self.port} is already used by another program")
+        if problem := self.port_problem():
+            raise CaddyError(problem)
         self.work_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
         config_file = self.work_dir / "caddy.json"
         write_atomic(config_file, json.dumps(self.config(), indent=1))
@@ -417,8 +418,11 @@ class CaddyProcess:
             raise CaddyError(f"Caddy did not listen on port {self.port}: {self._why()}")
         raise CaddyError(f"Caddy stopped at once (exit {proc.returncode}): {self._why()}")
 
-    def port_used(self) -> bool:
-        return _accepts(self.port, self.probe_host)
+    def port_problem(self) -> str | None:
+        """Why Caddy cannot listen on its port, or None."""
+        if _accepts(self.port, self.probe_host):
+            return f"port {self.port} is already used by another program"
+        return None
 
     def stop(self) -> None:
         proc, self._proc = self._proc, None
@@ -508,8 +512,37 @@ class CertificateCaddy(CaddyProcess):
     def config(self) -> dict[str, Any]:
         return certificate_config(self.host, self.settings)
 
-    def port_used(self) -> bool:
-        return _accepts(self.port, "127.0.0.1")
+    def problem(self) -> str | None:
+        """Why a request cannot work now: checked before port 80 is opened for it."""
+        return profiles_problem(self.runner) or self.port_problem()
+
+    def port_problem(self) -> str | None:
+        """Bind the port as Caddy will, on every address: a program listening on any one of
+        them would take Let's Encrypt's check, and Caddy goes on regardless."""
+        for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+            try:
+                probe = socket.socket(family, socket.SOCK_STREAM)
+            except OSError:  # no IPv6 on this host
+                continue
+            with probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if family == socket.AF_INET6:
+                    probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                try:
+                    probe.bind((address, self.port))
+                except PermissionError:
+                    return (
+                        f"this service may not listen on port {self.port}, where Let's Encrypt "
+                        "checks; `sudo vpstream init --https` lets it"
+                    )
+                except OSError as exc:
+                    if exc.errno == errno.EADDRNOTAVAIL and family == socket.AF_INET6:
+                        continue
+                    return (
+                        f"port {self.port}, where Let's Encrypt checks, is already used by "
+                        f"another program ({exc.strerror}); stop it, or start with --http"
+                    )
+        return None
 
     def obtain(self, host: str, done: Callable[[], bool]) -> None:
         """Request a certificate for `host`, until `done()` says it is stored. Caddy is
@@ -549,6 +582,10 @@ def obtain_failure(log: str) -> str | None:
     answer says most (the port could not be reached, the rate limit), so it is preferred."""
     problem = None
     for line in log.splitlines():
+        if "address already in use" in line:
+            # Caddy says it goes on as if the other program answered the check: it would
+            # spend a failed check on it.
+            return line.strip()
         try:
             entry = json.loads(line)
         except ValueError:

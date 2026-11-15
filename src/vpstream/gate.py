@@ -34,6 +34,17 @@ MAX_USER_AGENT = 200
 MAX_MISSES = 20  # wrong addresses one viewer may try before it is shut out as a guesser
 MAX_GUESSERS = 5000
 COOKIE = "vpstream"
+# Over HTTPS a name of its own: browsers keep a plain HTTP page from setting a cookie with
+# the name of a Secure one (RFC 6265bis, "leave secure cookies alone"), so a browser let in
+# on an HTTPS stream would get no cookie on a later plain one (`start --http`). __Host-: only
+# over HTTPS, for this host and path /, so a plain page cannot plant it either.
+SECURE_COOKIE = "__Host-vpstream"
+
+
+def cookie_name(https: bool) -> str:
+    return SECURE_COOKIE if https else COOKIE
+
+
 _BROWSER_ID = re.compile(r"b-[0-9a-f]{6}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 

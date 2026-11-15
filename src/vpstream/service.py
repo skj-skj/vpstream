@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from vpstream import caddy, client, config, doctor, firewall, login, net, tailscale
+from vpstream import caddy, certificate, client, config, doctor, firewall, login, net, tailscale
 from vpstream.files import write_atomic
 from vpstream.tools import Result, Runner, tail
 
@@ -128,12 +128,9 @@ def unit_text(vpstream_bin: Path, helper: Path, https: bool = False) -> str:
     """The systemd unit. `+` runs ExecStopPost as root, so the stream port is closed after a
     stop or a crash without depending on sudo. With `https` the service may bind port 80,
     where Let's Encrypt checks while a certificate is requested; nothing else in privilege
-    comes with it."""
-    bind = (
-        "AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n"
-        if https
-        else ""
-    )
+    comes with it. No CapabilityBoundingSet: it would hold sudo itself to that one
+    capability, and the firewall helper is run through sudo."""
+    bind = "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" if https else ""
     return f"""\
 # Written by `vpstream init`. Removed by `vpstream uninstall`.
 [Unit]
@@ -304,11 +301,11 @@ class Service:
         if problem := caddy.profiles_problem(self.runner):
             raise ServiceError(problem)
         host = net.public_host(cfg.stream_host, self.outgoing_address)
-        if not net.is_ipv4(host):
+        if problem := certificate.address_problem(host, cfg.acme_ca):
             raise ServiceError(
                 "HTTPS for streams needs this host's public IPv4 address, which its certificate "
-                f"is for, and it is {'not known' if not host else repr(host)}. Set it as host "
-                f"under [stream] in {self.layout.paths.config_file}"
+                f"is for: {problem if host else 'it is not known'}. Set it as host under "
+                f"[stream] in {self.layout.paths.config_file}"
             )
 
     def _served(self, port: int) -> str | None:
@@ -375,7 +372,7 @@ class Service:
             self._close_recorded(lay.paths.open_dashboard_ports_file, "dashboard port")
             self._init_serve(manifest, cfg.dashboard_port)
         if not https:
-            self._close_recorded(lay.paths.open_acme_ports_file, "certificate check port")
+            self._close_acme(lay.paths.open_acme_ports_file)
         self._init_member(manifest)
         self._init_unit(https)
         if public:
@@ -415,10 +412,16 @@ class Service:
                 path.unlink()
                 self.say(f"{path}: removed (the dashboard is on the tailnet only)")
 
-    def _close_recorded(self, record: Path, what: str, also: Sequence[int] = ()) -> None:
+    def _close_acme(self, record: Path) -> None:
+        spec = firewall.ACME_PORT
+        self._close_recorded(record, spec.name, ipv4=spec.ipv4)
+
+    def _close_recorded(
+        self, record: Path, what: str, also: Sequence[int] = (), ipv4: bool = False
+    ) -> None:
         """Close in ufw every port the helper wrote down in `record`, and `also`."""
         for port in dict.fromkeys([*firewall.recorded_ports(record, self.owner_uid), *also]):
-            self._run("ufw", *firewall.ufw_args("close", port), what=f"closing the {what}")
+            self._run("ufw", *firewall.ufw_args("close", port, ipv4), what=f"closing the {what}")
             self.say(f"ufw: {what} {port} is closed")
         record.unlink(missing_ok=True)
 
@@ -662,7 +665,7 @@ class Service:
             # After the stop: the service's own close has normally emptied the records.
             self._close_recorded(record, "stream port", also=[] if port is None else [port])
             self._close_recorded(dash_record, "dashboard port")
-            self._close_recorded(acme_record, "certificate check port")
+            self._close_acme(acme_record)
             if port is None:
                 self.say(
                     f"WARNING: the stream port is not known ({port_problem}), so its ufw rule "

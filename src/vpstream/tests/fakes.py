@@ -356,6 +356,10 @@ class FakeIssuer:
         self.lifetime, self.fail, self.firewall = lifetime, fail, firewall
         self.asked: list[str] = []
         self.port_open: list[bool] = []
+        self.cannot = ""  # what problem() says
+
+    def problem(self) -> str | None:
+        return self.cannot or None
 
     def obtain(self, host: str, done: Any) -> None:
         from vpstream.certificate import CertificateError

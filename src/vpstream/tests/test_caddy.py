@@ -562,3 +562,28 @@ def test_a_requesting_caddy_that_cannot_start_says_so(program: Path, tmp_path: P
     said = r"(could not request|stopped before it had the certificate).*something is wrong"
     with pytest.raises(CertificateError, match=said):
         requester.obtain("203.0.113.5", lambda: False)
+
+
+def test_caddy_going_on_past_a_busy_port_is_a_failure() -> None:
+    """Caddy only warns, in a plain line, and asks all the same: the other program would
+    answer Let's Encrypt's check and spend a failed one."""
+    line = (
+        "2026/11/15 10:00:00 [WARNING] listen tcp :80: bind: address already in use - "
+        "assuming conflicting listener is correctly configured and continuing"
+    )
+    assert caddy.obtain_failure(_log_entry(level="info", msg="obtaining") + "\n" + line) == line
+
+
+def test_a_busy_check_port_is_seen_before_port_80_is_opened(tmp_path: Path) -> None:
+    """problem() runs before the firewall opens the port, so a busy one opens nothing."""
+    port = _free_port()
+    settings = config.Config(stream_https=True, acme_ca="https://ca.test/dir", acme_port=port)
+    requester = caddy.CertificateCaddy(Which(None), settings, config.Paths.under(tmp_path))
+    assert requester.problem() is None
+    other = socket.socket()
+    other.bind(("0.0.0.0", port))
+    other.listen()
+    try:
+        assert "already used by another program" in str(requester.problem())
+    finally:
+        other.close()

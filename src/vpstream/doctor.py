@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from vpstream import caddy, config, firewall, login, tailscale
+from vpstream import caddy, certificate, config, firewall, login, tailscale
 from vpstream.tools import PACKAGES, Runner
 
 Status = Literal["ok", "problem", "warning"]
@@ -244,7 +244,7 @@ def check_https(runner: Runner, acme_port: int, status: dict[str, Any] | None) -
         )
     else:
         left = float(cert["expires"]) - time.time()
-        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(cert["expires"])))
+        when = certificate.when(float(cert["expires"]))
         detail = f"for {cert.get('host')}, until {when}"
         checks.append(
             Check(name, "ok", detail)

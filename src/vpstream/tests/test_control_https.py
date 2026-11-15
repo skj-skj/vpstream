@@ -22,7 +22,9 @@ class Rig:
     def __init__(self, root: Path, https: bool = True, fail: str = "") -> None:
         self.now = NOW
         self.paths = config.Paths.under(root)
-        self.cfg = config.Config(stream_host=HOST, stream_https=https)
+        self.cfg = config.Config(
+            stream_host=HOST, stream_https=https, acme_ca="https://ca.test/dir"
+        )
         self.fw, self.acme_fw, self.server = FakeFirewall(), FakeFirewall(), FakeServer()
         self.log: list[str] = []
         self.certs = Certificates(

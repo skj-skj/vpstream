@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 import calendar
+import ipaddress
 import json
 import re
 import shutil
@@ -28,8 +29,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream.config import Config, Paths
+from vpstream.config import LETS_ENCRYPT, LETS_ENCRYPT_STAGING, Config, Paths
 from vpstream.firewall import Firewall, FirewallError
+from vpstream.net import is_ipv4
 
 PROFILE = "shortlived"  # the only Let's Encrypt profile that allows an address
 # A certificate must last this much past the end of a stream, so a clock that is a little
@@ -151,10 +153,28 @@ def stored(store: Path, ca: str, host: str) -> Certificate | None:
 class Issuer(Protocol):
     """What requests a certificate (a Caddy of its own). Tests swap in a fake."""
 
+    def problem(self) -> str | None:
+        """Why it cannot request one at all (a Caddy without ACME profiles), or None."""
+        ...
+
     def obtain(self, host: str, done: Callable[[], bool]) -> None:
         """Request a certificate for `host` and return once `done()` says it is stored.
         Raises CertificateError with the authority's reason when it fails."""
         ...
+
+
+# Let's Encrypt issues for public addresses only; another authority (Pebble) may not care.
+_PUBLIC_ONLY = (LETS_ENCRYPT, LETS_ENCRYPT_STAGING)
+
+
+def address_problem(host: str, ca: str) -> str | None:
+    """Why `ca` cannot give `host` a certificate, or None: Let's Encrypt refuses an address
+    that is not a public IPv4 one (a private, CGNAT or loopback address)."""
+    if not is_ipv4(host):
+        return f"{host or 'the address'} is not an IPv4 address"
+    if ca in _PUBLIC_ONLY and not ipaddress.ip_address(host).is_global:
+        return f"{host} is not a public address, and Let's Encrypt certifies public ones only"
+    return None
 
 
 @dataclass
@@ -175,6 +195,8 @@ class Certificates:
 
     @property
     def _previous(self) -> Path:
+        """Where a kept certificate waits while a new one is requested, at the same place
+        under it as in the store."""
         return self.paths.certificate_dir / "previous"
 
     def current(self, host: str) -> Certificate | None:
@@ -187,15 +209,18 @@ class Certificates:
     def for_stream(self, host: str, until: float) -> Certificate:
         """A certificate for `host` that lasts until `until`: the kept one when it does,
         otherwise a new one. Raises CertificateError when none can be had."""
+        self._recover()
         cert = self.current(host)
         if cert is not None and cert.lasts(until):
             return cert
+        # Nothing is asked when it could only fail: no request, no failed check is spent.
         if until > self.clock() + LONGEST_STREAM_SECONDS:
-            # Not even a new one would: nothing is asked, so no request is spent on it.
             raise CertificateError(
                 f"an HTTPS stream can run for at most {LONGEST_STREAM_SECONDS // 3600} hours, "
                 "the life of a certificate for an address"
             )
+        if problem := address_problem(host, self.config.acme_ca) or self.issuer.problem():
+            raise CertificateError(problem)
         why = "there is none yet" if cert is None else "the one kept does not last the stream"
         self.log(f"requesting a certificate for {host}: {why}")
         new = self._request(host, cert)
@@ -204,17 +229,30 @@ class Certificates:
                 f"the new certificate for {host} expires before the stream ends; "
                 "give the stream a shorter time limit (--ttl)"
             )
-        self.log(f"certificate for {host} until {_when(new.not_after)}")
+        self.log(f"certificate for {host} until {when(new.not_after)}")
         return new
+
+    def _recover(self) -> None:
+        """Put back a kept certificate that a request moved aside and could not put back
+        itself (the daemon was killed meanwhile), unless a new one took its place."""
+        if not self._previous.is_dir():
+            return
+        for folder in self._previous.glob("certificates/*/*"):
+            home = self.store / folder.relative_to(self._previous)
+            if not home.exists():
+                home.parent.mkdir(parents=True, exist_ok=True)
+                folder.rename(home)
+                self.log(f"{home}: the kept certificate is back after an interrupted request")
+        shutil.rmtree(self._previous, ignore_errors=True)
 
     def _request(self, host: str, old: Certificate | None) -> Certificate:
         """Ask for a new certificate. The old one is moved out of Caddy's way first, so
-        Caddy asks whatever it thinks of the old one, and put back when the request fails."""
+        Caddy asks whatever it thinks of the old one, and put back when the request fails
+        (or by `_recover`, when the daemon dies meanwhile)."""
         aside = None
         if old is not None:
-            shutil.rmtree(self._previous, ignore_errors=True)
-            self._previous.mkdir(parents=True)
-            aside = self._previous / old.cert_file.parent.name
+            aside = self._previous / old.cert_file.parent.relative_to(self.store)
+            aside.parent.mkdir(parents=True, exist_ok=True)
             old.cert_file.parent.rename(aside)
         try:
             self._obtain(host)
@@ -231,22 +269,29 @@ class Certificates:
         return new
 
     def _obtain(self, host: str) -> None:
-        """Run the request with port 80 open, and closed again whatever happens."""
+        """Run the request with port 80 open, and closed again whatever happens: a helper
+        that failed or was cut off may have opened it all the same."""
         if self.firewall is not None:
             try:
                 self.firewall.open()
             except FirewallError as exc:
+                self._close_port()
                 # Nothing is asked: a check that cannot reach the port counts as a failure.
                 raise CertificateError(str(exc)) from exc
         try:
             self.issuer.obtain(host, lambda: self.current(host) is not None)
         finally:
-            if self.firewall is not None:
-                try:
-                    self.firewall.close()
-                except FirewallError as exc:  # ExecStopPost closes it at the latest
-                    self.log(f"WARNING: {exc}")
+            self._close_port()
+
+    def _close_port(self) -> None:
+        if self.firewall is None:
+            return
+        try:
+            self.firewall.close()
+        except FirewallError as exc:  # ExecStopPost closes it at the latest
+            self.log(f"WARNING: {exc}")
 
 
-def _when(seconds: float) -> str:
+def when(seconds: float) -> str:
+    """A certificate's time, as `status`, `doctor` and the log show it."""
     return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(seconds))

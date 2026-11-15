@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import ssl
 import subprocess
 import time
@@ -21,7 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import caddy
+from vpstream import caddy, certificate, config
+from vpstream.certificate import CertificateError, Certificates
 from vpstream.tests.fakes import store_certificate
 from vpstream.tests.test_stream_integration import BODY, HTML, Live, _cookie, _free_port
 from vpstream.tools import SystemRunner
@@ -125,6 +127,7 @@ def test_the_approval_cookie_is_secure_over_https(kept: Live, sample: Path, tmp_
     status, headers, _ = kept.get("/aaa", headers=HTML)
     assert status == 403
     cookie = headers["set-cookie"]
+    assert cookie.startswith("__Host-vpstream=")
     for part in ("; Secure", "HttpOnly", "SameSite=Lax", "Path=/"):
         assert part in cookie, cookie
     # A viewer cannot make itself look plain: Caddy sets the scheme over what it sent.
@@ -145,6 +148,7 @@ def test_a_plain_http_stream_on_an_https_host_has_no_secure_cookie(
     assert info["stream"]["url"].startswith("http://") and info["stream"]["https"] is False
     status, headers, _ = kept.get("/aaa", headers=HTML)
     assert status == 403 and "Secure" not in headers["set-cookie"]
+    assert headers["set-cookie"].startswith("vpstream=")
 
 
 # --- a certificate from Pebble
@@ -281,3 +285,56 @@ def test_a_refused_request_starts_nothing_and_plain_http_still_can(
     finally:
         live.stop.set()
         live.thread.join(15)
+
+
+def _requester(pebble: Pebble, root: Path, port: int) -> Certificates:
+    """The stream's certificates alone, through the real Caddy, without a daemon."""
+    settings = config.Config(
+        stream_https=True,
+        acme_ca=pebble.directory,
+        acme_ca_root=str(pebble.cert),
+        acme_port=port,
+    )
+    paths = config.Paths.under(root)
+    issuer = caddy.CertificateCaddy(SystemRunner(), settings, paths)
+    return Certificates(settings, paths, issuer, None, log=lambda m: None)
+
+
+def _orders(pebble: Pebble) -> int:
+    pebble.log.flush()
+    return Path(pebble.log.name).read_text(errors="replace").count("POST /order-plz")
+
+
+def test_a_kept_certificate_that_does_not_last_is_replaced_through_caddy(
+    pebble: Pebble, short_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old one is moved out of Caddy's way, so Caddy asks for a new one. Pebble does not
+    date certificates back as Let's Encrypt does, so no margin here."""
+    monkeypatch.setattr(certificate, "MARGIN_SECONDS", 0)
+    monkeypatch.setattr(certificate, "LONGEST_STREAM_SECONDS", 200 * 3600)
+    certs = _requester(pebble, short_tmp, pebble.http_port)
+    first = certs.for_stream(HOST, time.time() + 3600)
+    old = first.cert_file.read_text()
+    time.sleep(1.1)  # a new certificate, a new second
+    second = certs.for_stream(HOST, first.not_after + 0.5)
+    assert second.cert_file.read_text() != old and second.not_after > first.not_after
+    assert not (certs.paths.certificate_dir / "previous").exists()
+    assert _orders(pebble) == 2
+
+
+@pytest.mark.parametrize("address", ["127.0.0.2", "0.0.0.0"])
+def test_a_program_on_the_check_port_means_nothing_is_asked(
+    pebble: Pebble, short_tmp: Path, address: str
+) -> None:
+    """Caddy would go on regardless ("assuming conflicting listener is correctly
+    configured") and spend a failed check on the other program."""
+    other = socket.socket()
+    other.bind((address, pebble.http_port))
+    other.listen()
+    try:
+        certs = _requester(pebble, short_tmp, pebble.http_port)
+        with pytest.raises(CertificateError, match="already used by another program"):
+            certs.for_stream(HOST, time.time() + 3600)
+        assert _orders(pebble) == 0
+    finally:
+        other.close()

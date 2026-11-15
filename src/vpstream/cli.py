@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, stream, text
+from vpstream import __version__, certificate, gate, stream, text
 from vpstream.net import url_host
 
 
@@ -161,7 +161,7 @@ def _https_line(https: dict[str, Any]) -> str | None:
     cert = https.get("certificate")
     if not cert:
         return "on; no certificate yet (the next stream asks for one)"
-    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(cert["expires"])))
+    when = certificate.when(float(cert["expires"]))
     left = float(cert["expires"]) - time.time()
     state = f"{text.duration(left)} left" if left > 0 else "expired; the next stream asks again"
     return f"on; certificate for {cert.get('host')} until {when} ({state})"
@@ -506,7 +506,8 @@ def _request(
             _revoke()  # what a stream that ended by itself left behind
         while True:
             try:
-                info: dict[str, Any] = client.call(socket, "POST", route, options)
+                wait = client.START_TIMEOUT if route == "stream/start" else None
+                info: dict[str, Any] = client.call(socket, "POST", route, options, wait)
                 return info
             except client.DaemonRefused as exc:
                 code = exc.data.get("code")

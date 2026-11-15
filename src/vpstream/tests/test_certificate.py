@@ -22,7 +22,8 @@ DATA = Path(__file__).parent / "data"
 HOST = "203.0.113.5"
 NOW = 1_800_000_000.0
 HOUR = 3600.0
-CFG = config.Config(stream_https=True)
+# A test authority: Let's Encrypt would refuse these documentation addresses.
+CFG = config.Config(stream_https=True, acme_ca="https://ca.test/dir")
 
 
 def _at(text: str) -> float:
@@ -229,3 +230,83 @@ def test_status_says_until_when(tmp_path: Path) -> None:
         "not_before": NOW - HOUR,
         "expires": NOW + 5 * HOUR,
     }
+
+
+# --- nothing is asked when it can only fail
+
+
+@pytest.mark.parametrize(
+    ("host", "ca", "refused"),
+    [
+        ("1.1.1.1", config.LETS_ENCRYPT, False),
+        ("1.1.1.1", config.LETS_ENCRYPT_STAGING, False),
+        ("10.0.0.5", config.LETS_ENCRYPT, True),
+        ("100.101.102.103", config.LETS_ENCRYPT, True),  # CGNAT, and Tailscale's range
+        ("192.168.1.9", config.LETS_ENCRYPT_STAGING, True),
+        ("127.0.0.1", config.LETS_ENCRYPT, True),
+        ("2001:db8::5", "https://ca.test/dir", True),
+        ("", "https://ca.test/dir", True),
+        ("192.168.1.9", "https://ca.test/dir", False),  # a test authority on the LAN
+    ],
+)
+def test_lets_encrypt_is_asked_only_for_a_public_ipv4_address(
+    host: str, ca: str, refused: bool
+) -> None:
+    assert (certificate.address_problem(host, ca) is not None) is refused
+
+
+def test_a_private_address_asks_nothing_and_opens_nothing(tmp_path: Path) -> None:
+    s = Setup(tmp_path)
+    s.certs.config = config.Config(stream_https=True)  # Let's Encrypt itself
+    with pytest.raises(CertificateError, match="not a public address"):
+        s.certs.for_stream("10.0.0.5", NOW + HOUR)
+    assert s.issuer.asked == [] and s.firewall.calls == []
+
+
+def test_an_issuer_that_cannot_ask_opens_nothing(tmp_path: Path) -> None:
+    s = Setup(tmp_path)
+    s.issuer.cannot = "Caddy 2.6.2 cannot request a certificate for an address"
+    with pytest.raises(CertificateError, match=r"2\.6\.2 cannot"):
+        s.certs.for_stream(HOST, NOW + HOUR)
+    assert s.issuer.asked == [] and s.firewall.calls == []
+
+
+def test_a_port_that_failed_to_open_is_closed_all_the_same(tmp_path: Path) -> None:
+    """The helper writes the port down before ufw runs: cut off, it may be open."""
+    s = Setup(tmp_path, fw_fail="ufw failed: ip6tables")
+    with pytest.raises(CertificateError):
+        s.certs.for_stream(HOST, NOW + HOUR)
+    assert s.firewall.calls == ["open", "close"]
+    assert s.issuer.asked == []
+
+
+def test_a_certificate_moved_aside_by_a_killed_daemon_is_put_back(tmp_path: Path) -> None:
+    s = Setup(tmp_path)
+    folder = s.keep(NOW + 100 * HOUR)
+    # What a request leaves when the daemon is killed while it runs.
+    aside = s.paths.certificate_dir / "previous" / folder.relative_to(s.certs.store)
+    aside.parent.mkdir(parents=True)
+    folder.rename(aside)
+    cert = s.certs.for_stream(HOST, NOW + 3 * HOUR)
+    assert cert.not_after == NOW + 100 * HOUR, "the kept one, back in its place"
+    assert s.issuer.asked == []
+    assert not (s.paths.certificate_dir / "previous").exists()
+    assert any("back after an interrupted request" in line for line in s.log)
+
+
+def test_a_new_certificate_beats_one_left_aside(tmp_path: Path) -> None:
+    s = Setup(tmp_path)
+    folder = s.keep(NOW + 100 * HOUR)
+    aside = s.paths.certificate_dir / "previous" / folder.relative_to(s.certs.store)
+    aside.parent.mkdir(parents=True)
+    (aside).mkdir()
+    (aside / "old").write_text("x")
+    s.certs.for_stream(HOST, NOW + 3 * HOUR)
+    assert not (folder / "old").exists() and (folder / f"{HOST}.crt").is_file()
+    assert not (s.paths.certificate_dir / "previous").exists()
+
+
+def test_the_command_line_waits_longer_than_a_request_can_take() -> None:
+    from vpstream import caddy, client, firewall
+
+    assert client.START_TIMEOUT > caddy.OBTAIN_SECONDS + 2 * firewall.TIMEOUT + 30

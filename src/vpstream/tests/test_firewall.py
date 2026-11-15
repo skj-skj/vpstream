@@ -334,6 +334,16 @@ def test_the_daemon_side_names_the_dashboard_actions() -> None:
 
 # --- the port Let's Encrypt checks
 
+# IPv4 alone: the certificate is for the IPv4 address, and one rule is one ufw answer.
+ACME_OPEN = [UFW, "allow", "proto", "tcp", "from", "0.0.0.0/0", "to", "any", "port", "80"]
+ACME_CLOSE = [UFW, "delete", *ACME_OPEN[1:]]
+
+
+def test_the_port_80_rule_is_for_ipv4_only() -> None:
+    assert firewall.ufw_args("open", 80, ipv4=True) == ACME_OPEN[1:]
+    assert firewall.ufw_args("close", 80, ipv4=True) == ACME_CLOSE[1:]
+    assert firewall.ACME_PORT.ipv4 and not firewall.DASHBOARD_PORT.ipv4
+
 
 @pytest.fixture
 def https_config(config_file: Path) -> Path:
@@ -346,11 +356,11 @@ def test_acme_open_opens_port_80_and_writes_it_down(https_config: Path) -> None:
     runner.on(UFW, stdout="Rule added\nRule added (v6)\n")
     code, message = _helper(["acme-open"], runner, https_config)
     assert code == 0 and "80/tcp" in message, message
-    assert runner.calls == [[UFW, "allow", "80/tcp"]]
+    assert runner.calls == [ACME_OPEN]
     record = https_config.parent / "open-acme-ports"
     assert firewall.recorded_ports(record, ME) == [80]
     code, _ = _helper(["acme-close"], runner, https_config)
-    assert code == 0 and runner.calls[-1] == [UFW, "delete", "allow", "80/tcp"]
+    assert code == 0 and runner.calls[-1] == ACME_CLOSE
     assert not record.exists()
     assert not (https_config.parent / "open-ports").exists(), "the stream's record is apart"
 
@@ -359,7 +369,7 @@ def test_acme_open_takes_the_configured_port(https_config: Path) -> None:
     https_config.write_text("[stream]\nhttps = true\n[acme]\nport = 5002\n")
     runner = FakeRunner()
     assert _helper(["acme-open"], runner, https_config)[0] == 0
-    assert runner.calls == [[UFW, "allow", "5002/tcp"]]
+    assert runner.calls == [[UFW, *firewall.ufw_args("open", 5002, ipv4=True)]]
 
 
 def test_acme_open_refuses_while_streams_are_plain_http(config_file: Path) -> None:
@@ -383,7 +393,7 @@ def test_acme_close_closes_only_what_acme_open_wrote_down(https_config: Path) ->
     https_config.write_text("[stream]\nhttps = false\n")  # switched off while it was open
     runner.calls.clear()
     assert _helper(["acme-close"], runner, https_config)[0] == 0
-    assert runner.calls == [[UFW, "delete", "allow", "80/tcp"]]
+    assert runner.calls == [ACME_CLOSE]
 
 
 @pytest.mark.parametrize("action", ["acme-open", "dash-open"])
@@ -409,7 +419,7 @@ def test_a_rule_this_helper_added_is_still_closed_when_opened_twice(https_config
     _helper(["acme-open"], runner, https_config)  # ufw skips: the rule is ours from before
     runner.calls.clear()
     assert _helper(["acme-close"], runner, https_config)[0] == 0
-    assert runner.calls == [[UFW, "delete", "allow", "80/tcp"]]
+    assert runner.calls == [ACME_CLOSE]
 
 
 def test_a_rule_there_before_for_ipv4_only_is_written_down(https_config: Path) -> None:

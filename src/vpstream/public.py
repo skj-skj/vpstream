@@ -168,19 +168,20 @@ def create_app(control: Control) -> Flask:
         if ip is None:  # not through Caddy
             return _text(400, "Bad request.")
         wants_html = "text/html" in request.headers.get("Accept", "").lower()
+        # What Caddy says the viewer came over; a viewer cannot set it (see `caddy`).
+        https = request.headers.get(caddy.HEADER_SCHEME) == "https"
+        cookie = gate.cookie_name(https)
         answer = control.visit(
             path,
             ip,
             request.headers.get("User-Agent", ""),
             wants_html,
-            request.cookies.get(gate.COOKIE),
+            request.cookies.get(cookie),
             # One value per name: a report is a handful of short numbers.
             {k: v[:MAX_VALUE] for k, v in list(request.args.items())[:MAX_VALUES]}
             if request.headers.get(player.REPORT_HEADER) == "1"
             else None,
         )
-        # What Caddy says the viewer came over; a viewer cannot set it (see `caddy`).
-        https = request.headers.get(caddy.HEADER_SCHEME) == "https"
         response = respond(answer, request.host, wants_html, "https" if https else "http")
         response.headers["Cache-Control"] = "no-store"
         if answer.cookie:
@@ -188,7 +189,7 @@ def create_app(control: Control) -> Flask:
             # cannot have it Secure. HttpOnly: no script needs it. Lax: a page on another
             # site cannot fetch with it, but a link to the stream still carries it.
             response.set_cookie(
-                gate.COOKIE,
+                cookie,
                 answer.cookie,
                 max_age=COOKIE_SECONDS,
                 path="/",
