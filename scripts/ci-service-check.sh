@@ -184,7 +184,8 @@ grep -q "no HTTPS certificate for the stream" /tmp/https.txt
 grep -q "vpstream start --http" /tmp/https.txt
 no grep -q "could not open" /tmp/https.txt     # sudo and the helper work from this unit
 no grep -q "may not listen" /tmp/https.txt     # and the service may bind port 80
-no has_rule "port 80"                          # closed again after the request
+no sudo grep -q -- "--dport 80 " /etc/ufw/user.rules /etc/ufw/user6.rules  # closed again
+no sudo test -e /etc/vpstream/open-acme-ports
 no pgrep -f "caddy/certificate/caddy.json"     # the requesting Caddy is gone
 as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci --http"
 has_rule "ufw allow 1337/tcp"
@@ -194,19 +195,25 @@ as_group "$BIN/vpstream stop"
 sudo rm -r "$MEDIA"
 
 step "port 80 through the helper: IPv4 only, and only its own rule is removed"
+# ufw's own rule files say it whether ufw is active or not (on the runner it is not).
+v4_80() { sudo grep -q -- "--dport 80 " /etc/ufw/user.rules; }
+v6_80() { sudo grep -q -- "--dport 80 " /etc/ufw/user6.rules; }
+no v4_80
 sudo -u vpstream sudo -n "$FW" acme-open
-has_rule "ufw allow proto tcp from 0.0.0.0/0 to any port 80"
-sudo ufw status | tee /tmp/ufw-status.txt
-no grep -q "^80.*(v6)" /tmp/ufw-status.txt
+rules
+v4_80
+no v6_80                                     # IPv4 only: the certificate is for it
 sudo grep -qx 80 /etc/vpstream/open-acme-ports
 sudo -u vpstream sudo -n "$FW" acme-close
-no has_rule "port 80"
+no v4_80
+no v6_80
 no sudo test -e /etc/vpstream/open-acme-ports
 sudo ufw allow proto tcp from 0.0.0.0/0 to any port 80   # someone else's, before ours
 sudo -u vpstream sudo -n "$FW" acme-open
 sudo -u vpstream sudo -n "$FW" acme-close
-has_rule "ufw allow proto tcp from 0.0.0.0/0 to any port 80"
+v4_80                                        # theirs stays
 sudo ufw delete allow proto tcp from 0.0.0.0/0 to any port 80
+no v4_80
 
 step "init --no-https goes back"
 sudo vpstream init --no-https
