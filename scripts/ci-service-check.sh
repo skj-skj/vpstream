@@ -158,6 +158,76 @@ sudo vpstream init
 sudo cat /etc/vpstream/install.json | diff /tmp/manifest-1.json -
 systemctl is-active vpstream
 
+step "HTTPS: the current Caddy, by vpstream install caddy, over Ubuntu's 2.6.2"
+vpstream install caddy --yes
+caddy version
+no systemctl is-active --quiet caddy   # the package's own web server stays off (port 80)
+no systemctl is-enabled --quiet caddy
+
+step "init --https: the service may bind port 80, and still reaches root through sudo"
+# An authority where nothing listens: Let's Encrypt is never asked, each request fails at once.
+printf '\n[acme]\nca = "https://127.0.0.1:9/directory"\n' | sudo tee -a /etc/vpstream/config.toml
+sudo vpstream init --https
+systemctl is-active vpstream
+UNIT=/etc/systemd/system/vpstream.service
+grep -qx "AmbientCapabilities=CAP_NET_BIND_SERVICE" "$UNIT"
+no grep -q CapabilityBoundingSet "$UNIT"   # it would keep sudo from becoming root
+grep CapAmb "/proc/$(systemctl show -p MainPID --value vpstream)/status" | tee /tmp/capamb.txt
+grep -q "0000000000000400" /tmp/capamb.txt   # CAP_NET_BIND_SERVICE alone
+MEDIA=/srv/vpstream-ci-media
+sudo mkdir -p "$MEDIA"
+head -c 300000 /dev/urandom | sudo tee "$MEDIA/film.mkv" > /dev/null
+sudo chmod 755 "$MEDIA" && sudo chmod 644 "$MEDIA/film.mkv"
+no as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci --ttl 60" 2> /tmp/https.txt
+cat /tmp/https.txt
+grep -q "no HTTPS certificate for the stream" /tmp/https.txt
+grep -q "vpstream start --http" /tmp/https.txt
+no grep -q "could not open" /tmp/https.txt     # sudo and the helper work from this unit
+no grep -q "may not listen" /tmp/https.txt     # and the service may bind port 80
+no sudo grep -q -- "--dport 80 " /etc/ufw/user.rules /etc/ufw/user6.rules  # closed again
+no sudo test -e /etc/vpstream/open-acme-ports
+no pgrep -f "caddy/certificate/caddy.json"     # the requesting Caddy is gone
+as_group "$BIN/vpstream start --file $MEDIA/film.mkv --alias ci --http"
+has_rule "ufw allow 1337/tcp"
+curl -sS -m 10 -o /tmp/film.out http://127.0.0.1:1337/ci
+cmp /tmp/film.out "$MEDIA/film.mkv"
+as_group "$BIN/vpstream stop"
+sudo rm -r "$MEDIA"
+
+step "port 80 through the helper: IPv4 only, and only its own rule is removed"
+# ufw's own rule files say it whether ufw is active or not (on the runner it is not).
+v4_80() { sudo grep -q -- "--dport 80 " /etc/ufw/user.rules; }
+v6_80() { sudo grep -q -- "--dport 80 " /etc/ufw/user6.rules; }
+no v4_80
+sudo -u vpstream sudo -n "$FW" acme-open
+rules
+v4_80
+no v6_80                                     # IPv4 only: the certificate is for it
+sudo grep -qx 80 /etc/vpstream/open-acme-ports
+sudo -u vpstream sudo -n "$FW" acme-close
+no v4_80
+no v6_80
+no sudo test -e /etc/vpstream/open-acme-ports
+sudo ufw allow proto tcp from 0.0.0.0/0 to any port 80   # someone else's, before ours
+sudo -u vpstream sudo -n "$FW" acme-open
+sudo -u vpstream sudo -n "$FW" acme-close
+v4_80                                        # theirs stays
+sudo ufw delete allow proto tcp from 0.0.0.0/0 to any port 80
+no v4_80
+sudo ufw allow 80/tcp   # the usual hand-made rule, IPv4 and IPv6, before vpstream came
+sudo -u vpstream sudo -n "$FW" acme-open
+sudo -u vpstream sudo -n "$FW" acme-close
+v4_80 && v6_80          # both halves stay
+has_rule "ufw allow 80/tcp"
+sudo ufw delete allow 80/tcp
+no v4_80
+
+step "init --no-https goes back"
+sudo vpstream init --no-https
+no grep -q AmbientCapabilities "$UNIT"
+sudo grep -qx "https = false" /etc/vpstream/config.toml
+systemctl is-active vpstream
+
 step "uninstall leaves no trace"
 sudo vpstream uninstall --yes
 no getent passwd vpstream

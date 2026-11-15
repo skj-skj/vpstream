@@ -8,7 +8,6 @@ through sudo; everything is downloaded, checked and tested first, as the user.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
@@ -18,15 +17,20 @@ import sys
 import tarfile
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
-from vpstream import __version__
 from vpstream.ffargs import parse_ffmpeg_list
+from vpstream.system_install import (
+    APT_GET,
+    Cancelled,
+    Http,
+    SetupError,
+    as_root,
+    sudo_prefix,
+)
 from vpstream.tools import Runner, tail
 
 REPO = "FFmpeg-Builds/FFmpeg-Builds"  # formerly BtbN/FFmpeg-Builds
@@ -50,23 +54,12 @@ APT_PACKAGES = (
 REQUIRED_ENCODERS = (("libx264",), ("libx265",), ("libsvtav1", "libaom-av1"))
 REQUIRED_FILTERS = ("overlay", "scale2ref", "subtitles", "tonemap", "zscale")
 INSTALLED_BYTES = 300_000_000  # ffmpeg and ffprobe, unpacked
-COMMAND_TIMEOUT = 900  # apt-get on a slow mirror
-# No questions: commands run without a terminal on stdin.
-APT_GET = ("env", "DEBIAN_FRONTEND=noninteractive", "apt-get")
 
 _ASSET = re.compile(
     r"^ffmpeg-(?P<version>n(?P<major>\d+)\.(?P<minor>\d+)(?:\.\d+)?(?:-\d+-g[0-9a-f]+)?)"
     r"-(?P<arch>linux64|linuxarm64)-gpl-(?P=major)\.(?P=minor)\.tar\.xz$"
 )
 _VERSION = re.compile(r"\bn(\d+)\.(\d+)(?:\.(\d+))?(?:-(\d+)-g[0-9a-f]+)?")
-
-
-class SetupError(RuntimeError):
-    pass
-
-
-class Cancelled(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -227,58 +220,6 @@ def apt_removals(runner: Runner, packages: Sequence[str]) -> list[str]:
     return [line.split()[1] for line in res.stdout.splitlines() if line.startswith("Remv ")]
 
 
-# --- network
-
-
-class Http(Protocol):
-    def get_json(self, url: str) -> Any: ...
-
-    def get_text(self, url: str) -> str: ...
-
-    def download(self, url: str, dest: Path, progress: Callable[[int, int], None]) -> str:
-        """Save `url` to `dest` and return its sha256."""
-        ...
-
-
-class UrlHttp:
-    timeout = 60
-
-    def _open(self, url: str, accept: str = "*/*") -> Any:
-        headers = {"User-Agent": f"vpstream/{__version__}", "Accept": accept}
-        try:
-            return urllib.request.urlopen(
-                urllib.request.Request(url, headers=headers), timeout=self.timeout
-            )
-        except urllib.error.HTTPError as exc:
-            if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0":
-                msg = "GitHub's API limit for this IP is used up; try again in an hour"
-                raise SetupError(msg) from exc
-            raise SetupError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
-        except (urllib.error.URLError, OSError) as exc:
-            reason = getattr(exc, "reason", exc)
-            raise SetupError(f"cannot download {url}: {reason}") from exc
-
-    def get_json(self, url: str) -> Any:
-        with self._open(url, "application/vnd.github+json") as resp:
-            return json.load(resp)
-
-    def get_text(self, url: str) -> str:
-        with self._open(url) as resp:
-            return str(resp.read().decode("utf-8", errors="replace"))
-
-    def download(self, url: str, dest: Path, progress: Callable[[int, int], None]) -> str:
-        digest = hashlib.sha256()
-        with self._open(url) as resp, dest.open("wb") as out:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            while chunk := resp.read(1 << 20):
-                out.write(chunk)
-                digest.update(chunk)
-                done += len(chunk)
-                progress(done, total)
-        return digest.hexdigest()
-
-
 # --- the install itself
 
 
@@ -296,18 +237,10 @@ class Setup:
     libc: str | None = None
 
     def _sudo(self) -> list[str]:
-        root = os.geteuid() == 0 if self.is_root is None else self.is_root
-        if root:
-            return []
-        if not self.runner.which("sudo"):
-            raise SetupError("installing needs root: run it as root, or install sudo")
-        return ["sudo"]
+        return sudo_prefix(self.runner, self.is_root)
 
     def _system(self, *args: str | Path, what: str) -> None:
-        cmd = [*self._sudo(), *map(str, args)]
-        res = self.runner.run(cmd, timeout=COMMAND_TIMEOUT)
-        if res.returncode != 0:
-            raise SetupError(f"{what} failed ({' '.join(cmd)}): {tail(res, stdout=True)}")
+        as_root(self.runner, self.is_root, *args, what=what)
 
     def _arch(self) -> str:
         if not (self.system or sys.platform).startswith("linux"):

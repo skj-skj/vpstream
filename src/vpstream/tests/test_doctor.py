@@ -423,3 +423,50 @@ def test_the_daemon_saying_it_has_no_password_is_a_problem(tmp_path: Path) -> No
     live = {"dashboard": {**LIVE["dashboard"], "password": False}}
     check = _by_name(doctor.run_checks(runner, status=live, **kwargs))["dashboard password"]
     assert check.status == "problem" and check.fix == "sudo vpstream dash-pass"
+
+
+# --- HTTPS for streams
+
+
+def _https(tmp_path: Path, version: str = "v2.11.9 h1:x=\n") -> tuple[FakeRunner, dict]:
+    runner, kwargs = _host(tmp_path)
+    paths = kwargs["paths"]
+    paths.config_file.parent.mkdir(parents=True)
+    paths.config_file.write_text("[stream]\nhttps = true\n")
+    runner.on("/usr/bin/caddy", "version", stdout=version)
+    return runner, kwargs
+
+
+def test_no_https_checks_while_streams_are_plain_http(tmp_path: Path) -> None:
+    runner, kwargs = _host(tmp_path)
+    assert not {"https caddy", "https certificate"} & set(
+        _by_name(doctor.run_checks(runner, **kwargs))
+    )
+
+
+def test_https_with_an_old_caddy_is_a_problem(tmp_path: Path) -> None:
+    runner, kwargs = _https(tmp_path, "2.6.2\n")
+    checks = doctor.run_checks(runner, status=None, **kwargs)
+    check = _by_name(checks)["https caddy"]
+    assert check.status == "problem" and "2.10 or newer" in check.detail
+    assert doctor.exit_code(checks) == 1
+
+
+def test_https_tells_the_certificate_the_daemon_keeps(tmp_path: Path) -> None:
+    import time
+
+    runner, kwargs = _https(tmp_path)
+    expires = time.time() + 3600
+    cert = {"host": "203.0.113.5", "not_before": 0, "expires": expires}
+    states = {
+        "none yet": {"https": {"enabled": True, "certificate": None}},
+        "for 203.0.113.5": {"https": {"enabled": True, "certificate": cert}},
+        "expired": {"https": {"enabled": True, "certificate": {**cert, "expires": 1.0}}},
+        "plain HTTP; restart": {"https": {"enabled": False, "certificate": None}},
+        "does not answer": None,
+    }
+    for words, status in states.items():
+        check = _by_name(doctor.run_checks(runner, status=status, **kwargs))["https certificate"]
+        assert words in check.detail, (words, check)
+        assert check.status == ("ok" if words in ("none yet", "for 203.0.113.5") else "warning")
+    assert _by_name(doctor.run_checks(runner, status=None, **kwargs))["https caddy"].status == "ok"

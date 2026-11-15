@@ -14,6 +14,7 @@ import pytest
 
 from vpstream import cli
 from vpstream import ffmpeg_install as fi
+from vpstream import system_install as si
 from vpstream.tools import Result, SystemRunner
 
 V9 = "n9.0.2-48-gd4070a14ce"
@@ -67,7 +68,7 @@ def test_a_new_major_version_is_found_without_code_changes() -> None:
 
 def test_latest_build_needs_checksums_and_a_match() -> None:
     no_sums = [_release("autobuild-1", "2026-11-09T12:00:00Z", _gpl(V9), sums=False)]
-    with pytest.raises(fi.SetupError, match="no stable linux64"):
+    with pytest.raises(si.SetupError, match="no stable linux64"):
         fi.latest_build(no_sums, "linux64")
     older = _release("autobuild-0", "2026-11-08T12:00:00Z", _gpl("n9.0.1"))
     assert fi.latest_build([*no_sums, older], "linux64").version == "n9.0.1"
@@ -314,7 +315,7 @@ def test_running_again_adds_packages_that_are_missing(env: Env) -> None:
 
 
 def test_without_sudo_a_normal_user_is_refused(env: Env) -> None:
-    with pytest.raises(fi.SetupError, match="needs root"):
+    with pytest.raises(si.SetupError, match="needs root"):
         env.run(is_root=False)
     assert not env.layout.install_dir.exists()
 
@@ -346,7 +347,7 @@ def test_existing_apt_ffmpeg_is_uninstalled_after_a_yes(env: Env) -> None:
 def test_no_cancels_and_changes_nothing(env: Env) -> None:
     _apt_ffmpeg(env)
     env.answer = False
-    with pytest.raises(fi.Cancelled):
+    with pytest.raises(si.Cancelled):
         env.run()
     assert not env.layout.install_dir.exists() and not env.layout.bin_dir.exists()
     assert not [c for c in env.system_calls("apt-get") if "-s" not in c]
@@ -357,7 +358,7 @@ def test_ffmpeg_from_elsewhere_is_never_removed(env: Env) -> None:
     own = env.usr_bin / "ffmpeg"
     own.write_bytes(_script("echo ffmpeg version 5.1 Copyright"))
     own.chmod(0o755)
-    with pytest.raises(fi.SetupError, match=r"not from apt, snap or vpstream.*remove it yourself"):
+    with pytest.raises(si.SetupError, match=r"not from apt, snap or vpstream.*remove it yourself"):
         env.run()
     assert env.questions == [] and own.is_file()
 
@@ -366,7 +367,7 @@ def test_a_foreign_file_in_the_bin_folder_is_not_overwritten(env: Env) -> None:
     env.runner.path = [env.usr_bin]  # the bin folder is not first on PATH, so not found there
     env.layout.bin_dir.mkdir()
     (env.layout.bin_dir / "ffprobe").write_text("mine")
-    with pytest.raises(fi.SetupError, match="was not installed by vpstream"):
+    with pytest.raises(si.SetupError, match="was not installed by vpstream"):
         env.run()
     assert (env.layout.bin_dir / "ffprobe").read_text() == "mine"
 
@@ -410,7 +411,7 @@ def test_update_without_an_install_installs(env: Env) -> None:
 
 def test_a_bad_checksum_changes_nothing(env: Env) -> None:
     env.http = FakeHttp(bad_sum=True)
-    with pytest.raises(fi.SetupError, match="does not match its sha256"):
+    with pytest.raises(si.SetupError, match="does not match its sha256"):
         env.run()
     assert not env.layout.install_dir.exists()
 
@@ -418,7 +419,7 @@ def test_a_bad_checksum_changes_nothing(env: Env) -> None:
 def test_a_build_without_the_needed_encoders_changes_nothing(env: Env) -> None:
     _apt_ffmpeg(env)
     env.http = FakeHttp(encoders=("libx264",))
-    with pytest.raises(fi.SetupError, match="lacks libx265, libsvtav1 or libaom-av1"):
+    with pytest.raises(si.SetupError, match="lacks libx265, libsvtav1 or libaom-av1"):
         env.run()
     assert not env.layout.install_dir.exists()
     assert not [c for c in env.system_calls("apt-get") if "remove" in c and "-s" not in c]
@@ -426,7 +427,7 @@ def test_a_build_without_the_needed_encoders_changes_nothing(env: Env) -> None:
 
 def test_a_build_this_system_cannot_run_changes_nothing(env: Env) -> None:
     env.http = FakeHttp(loader="/no/such/ld-linux.so")
-    with pytest.raises(fi.SetupError, match=r"does not run here: its program loader is missing"):
+    with pytest.raises(si.SetupError, match=r"does not run here: its program loader is missing"):
         env.run()
     assert not env.layout.install_dir.exists() and list(env.tmp.iterdir()) == []
 
@@ -434,7 +435,7 @@ def test_a_build_this_system_cannot_run_changes_nothing(env: Env) -> None:
 def test_a_failed_system_step_is_reported(env: Env) -> None:
     env.runner.tools |= {"apt-get", "dpkg-query"}
     env.runner.on("apt-get", "install", returncode=100, stdout="E: Unable to locate package")
-    with pytest.raises(fi.SetupError, match=r"libraries and fonts ffmpeg needs.*Unable to locate"):
+    with pytest.raises(si.SetupError, match=r"libraries and fonts ffmpeg needs.*Unable to locate"):
         env.run()
 
 
@@ -447,7 +448,7 @@ def test_a_failed_system_step_is_reported(env: Env) -> None:
     ],
 )
 def test_unsupported_hosts_are_refused(env: Env, kw: dict[str, Any], match: str) -> None:
-    with pytest.raises(fi.SetupError, match=match):
+    with pytest.raises(si.SetupError, match=match):
         env.run(**kw)
     assert env.http.calls == []
 
@@ -470,7 +471,7 @@ def test_arm_hosts_get_the_arm_build(env: Env) -> None:
 
 @pytest.mark.parametrize(
     ("raised", "code", "text"),
-    [(fi.Cancelled(), 1, "Cancelled; nothing was changed."), (fi.SetupError("boom"), 1, "boom")],
+    [(si.Cancelled(), 1, "Cancelled; nothing was changed."), (si.SetupError("boom"), 1, "boom")],
 )
 def test_cli_outcomes(
     monkeypatch: pytest.MonkeyPatch,
@@ -496,7 +497,7 @@ def test_cli_without_a_terminal_needs_yes(
 ) -> None:
     def fake_run(self: fi.Setup, *, update: bool) -> str:
         if not self.confirm("This will uninstall the existing ffmpeg (x). Proceed?"):
-            raise fi.Cancelled
+            raise si.Cancelled
         return "done"
 
     monkeypatch.setattr(fi.Setup, "run", fake_run)
@@ -531,7 +532,7 @@ def test_real_ffmpeg_install(tmp_path: Path) -> None:
     notes: list[str] = []
     setup = fi.Setup(
         runner=Host(),
-        http=fi.UrlHttp(),
+        http=si.UrlHttp(),
         confirm=lambda question: pytest.fail(f"asked: {question}"),
         progress=notes.append,
         layout=layout,

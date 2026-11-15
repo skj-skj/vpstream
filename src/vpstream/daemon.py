@@ -23,7 +23,16 @@ from typing import Any, Protocol
 
 from vpstream import __version__, api, net, prepare, public, tailscale
 from vpstream import login as auth
-from vpstream.caddy import CaddyError, CaddyServer, DashboardCaddy, Server, read_certificate
+from vpstream.caddy import (
+    CaddyError,
+    CaddyServer,
+    CertificateCaddy,
+    DashboardCaddy,
+    Server,
+    StreamServer,
+    read_certificate,
+)
+from vpstream.certificate import Certificates
 from vpstream.config import Config, Paths
 from vpstream.control import Control
 from vpstream.firewall import Firewall, FirewallError
@@ -130,7 +139,8 @@ class Daemon:
     paths: Paths
     runner: Runner
     firewall: Firewall | None = None
-    server: Server | None = None  # the public server; None means streams cannot be started
+    server: StreamServer | None = None  # the public server; None: streams cannot be started
+    certificates: Certificates | None = None  # with `[stream] https`: the certificate
     # Public mode only: the dashboard's Caddy, and the firewall for the dashboard port.
     dashboard_server: DashboardServer | None = None
     dashboard_firewall: Firewall | None = None
@@ -162,6 +172,7 @@ class Daemon:
             self.log,
             runner=self.runner,
             preparer=preparer,
+            certificates=self.certificates,
         )
 
     def _verifier(self) -> auth.Verifier | None:
@@ -237,6 +248,10 @@ class Daemon:
             "pid": os.getpid(),
             "uptime_seconds": round(time.time() - self.started, 1),
             **self.control.status(),
+            "https": {
+                "enabled": self.config.stream_https,
+                "certificate": self.control.certificate_status(),
+            },
             "dashboard": self._dashboard_status(),
         }
 
@@ -452,12 +467,27 @@ def _close(servers: list[tuple[Path, socket.socket, Any]], shutdown: bool = Fals
         path.unlink(missing_ok=True)
 
 
+def stream_certificates(
+    config: Config,
+    paths: Paths,
+    runner: Runner,
+    firewall: Firewall | None,
+    log: Callable[[str], None],
+) -> Certificates | None:
+    """With `[stream] https`: the stream's certificate, requested by a Caddy of its own
+    with port 80 opened through `firewall` meanwhile."""
+    if not config.stream_https:
+        return None
+    return Certificates(config, paths, CertificateCaddy(runner, config, paths), firewall, log=log)
+
+
 def run(
     config: Config,
     paths: Paths,
     runner: Runner,
     firewall: Firewall | None = None,
     dashboard_firewall: Firewall | None = None,
+    acme_firewall: Firewall | None = None,
 ) -> int:
     """Run the daemon in the foreground until SIGTERM or Ctrl+C."""
     import signal
@@ -467,7 +497,8 @@ def run(
         signal.signal(signum, lambda *_: stop.set())
     server = CaddyServer(runner, config.stream_port, paths)
     log = lambda m: print(m, flush=True)  # noqa: E731
-    daemon = Daemon(config, paths, runner, firewall, server, log=log)
+    certificates = stream_certificates(config, paths, runner, acme_firewall, log)
+    daemon = Daemon(config, paths, runner, firewall, server, certificates, log=log)
     if config.dashboard_public:
         daemon.dashboard_server = DashboardCaddy(runner, config.dashboard_port, [], paths)
         daemon.dashboard_firewall = dashboard_firewall

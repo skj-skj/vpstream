@@ -563,6 +563,8 @@
         info.stream.guessers.join(", ") + ". Enable one on the Devices tab to let it back in."));
     }
     fill($("notes"), notes);
+    // Only a host that serves streams over HTTPS offers plain HTTP for one stream.
+    $("plainfield").hidden = !(info.https && info.https.enabled);
     renderStream(info);
     renderDevices(info);
     renderViewers(info);
@@ -622,6 +624,7 @@
         options[name] = value;
       }
     });
+    if (!$("plainfield").hidden && $("plain").checked) { options.http = true; }
     change("stream/start", options, null, "The stream is running");
   });
   $("stop").addEventListener("click", function () {

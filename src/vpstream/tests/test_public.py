@@ -84,6 +84,16 @@ def test_a_browser_gets_the_index_and_a_player_the_playlist(
     assert named.mimetype == "audio/x-mpegurl"
 
 
+def test_a_playlist_over_https_names_https(
+    control: Control, viewer: FlaskClient, show: Path
+) -> None:
+    control.start({"dir": str(show), "alias": "aaa"})
+    plain = viewer.get("/aaa", headers=IP).data.decode().splitlines()
+    assert plain[2] == "http://localhost/aaa/1"
+    secure = viewer.get("/aaa", headers={**IP, "X-Vpstream-Scheme": "https"}).data.decode()
+    assert secure.splitlines()[2] == "https://localhost/aaa/1"
+
+
 def test_playlist_entries_never_carry_a_made_up_host() -> None:
     for host in ("evil.example/x?", "a b", "", "x" * 300, "h\r\nX: y"):
         lines = public.playlist("aaa", ["one\ntwo.mkv"], host).splitlines()

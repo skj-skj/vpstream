@@ -35,9 +35,13 @@ class Daemon:
     def __init__(self, **routes: list[Any]) -> None:
         self.routes = {"status": [{"stream": None, "prepare": []}], **routes}
         self.calls: list[tuple[str, Any]] = []
+        self.timeouts: dict[str, Any] = {}
 
-    def __call__(self, socket: Path, method: str, route: str, payload: Any = None) -> Any:
+    def __call__(
+        self, socket: Path, method: str, route: str, payload: Any = None, timeout: Any = None
+    ) -> Any:
         self.calls.append((route, payload))
+        self.timeouts[route] = timeout
         answers = self.routes[route]
         answer = answers.pop(0) if len(answers) > 1 else answers[0]
         if isinstance(answer, Exception):
@@ -451,3 +455,14 @@ def test_format_job(item: dict[str, Any], shown: str) -> None:
 )
 def test_video_states(video: dict[str, Any], mark: str) -> None:
     assert cli._video_state(video) == mark
+
+
+def test_start_waits_long_enough_for_a_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vpstream import client
+
+    d = use(monkeypatch, Daemon(prepare=[{"plans": [], "jobs": []}]))
+    cli.main(["prepare", "--file", "/m/f.mkv"])
+    assert d.timeouts["prepare"] is None  # the usual wait
+    d = use(monkeypatch, Daemon(**{"stream/start": [{"stream": None}]}, status=[{}]))
+    cli.main(["start", "--file", "/m/f.mkv"])
+    assert d.timeouts["stream/start"] == client.START_TIMEOUT

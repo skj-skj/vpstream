@@ -10,8 +10,8 @@ mode).
 
 ## Install
 
-Needs Linux, Python 3.12+, Caddy, ufw, systemd, and Tailscale with HTTPS certificates (not
-needed for a public dashboard).
+Needs Linux, Python 3.12+, Caddy (2.10 or newer for HTTPS streams: `vpstream install caddy`),
+ufw, systemd, and Tailscale with HTTPS certificates (not needed for a public dashboard).
 ffmpeg is used by browser mode, `bench` and `caps`; mkvtoolnix and the `acl` package are
 optional (see below). `vpstream doctor` checks all of it and prints the fix for anything missing.
 
@@ -41,12 +41,14 @@ prefix and `pipx upgrade vpstream`, then `sudo vpstream init` again.
 | `vpstream doctor` | Checks this host |
 | `sudo vpstream init` / `uninstall` | Sets the service up, or removes it (`--purge` also the cache) |
 | `sudo vpstream init --no-tailscale` / `--tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
+| `sudo vpstream init --https` / `--no-https` | Serves streams over HTTPS with a Let's Encrypt certificate for the address, or over plain HTTP again |
 | `sudo vpstream dash-pass` | Sets a new password for the public dashboard (logs every browser out; a stream goes on) |
 | `vpstream dash-unblock` | Forgets the public dashboard's failed logins, to log in from a new browser |
 | `vpstream dashboard-cert` | Prints the public dashboard's certificate authority, to install on your phone |
 | `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles |
 | `vpstream caps` | Serves a page that tests what a TV browser can play |
 | `vpstream install ffmpeg` / `update ffmpeg` | Installs or updates a current static ffmpeg build |
+| `vpstream install caddy` / `update caddy` | Installs or updates the newest Caddy from Caddy's own apt repository (Debian, Ubuntu, Raspbian) |
 | `vpstream selftest [--integration]` | Runs the tests shipped with the package |
 
 ## Streaming
@@ -150,6 +152,28 @@ The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale ser
   on stop, crash or reboot. Open it in your provider's firewall too, if it has one.
 - The command line keeps talking to the daemon over its socket, with no password.
   `sudo vpstream init --tailscale` goes back: the password is removed and the port closed.
+
+## HTTPS for streams
+
+`sudo vpstream init --https` serves streams at `https://<ip>:1337/ALIAS` with a Let's Encrypt
+certificate for the IPv4 address (the `shortlived` profile: 160 hours). It needs Caddy 2.10 or
+newer, for ACME profiles; Ubuntu 24.04 has 2.6.2, so run `vpstream install caddy` first.
+
+- **One certificate, kept:** a stream that starts uses the kept certificate when it lasts past
+  the stream's end; otherwise a new one is requested then, before the stream starts, by a
+  Caddy of its own that stops as soon as it has it or fails. Let's Encrypt allows 5 for the
+  same address a week, so nothing is asked again while one lasts. Nothing changes while a
+  stream runs, so an HTTPS stream runs at most 156 hours (`--ttl`). `init` keeps the
+  certificate; `uninstall` removes it.
+- **Port 80:** Let's Encrypt checks the address on port 80. The service opens it in ufw only
+  while a certificate is requested, and closes it after (also on stop, crash or reboot); a
+  rule that was there before stays. Let 80/tcp in your provider's firewall too.
+- **When the request fails** (port 80 blocked, a rate limit), the stream does not start and
+  says why. `vpstream start --http ...` (or "Plain HTTP this time" on the dashboard) starts that
+  one stream over plain HTTP.
+- **Cookie:** over HTTPS the approval cookie is `Secure`.
+- **Trying it out:** `[acme] ca` sets another authority, such as Let's Encrypt's staging
+  server or a local Pebble (with `ca_root` and `port`), so no real limit is spent.
 
 ## Development
 

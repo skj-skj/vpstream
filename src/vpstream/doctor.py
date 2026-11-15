@@ -8,12 +8,13 @@ from __future__ import annotations
 import os
 import stat
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from vpstream import config, firewall, login, tailscale
+from vpstream import caddy, certificate, config, firewall, login, tailscale
 from vpstream.tools import PACKAGES, Runner
 
 Status = Literal["ok", "problem", "warning"]
@@ -41,7 +42,7 @@ class Tool:
 TOOLS = (
     Tool("ffmpeg", "preparing videos for the browser", "vpstream install ffmpeg"),
     Tool("ffprobe", "reading the tracks of a video", "vpstream install ffmpeg"),
-    Tool("caddy", "serving streams", "sudo apt install caddy"),
+    Tool("caddy", "serving streams", "vpstream install caddy"),
     Tool("ufw", "opening the stream port only while a stream runs", "sudo apt install ufw"),
     Tool("tailscale", "publishing the dashboard", "see https://tailscale.com/download/linux"),
     Tool("systemctl", "running the service", "vpstream needs a host that runs systemd"),
@@ -216,6 +217,43 @@ def check_public_dashboard(
     return checks
 
 
+def check_https(runner: Runner, acme_port: int, status: dict[str, Any] | None) -> list[Check]:
+    """HTTPS for streams: a Caddy that can request a certificate for an address, and the
+    certificate the daemon keeps. Whether port 80 is reachable from the internet cannot be
+    seen from here; the first request says."""
+    problem = caddy.profiles_problem(runner)
+    if problem:
+        checks = [Check("https caddy", "problem", problem, "vpstream install caddy")]
+    else:
+        checks = [Check("https caddy", "ok", "can request a certificate for an address")]
+    https = (status or {}).get("https") or {}
+    cert = https.get("certificate")
+    name = "https certificate"
+    if status is None:
+        checks.append(Check(name, "warning", "the daemon does not answer, so not known"))
+    elif not https.get("enabled"):
+        checks.append(Check(name, "warning", "the daemon serves plain HTTP; restart it"))
+    elif not cert:
+        checks.append(
+            Check(
+                name,
+                "ok",
+                f"none yet; the first stream asks for one (port {acme_port}/tcp must be "
+                "reachable from the internet, in your provider's firewall too)",
+            )
+        )
+    else:
+        left = float(cert["expires"]) - time.time()
+        when = certificate.when(float(cert["expires"]))
+        detail = f"for {cert.get('host')}, until {when}"
+        checks.append(
+            Check(name, "ok", detail)
+            if left > 0
+            else Check(name, "warning", f"{detail}: expired, the next stream asks for a new one")
+        )
+    return checks
+
+
 def check_fonts(runner: Runner) -> list[Check]:
     if not runner.which("fc-list"):
         return [
@@ -371,6 +409,8 @@ def run_checks(
     checks.append(check_config(paths.config_file))
     if "systemctl" in found:
         checks.append(check_service(runner, unit_file))
+    if cfg is not None and cfg.stream_https:
+        checks += check_https(runner, cfg.acme_port, status)
     if cfg is not None and public:
         checks += check_public_dashboard(paths, cfg.dashboard_port, status, owner_uid)
     elif cfg is not None and "tailscale" in found and unit_file.exists():

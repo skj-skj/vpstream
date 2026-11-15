@@ -9,6 +9,10 @@ resets `tailscale serve` or touches a port of it that is not vpstream's.
 default), or public (`--no-tailscale`), over HTTPS through the daemon's own Caddy and behind
 a password. Switching either way undoes what the other mode set up: the served port, or the
 password and the dashboard port in ufw (which the daemon opens while it serves).
+
+`init --https` serves streams over HTTPS, with a Let's Encrypt certificate for the address
+(see `certificate`), and `--no-https` goes back to plain HTTP. The certificate is never
+removed by init, only by uninstall with the rest of the state.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from vpstream import caddy, client, config, doctor, firewall, login, net, tailscale
+from vpstream import caddy, certificate, client, config, doctor, firewall, login, net, tailscale
 from vpstream.files import write_atomic
 from vpstream.tools import Result, Runner, tail
 
@@ -120,9 +124,13 @@ def port_busy(port: int) -> bool:
     return False
 
 
-def unit_text(vpstream_bin: Path, helper: Path) -> str:
+def unit_text(vpstream_bin: Path, helper: Path, https: bool = False) -> str:
     """The systemd unit. `+` runs ExecStopPost as root, so the stream port is closed after a
-    stop or a crash without depending on sudo."""
+    stop or a crash without depending on sudo. With `https` the service may bind port 80,
+    where Let's Encrypt checks while a certificate is requested; nothing else in privilege
+    comes with it. No CapabilityBoundingSet: it would hold sudo itself to that one
+    capability, and the firewall helper is run through sudo."""
+    bind = "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" if https else ""
     return f"""\
 # Written by `vpstream init`. Removed by `vpstream uninstall`.
 [Unit]
@@ -136,9 +144,10 @@ Group={USER}
 RuntimeDirectory={USER}
 RuntimeDirectoryMode=0750
 UMask=0027
-ExecStart={vpstream_bin} daemon
+{bind}ExecStart={vpstream_bin} daemon
 ExecStopPost=+{helper} close
 ExecStopPost=+{helper} dash-close
+ExecStopPost=+{helper} acme-close
 Restart=on-failure
 RestartSec=5
 
@@ -222,6 +231,10 @@ class Service:
         """Where init puts the dashboard: as asked, or where it is now."""
         return self._config().dashboard_public if public is None else public
 
+    def stream_https(self, https: bool | None = None) -> bool:
+        """Whether init serves streams over HTTPS: as asked, or as now."""
+        return self._config().stream_https if https is None else https
+
     def password_problem(self) -> str | None:
         """Why there is no password the daemon can use, or None when there is one."""
         try:
@@ -236,9 +249,11 @@ class Service:
         usable one."""
         return self.dashboard_public(public) and self.password_problem() is not None
 
-    def check_host(self, public: bool = False) -> None:
+    def check_host(self, public: bool = False, https: bool = False) -> None:
         """Refuse before changing anything when init could not finish on this host."""
-        needed = (*NEEDED, *NEEDED_FOR[public])
+        needed = tuple(
+            dict.fromkeys((*NEEDED, *NEEDED_FOR[public], *(("caddy",) if https else ())))
+        )
         missing = [name for name in needed if not self.runner.which(name)]
         if missing:
             raise ServiceError(
@@ -265,6 +280,8 @@ class Service:
                 "this host's public address is not known, and the dashboard's certificate is "
                 f"made for it. Set it as host under [stream] in {self.layout.paths.config_file}"
             )
+        if https:
+            self._check_https(cfg)
         published = False if public else self._check_serve(port)
         recorded = Manifest.load(self.layout.manifest).serve_port == port
         ours = published or recorded or cfg.dashboard_public
@@ -276,6 +293,19 @@ class Service:
             raise ServiceError(
                 f"port {port}{where} is already used by another program. "
                 f"Set another port under [dashboard] in {self.layout.paths.config_file}"
+            )
+
+    def _check_https(self, cfg: config.Config) -> None:
+        """The stream's certificate is for an IPv4 address, and this Caddy must be able to
+        request one."""
+        if problem := caddy.profiles_problem(self.runner):
+            raise ServiceError(problem)
+        host = net.public_host(cfg.stream_host, self.outgoing_address)
+        if problem := certificate.address_problem(host, cfg.acme_ca):
+            raise ServiceError(
+                "HTTPS for streams needs this host's public IPv4 address, which its certificate "
+                f"is for: {problem if host else 'it is not known'}. Set it as host under "
+                f"[stream] in {self.layout.paths.config_file}"
             )
 
     def _served(self, port: int) -> str | None:
@@ -302,12 +332,16 @@ class Service:
             )
         return proxy is not None
 
-    def init(self, public: bool | None = None, password: str | None = None) -> None:
+    def init(
+        self, public: bool | None = None, password: str | None = None, https: bool | None = None
+    ) -> None:
         """Set the service up. `public` moves the dashboard (None keeps it where it is);
-        `password` sets the public dashboard's, which it must have."""
+        `password` sets the public dashboard's, which it must have. `https` switches streams
+        to HTTPS or back (None keeps them as they are)."""
         self._require_root("init")
         public = self.dashboard_public(public)
-        self.check_host(public)
+        https = self.stream_https(https)
+        self.check_host(public, https)
         if password is not None and (problem := login.password_problem(password)):
             raise ServiceError(problem)
         if self.wants_password(public) and password is None:
@@ -322,7 +356,7 @@ class Service:
         manifest.save(lay.manifest)
 
         self._init_user(manifest)
-        self._init_config(public)
+        self._init_config(public, https)
         cfg = config.load(lay.paths.config_file)
         for folder in (lay.paths.state_dir, lay.paths.cache_dir):
             folder.mkdir(mode=0o750, parents=True, exist_ok=True)
@@ -337,10 +371,14 @@ class Service:
             self._remove_password()
             self._close_recorded(lay.paths.open_dashboard_ports_file, "dashboard port")
             self._init_serve(manifest, cfg.dashboard_port)
+        if not https:
+            self._close_acme(lay.paths.open_acme_ports_file)
         self._init_member(manifest)
-        self._init_unit()
+        self._init_unit(https)
         if public:
             self._report_public(cfg)
+        if https:
+            self._report_https(cfg)
         self.say(
             f"vpstream is set up. The stream port {cfg.stream_port} stays closed until a stream "
             "runs.\nCheck it with: vpstream status"
@@ -374,10 +412,16 @@ class Service:
                 path.unlink()
                 self.say(f"{path}: removed (the dashboard is on the tailnet only)")
 
-    def _close_recorded(self, record: Path, what: str, also: Sequence[int] = ()) -> None:
+    def _close_acme(self, record: Path) -> None:
+        spec = firewall.ACME_PORT
+        self._close_recorded(record, spec.name, ipv4=spec.ipv4)
+
+    def _close_recorded(
+        self, record: Path, what: str, also: Sequence[int] = (), ipv4: bool = False
+    ) -> None:
         """Close in ufw every port the helper wrote down in `record`, and `also`."""
         for port in dict.fromkeys([*firewall.recorded_ports(record, self.owner_uid), *also]):
-            self._run("ufw", *firewall.ufw_args("close", port), what=f"closing the {what}")
+            self._run("ufw", *firewall.ufw_args("close", port, ipv4), what=f"closing the {what}")
             self.say(f"ufw: {what} {port} is closed")
         record.unlink(missing_ok=True)
 
@@ -423,6 +467,19 @@ class Service:
             f"firewall of its own, let {port}/tcp in there too."
         )
 
+    def _report_https(self, cfg: config.Config) -> None:
+        host = net.public_host(cfg.stream_host, self.outgoing_address)
+        port = cfg.stream_port
+        self.say(
+            f"streams: HTTPS at {net.url('https', host, port)}/<alias>, with a Let's Encrypt "
+            "certificate for the address. The first stream asks for it; it is kept and used "
+            "again until it no longer lasts a stream (a certificate for an address lasts about "
+            "6 days).\n"
+            f"While it is asked for, the service opens {cfg.acme_port}/tcp in ufw, where "
+            f"Let's Encrypt checks. If your provider has a firewall of its own, let "
+            f"{cfg.acme_port}/tcp in there too."
+        )
+
     def set_password(self, password: str) -> None:
         """`vpstream dash-pass`: a new password for the public dashboard. The running daemon
         takes it at once and logs every browser out; a running stream goes on."""
@@ -465,21 +522,36 @@ class Service:
         )
         self.say(f"user {USER}: created")
 
-    def _init_config(self, public: bool) -> None:
+    def _init_config(self, public: bool, https: bool) -> None:
         path = self.layout.paths.config_file
         if path.exists():
             self.say(f"{path}: kept")
         else:
             path.write_text(config.DEFAULT_TEXT, encoding="utf-8")
             self.say(f"{path}: written")
-        text = path.read_text(encoding="utf-8")
-        if config.parse(text).dashboard_public != public:
-            try:
-                write_atomic(path, config.with_public_dashboard(text, public))
-            except config.ConfigError as exc:
-                raise ServiceError(f"{path}: {exc}") from exc
-            where = "public, behind a password" if public else "on the tailnet only"
-            self.say(f"{path}: the dashboard is now {where}")
+        switches = (
+            (
+                "dashboard",
+                "public",
+                public,
+                "the dashboard is now "
+                + ("public, behind a password" if public else "on the tailnet only"),
+            ),
+            (
+                "stream",
+                "https",
+                https,
+                "streams are now served over " + ("HTTPS" if https else "plain HTTP"),
+            ),
+        )
+        for section, key, on, said in switches:
+            text = path.read_text(encoding="utf-8")
+            if getattr(config.parse(text), config.SWITCHES[(section, key)]) != on:
+                try:
+                    write_atomic(path, config.with_switch(text, section, key, on))
+                except config.ConfigError as exc:
+                    raise ServiceError(f"{path}: {exc}") from exc
+                self.say(f"{path}: {said}")
         # The firewall helper trusts this file, so only root may write it.
         path.chmod(0o644)
 
@@ -544,9 +616,9 @@ class Service:
             "Log out and in again for it to take effect."
         )
 
-    def _init_unit(self) -> None:
+    def _init_unit(self, https: bool) -> None:
         unit = self.layout.unit_file
-        unit.write_text(unit_text(self.vpstream_bin, self.helper), encoding="utf-8")
+        unit.write_text(unit_text(self.vpstream_bin, self.helper, https), encoding="utf-8")
         unit.chmod(0o644)
         self._run("systemctl", "daemon-reload", what="reloading systemd")
         self._run("systemctl", "enable", UNIT, what="enabling the service")
@@ -568,8 +640,9 @@ class Service:
         manifest = Manifest.load(lay.manifest)
         record = lay.paths.open_ports_file
         dash_record = lay.paths.open_dashboard_ports_file
+        acme_record = lay.paths.open_acme_ports_file
         # Without any trace of an install, a rule for the stream port is not vpstream's.
-        traces = (lay.manifest, lay.unit_file, lay.sudoers_file, record, dash_record)
+        traces = (lay.manifest, lay.unit_file, lay.sudoers_file, record, dash_record, acme_record)
         installed = any(p.exists() for p in traces)
         port: int | None = None
         port_problem = ""
@@ -592,6 +665,7 @@ class Service:
             # After the stop: the service's own close has normally emptied the records.
             self._close_recorded(record, "stream port", also=[] if port is None else [port])
             self._close_recorded(dash_record, "dashboard port")
+            self._close_acme(acme_record)
             if port is None:
                 self.say(
                     f"WARNING: the stream port is not known ({port_problem}), so its ufw rule "

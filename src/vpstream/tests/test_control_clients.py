@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import api, control, gate, player, public, state
+from vpstream import api, caddy, control, gate, player, public, state
 from vpstream.stream import Answer, StreamError
 from vpstream.tests.test_control_browser import Rig
 
@@ -329,6 +329,46 @@ def test_a_seek_asked_for_on_one_episode_is_not_done_on_the_next(tmp_path: Path)
 
 
 # --- through the public app, as Caddy passes requests on
+
+
+@pytest.mark.parametrize(
+    ("scheme", "secure"), [("https", True), ("http", False), (None, False), ("HTTPS ", False)]
+)
+def test_the_cookie_is_secure_exactly_when_caddy_says_https(
+    rig: Viewers, scheme: str | None, secure: bool
+) -> None:
+    """Only Caddy's own word counts: it sets the header on every request, over what the
+    viewer sent (see `caddy`)."""
+    rig.start_browser()
+    web = public.create_app(rig.control).test_client()
+    headers = {"X-Vpstream-Ip": TV, "Accept": "text/html"}
+    if scheme is not None:
+        headers[caddy.HEADER_SCHEME] = scheme
+    cookie = web.get("/aaa", headers=headers).headers["Set-Cookie"]
+    assert ("; Secure" in cookie) is secure
+    assert cookie.startswith(f"{gate.cookie_name(secure)}=")
+    for part in ("HttpOnly", "SameSite=Lax", "Path=/"):
+        assert part in cookie
+
+
+def test_over_https_the_cookie_has_a_name_of_its_own_and_is_read_by_it(rig: Viewers) -> None:
+    """A browser keeps a plain page from setting a cookie named like a Secure one, so the
+    two must differ, or a browser let in over HTTPS gets no cookie on a plain stream."""
+    assert gate.cookie_name(True) == "__Host-vpstream" != gate.cookie_name(False)
+    rig.start_browser()
+    web = public.create_app(rig.control).test_client()
+    https = {"X-Vpstream-Ip": TV, "Accept": "text/html", caddy.HEADER_SCHEME: "https"}
+    value = web.get("/aaa", headers=https).headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
+    assert rig.control.stream is not None
+    device = rig.control.stream.devices.browser(value)
+    assert device is not None
+    rig.control.set_device(device.id, True)
+    web.set_cookie(gate.SECURE_COOKIE, value)
+    assert web.get("/aaa", headers=https).status_code == 200
+    # The same value under the plain name is not read over HTTPS, nor the other way round.
+    web.delete_cookie(gate.SECURE_COOKIE)
+    web.set_cookie(gate.COOKIE, value)
+    assert web.get("/aaa", headers=https).status_code == 403
 
 
 def test_the_cookie_is_sent_as_a_browser_needs_it(rig: Viewers) -> None:

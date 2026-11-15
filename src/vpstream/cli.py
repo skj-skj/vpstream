@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, stream, text
+from vpstream import __version__, certificate, gate, stream, text
 from vpstream.net import url_host
 
 
@@ -152,6 +152,19 @@ def _dashboard_line(dash: dict[str, Any]) -> str:
     if dash.get("address"):
         return f"http://{dash['address']}/ on this host only; {dash.get('problem')}"
     return str(dash.get("problem"))
+
+
+def _https_line(https: dict[str, Any]) -> str | None:
+    """The stream's HTTPS and its certificate, or None while streams are plain HTTP."""
+    if not https.get("enabled"):
+        return None
+    cert = https.get("certificate")
+    if not cert:
+        return "on; no certificate yet (the next stream asks for one)"
+    when = certificate.when(float(cert["expires"]))
+    left = float(cert["expires"]) - time.time()
+    state = f"{text.duration(left)} left" if left > 0 else "expired; the next stream asks again"
+    return f"on; certificate for {cert.get('host')} until {when} ({state})"
 
 
 def device_state(device: dict[str, Any]) -> str:
@@ -372,6 +385,8 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
         f"Stream port:  {info.get('stream_port')} ({info.get('stream_port_state', 'unknown')})",
         "Dashboard:    " + _dashboard_line(dash),
     ]
+    if https := _https_line(info.get("https") or {}):
+        lines.insert(3, f"HTTPS:        {https}")
     if stream:
         count = len(stream.get("devices") or [])
         lines.append(f"Devices:      {count} (see: vpstream devices)")
@@ -491,7 +506,8 @@ def _request(
             _revoke()  # what a stream that ended by itself left behind
         while True:
             try:
-                info: dict[str, Any] = client.call(socket, "POST", route, options)
+                wait = client.START_TIMEOUT if route == "stream/start" else None
+                info: dict[str, Any] = client.call(socket, "POST", route, options, wait)
                 return info
             except client.DaemonRefused as exc:
                 code = exc.data.get("code")
@@ -582,6 +598,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 2
     kind, options = found
     options.update(mode=args.mode, ttl=args.ttl)
+    if args.http:
+        options["http"] = True
     for name in ("alias", "policy", "audio", "sub"):
         if getattr(args, name):
             options[name] = getattr(args, name)
@@ -784,8 +802,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     helper = firewall.helper_path()
     fw = None if trial else firewall.SudoFirewall(runner, helper)
     dash_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.DASHBOARD)
+    acme_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.ACME)
     try:
-        return daemon.run(config.load(paths.config_file), paths, runner, fw, dash_fw)
+        return daemon.run(config.load(paths.config_file), paths, runner, fw, dash_fw, acme_fw)
     except (config.ConfigError, daemon.DaemonError) as exc:
         return _error(str(exc))
     except OSError as exc:  # the run folder cannot be made, for example
@@ -844,7 +863,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             return _error("a password is for the public dashboard only (--no-tailscale)", 2)
         # Not asked for a password that a refusal for want of root would throw away.
         ask = os.geteuid() == 0 and svc.wants_password(public)
-        svc.init(public, _password(args, ask))
+        svc.init(public, _password(args, ask), args.https)
     except ValueError as exc:
         return _error(str(exc))
     except (service.ServiceError, OSError) as exc:
@@ -912,24 +931,25 @@ def _ask(question: str) -> bool:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    from vpstream import ffmpeg_install
+    from vpstream import caddy_install, ffmpeg_install, system_install
     from vpstream.tools import SystemRunner
 
     if args.tmp and not Path(args.tmp).is_dir():
         return _error(f"--tmp folder does not exist: {args.tmp}", 2)
-    setup = ffmpeg_install.Setup(
+    kind = caddy_install.Setup if args.program == "caddy" else ffmpeg_install.Setup
+    setup = kind(
         runner=SystemRunner(),
-        http=ffmpeg_install.UrlHttp(),
+        http=system_install.UrlHttp(),
         confirm=lambda question: _confirm(question, args.yes),
         progress=_progress,
         tmp_dir=args.tmp,
     )
     try:
         print(setup.run(update=args.command == "update"))
-    except ffmpeg_install.Cancelled:
+    except system_install.Cancelled:
         print("Cancelled; nothing was changed.")
         return 1
-    except (ffmpeg_install.SetupError, OSError, tarfile.TarError) as exc:
+    except (system_install.SetupError, OSError, tarfile.TarError) as exc:
         return _error(str(exc))
     return 0
 
@@ -985,8 +1005,23 @@ def build_parser() -> argparse.ArgumentParser:
         const=False,
         help="put the dashboard back on the tailnet only (the default)",
     )
+    scheme = ini.add_mutually_exclusive_group()
+    scheme.add_argument(
+        "--https",
+        dest="https",
+        action="store_const",
+        const=True,
+        help="serve streams over HTTPS, with a Let's Encrypt certificate for the address",
+    )
+    scheme.add_argument(
+        "--no-https",
+        dest="https",
+        action="store_const",
+        const=False,
+        help="serve streams over plain HTTP again (the default)",
+    )
     _password_options(ini)
-    ini.set_defaults(func=cmd_init, public=None)
+    ini.set_defaults(func=cmd_init, public=None, https=None)
     dp = sub.add_parser("dash-pass", help="set a new password for the public dashboard (as root)")
     _password_options(dp)
     dp.set_defaults(func=cmd_dash_pass)
@@ -1032,6 +1067,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sub",
         metavar="TRACK",
         help="browser mode: the prepared subtitles to start with (number, language or off)",
+    )
+    go.add_argument(
+        "--http",
+        action="store_true",
+        help="on a host that serves streams over HTTPS: this one over plain HTTP",
     )
     go.add_argument("--yes", action="store_true", help="do not ask before a long transcode")
     go.set_defaults(func=cmd_start)
@@ -1145,13 +1185,19 @@ def build_parser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_caps)
 
     for name, about in (
-        ("install", "install a program vpstream needs (ffmpeg: the newest stable static build)"),
+        (
+            "install",
+            "install a program vpstream needs (ffmpeg: the newest stable static build; "
+            "caddy: the newest, from Caddy's own apt repository)",
+        ),
         ("update", "update a program installed by `vpstream install`"),
     ):
         i = sub.add_parser(name, help=about)
-        i.add_argument("program", choices=["ffmpeg"], help="what to install (ffmpeg)")
+        i.add_argument("program", choices=["ffmpeg", "caddy"], help="what to install")
         i.add_argument(
-            "--yes", action="store_true", help="do not ask before replacing an existing ffmpeg"
+            "--yes",
+            action="store_true",
+            help="do not ask before replacing an existing ffmpeg or adding Caddy's repository",
         )
         i.add_argument("--tmp", metavar="DIR", help="folder for the download (default: system)")
         i.set_defaults(func=cmd_install)

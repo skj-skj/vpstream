@@ -93,10 +93,10 @@ def preparing_page(job: dict[str, Any] | None) -> str:
     )
 
 
-def playlist(alias: str, names: list[str], host: str) -> str:
-    """An M3U playlist of every video. `host` is the address the viewer used; without a
-    usable one the entries are paths on the same server."""
-    base = f"http://{host}" if _HOST.fullmatch(host) else ""
+def playlist(alias: str, names: list[str], host: str, scheme: str = "http") -> str:
+    """An M3U playlist of every video. `host` is the address the viewer used, over
+    `scheme`; without a usable one the entries are paths on the same server."""
+    base = f"{scheme}://{host}" if _HOST.fullmatch(host) else ""
     lines = ["#EXTM3U"]
     for n, name in enumerate(names, 1):
         title = " ".join(name.split())  # a file name may hold a line break
@@ -112,7 +112,7 @@ def _html(status: int, page: str) -> Response:
     return Response(page, status, mimetype="text/html")
 
 
-def respond(answer: Answer, host: str, wants_html: bool = False) -> Response:
+def respond(answer: Answer, host: str, wants_html: bool = False, scheme: str = "http") -> Response:
     if answer.kind in ("video", "file"):
         # Looked at again on every request: a file that was swapped for a link or a folder
         # after the start is not followed to wherever it leads now.
@@ -126,7 +126,7 @@ def respond(answer: Answer, host: str, wants_html: bool = False) -> Response:
     if answer.kind == "index":
         return _html(200, index_page(answer.alias, answer.names, answer.ready))
     if answer.kind == "playlist":
-        return Response(playlist(answer.alias, answer.names, host), mimetype=M3U_TYPE)
+        return Response(playlist(answer.alias, answer.names, host, scheme), mimetype=M3U_TYPE)
     if answer.kind == "player":
         return _html(200, player.page(answer.data))
     if answer.kind == "asset":
@@ -168,27 +168,32 @@ def create_app(control: Control) -> Flask:
         if ip is None:  # not through Caddy
             return _text(400, "Bad request.")
         wants_html = "text/html" in request.headers.get("Accept", "").lower()
+        # What Caddy says the viewer came over; a viewer cannot set it (see `caddy`).
+        https = request.headers.get(caddy.HEADER_SCHEME) == "https"
+        cookie = gate.cookie_name(https)
         answer = control.visit(
             path,
             ip,
             request.headers.get("User-Agent", ""),
             wants_html,
-            request.cookies.get(gate.COOKIE),
+            request.cookies.get(cookie),
             # One value per name: a report is a handful of short numbers.
             {k: v[:MAX_VALUE] for k, v in list(request.args.items())[:MAX_VALUES]}
             if request.headers.get(player.REPORT_HEADER) == "1"
             else None,
         )
-        response = respond(answer, request.host, wants_html)
+        response = respond(answer, request.host, wants_html, "https" if https else "http")
         response.headers["Cache-Control"] = "no-store"
         if answer.cookie:
-            # Plain HTTP, so not Secure. HttpOnly: no script needs it. Lax: a page on another
+            # Secure over HTTPS, so it never goes back over plain HTTP; a plain HTTP stream
+            # cannot have it Secure. HttpOnly: no script needs it. Lax: a page on another
             # site cannot fetch with it, but a link to the stream still carries it.
             response.set_cookie(
-                gate.COOKIE,
+                cookie,
                 answer.cookie,
                 max_age=COOKIE_SECONDS,
                 path="/",
+                secure=https,
                 httponly=True,
                 samesite="Lax",
             )
