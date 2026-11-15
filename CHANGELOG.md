@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.13.2 (2026-11-15)
+
+### Bug Fixes
+
+- Start a browser stream of a prepared video without read access
+  ([#24](https://github.com/skj-skj/vpstream/pull/24),
+  [`858fbdd`](https://github.com/skj-skj/vpstream/commit/858fbdde50a09731ed9bcb9ee07b062a902a8928))
+
+
 ## v0.13.1 (2026-11-14)
 
 ### Bug Fixes
