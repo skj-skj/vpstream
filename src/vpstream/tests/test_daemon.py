@@ -422,16 +422,17 @@ def test_a_trial_daemon_gets_no_firewall_helper(
 ) -> None:
     seen: list[tuple[object, object]] = []
     monkeypatch.setattr(
-        daemon, "run", lambda cfg, paths, runner, fw, dash: seen.append((fw, dash)) or 0
+        daemon, "run", lambda cfg, paths, runner, fw, dash, acme: seen.append((fw, dash, acme)) or 0
     )
     monkeypatch.setenv(config.ROOT_ENV, str(tmp_path))
     assert cli.main(["daemon"]) == 0
     monkeypatch.delenv(config.ROOT_ENV)
     assert cli.main(["daemon"]) == 0
-    assert seen[0] == (None, None)
-    stream_fw, dash_fw = seen[1]
+    assert seen[0] == (None, None, None)
+    stream_fw, dash_fw, acme_fw = seen[1]
     assert isinstance(stream_fw, firewall.SudoFirewall) and stream_fw.port == firewall.STREAM
     assert isinstance(dash_fw, firewall.SudoFirewall) and dash_fw.port == firewall.DASHBOARD
+    assert isinstance(acme_fw, firewall.SudoFirewall) and acme_fw.port == firewall.ACME
 
 
 # --- a stream, from the command line to the gate socket

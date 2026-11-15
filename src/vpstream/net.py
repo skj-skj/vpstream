@@ -31,6 +31,13 @@ def normal_ip(text: str | None) -> str | None:
     return str(ip)
 
 
+def is_ipv4(text: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(text), ipaddress.IPv4Address)
+    except ValueError:
+        return False
+
+
 def _route_from(family: socket.AddressFamily, target: str) -> str:
     """The address this host would send from to `target`, or "" without a route. Connecting
     a UDP socket only picks a route; nothing is sent."""

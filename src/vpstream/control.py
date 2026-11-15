@@ -23,7 +23,8 @@ from vpstream import (
     text,
     tracks,
 )
-from vpstream.caddy import CaddyError, Server, link_video, link_videos, unlink_videos
+from vpstream.caddy import CaddyError, StreamServer, link_video, link_videos, unlink_videos
+from vpstream.certificate import Certificate, CertificateError, Certificates
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import under
@@ -71,7 +72,7 @@ class Control:
     config: Config
     paths: Paths
     firewall: Firewall | None = None
-    server: Server | None = None
+    server: StreamServer | None = None
     log: Callable[[str], None] = print
     clock: Callable[[], float] = time.time
     boot: str = field(default_factory=boot_id)
@@ -85,6 +86,7 @@ class Control:
     _lock: threading.RLock = field(default_factory=threading.RLock)
     runner: Runner | None = None  # for `ss`, mkvmerge and ffprobe
     preparer: prepare.Preparer | None = None  # makes the versions browser mode plays
+    certificates: Certificates | None = None  # the HTTPS certificate, with `[stream] https`
     _traffic: Traffic | None = None
     _indexer: threading.Thread | None = None
     _cancel: threading.Event = field(default_factory=threading.Event)
@@ -137,10 +139,38 @@ class Control:
         self.port_state = "open" if action == "open" else "closed"
         self.firewall_problem = None
 
-    def base_url(self) -> str:
+    def host(self) -> str:
+        """The address the URLs name, and the certificate is for."""
         if not self._host:  # asked again while there is no route yet
             self._host = net.public_host(self.config.stream_host)
-        return net.url("http", self._host, self.config.stream_port)
+        return self._host
+
+    def base_url(self) -> str:
+        """The running stream's address; without one, what a stream would get."""
+        stream = self.stream
+        https = self.config.stream_https if stream is None else stream.https
+        return net.url("https" if https else "http", self.host(), self.config.stream_port)
+
+    def _certificate(self, stream: Stream) -> Certificate | None:
+        """The certificate an HTTPS stream is served with: kept, or asked for now. Called
+        with `_op` held, before Caddy starts."""
+        if not stream.https:
+            return None
+        if self.certificates is None or stream.expires is None:
+            raise ControlError("this daemon cannot serve a stream over HTTPS")
+        try:
+            return self.certificates.for_stream(self.host(), stream.expires)
+        except (CertificateError, OSError) as exc:
+            raise ControlError(
+                f"no HTTPS certificate for the stream: {exc}. To start it on plain HTTP "
+                "instead: vpstream start --http ..."
+            ) from exc
+
+    def certificate_status(self) -> dict[str, Any] | None:
+        """The kept certificate, for `status`; None without HTTPS or without one yet."""
+        if self.certificates is None or not self.config.stream_https:
+            return None
+        return self.certificates.status(self.host())
 
     def _running(self) -> Stream:
         if self.stream is None:
@@ -152,6 +182,7 @@ class Control:
         that asks the gate. Called with `_op` held; viewers get a 404 until it is done."""
         if self.server is None:
             raise ControlError("this daemon has no public server to start")
+        self.server.certificate = self._certificate(stream)
         if stream.mode == BROWSER:
             links: list[str | None] = list(stream.entries)  # folders; Caddy sends files in them
         else:
@@ -374,7 +405,9 @@ class Control:
                 raise StreamError(
                     f"a stream is already running (/{self.stream.alias}); stop it first"
                 )
-            stream = Stream.create(options, self.clock(), self._has_base)
+            stream = Stream.create(
+                options, self.clock(), self._has_base, https=self.config.stream_https
+            )
             plans: list[prepare.VideoPlan] = []
             if stream.mode == BROWSER:
                 plans = self._browser(stream, options.get("confirmed") is True)

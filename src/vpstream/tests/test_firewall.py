@@ -18,6 +18,7 @@ def _helper(argv: list[str], runner: FakeRunner, config_file: Path, **kwargs: ob
         "config_file": config_file,
         "record_file": config_file.parent / "open-ports",
         "dashboard_record_file": config_file.parent / "open-dashboard-ports",
+        "acme_record_file": config_file.parent / "open-acme-ports",
         "euid": 0,
         "ufw": UFW,
         "owner_uid": ME,
@@ -329,3 +330,102 @@ def test_the_daemon_side_names_the_dashboard_actions() -> None:
     runner.on("sudo", returncode=1, stderr="the dashboard is not public")
     with pytest.raises(firewall.FirewallError, match="open the dashboard port: the dashboard"):
         dash.open()
+
+
+# --- the port Let's Encrypt checks
+
+
+@pytest.fixture
+def https_config(config_file: Path) -> Path:
+    config_file.write_text("[stream]\nport = 2000\nhttps = true\n")
+    return config_file
+
+
+def test_acme_open_opens_port_80_and_writes_it_down(https_config: Path) -> None:
+    runner = FakeRunner()
+    runner.on(UFW, stdout="Rule added\nRule added (v6)\n")
+    code, message = _helper(["acme-open"], runner, https_config)
+    assert code == 0 and "80/tcp" in message, message
+    assert runner.calls == [[UFW, "allow", "80/tcp"]]
+    record = https_config.parent / "open-acme-ports"
+    assert firewall.recorded_ports(record, ME) == [80]
+    code, _ = _helper(["acme-close"], runner, https_config)
+    assert code == 0 and runner.calls[-1] == [UFW, "delete", "allow", "80/tcp"]
+    assert not record.exists()
+    assert not (https_config.parent / "open-ports").exists(), "the stream's record is apart"
+
+
+def test_acme_open_takes_the_configured_port(https_config: Path) -> None:
+    https_config.write_text("[stream]\nhttps = true\n[acme]\nport = 5002\n")
+    runner = FakeRunner()
+    assert _helper(["acme-open"], runner, https_config)[0] == 0
+    assert runner.calls == [[UFW, "allow", "5002/tcp"]]
+
+
+def test_acme_open_refuses_while_streams_are_plain_http(config_file: Path) -> None:
+    runner = FakeRunner()
+    code, message = _helper(["acme-open"], runner, config_file)
+    assert code == 1 and "not served over HTTPS" in message and runner.calls == []
+
+
+def test_acme_open_does_not_trust_a_config_others_can_write(https_config: Path) -> None:
+    https_config.chmod(0o666)
+    runner = FakeRunner()
+    code, message = _helper(["acme-open"], runner, https_config)
+    assert code == 1 and "writable" in message and runner.calls == []
+
+
+def test_acme_close_closes_only_what_acme_open_wrote_down(https_config: Path) -> None:
+    runner = FakeRunner()
+    code, message = _helper(["acme-close"], runner, https_config)
+    assert (code, runner.calls) == (0, []) and "nothing to close" in message
+    _helper(["acme-open"], runner, https_config)
+    https_config.write_text("[stream]\nhttps = false\n")  # switched off while it was open
+    runner.calls.clear()
+    assert _helper(["acme-close"], runner, https_config)[0] == 0
+    assert runner.calls == [[UFW, "delete", "allow", "80/tcp"]]
+
+
+@pytest.mark.parametrize("action", ["acme-open", "dash-open"])
+def test_a_rule_that_was_there_before_is_never_written_down(
+    https_config: Path, action: str
+) -> None:
+    """Someone else's `allow 80/tcp` (a web server) stays when the request is over."""
+    https_config.write_text("[stream]\nhttps = true\n[dashboard]\npublic = true\n")
+    runner = FakeRunner()
+    runner.on(UFW, stdout="Skipping adding existing rule\nSkipping adding existing rule (v6)\n")
+    assert _helper([action], runner, https_config)[0] == 0
+    close = action.replace("open", "close")
+    runner.calls.clear()
+    code, message = _helper([close], runner, https_config)
+    assert (code, runner.calls) == (0, []) and "nothing to close" in message
+
+
+def test_a_rule_this_helper_added_is_still_closed_when_opened_twice(https_config: Path) -> None:
+    runner = FakeRunner()
+    runner.on(UFW, stdout="Rule added\nRule added (v6)\n")
+    _helper(["acme-open"], runner, https_config)
+    runner.on(UFW, stdout="Skipping adding existing rule\nSkipping adding existing rule (v6)\n")
+    _helper(["acme-open"], runner, https_config)  # ufw skips: the rule is ours from before
+    runner.calls.clear()
+    assert _helper(["acme-close"], runner, https_config)[0] == 0
+    assert runner.calls == [[UFW, "delete", "allow", "80/tcp"]]
+
+
+def test_a_rule_there_before_for_ipv4_only_is_written_down(https_config: Path) -> None:
+    """ufw added the IPv6 half: that half is ours, so the close must run."""
+    runner = FakeRunner()
+    runner.on(UFW, stdout="Skipping adding existing rule\nRule added (v6)\n")
+    _helper(["acme-open"], runner, https_config)
+    assert firewall.recorded_ports(https_config.parent / "open-acme-ports", ME) == [80]
+
+
+def test_the_daemon_side_names_the_acme_actions() -> None:
+    runner = FakeRunner()
+    acme = firewall.SudoFirewall(runner, Path("/opt/v/bin/vpstream-fw"), firewall.ACME)
+    acme.open()
+    acme.close()
+    assert [c[-1] for c in runner.calls] == ["acme-open", "acme-close"]
+    runner.on("sudo", returncode=1, stderr="not served over HTTPS")
+    with pytest.raises(firewall.FirewallError, match="open the certificate check port"):
+        acme.open()

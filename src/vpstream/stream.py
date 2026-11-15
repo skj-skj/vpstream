@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream import access, clients, gate, media, player, prepared, tracks
+from vpstream.certificate import LONGEST_STREAM_SECONDS
 from vpstream.checks import is_number
 
 DIRECT = "direct"  # the files as they are, for players such as VLC
@@ -24,6 +25,9 @@ MODES = (DIRECT, BROWSER)
 DEFAULT_POLICY = {DIRECT: gate.OPEN, BROWSER: gate.APPROVAL}
 DEFAULT_TTL_MINUTES = 180.0
 MAX_TTL_MINUTES = 7 * 24 * 60.0
+# An HTTPS stream ends before its certificate does, and nothing changes while it runs: it is
+# never longer than a new certificate lasts (see `certificate`).
+MAX_HTTPS_TTL_MINUTES = LONGEST_STREAM_SECONDS / 60
 PLAYLIST = "playlist.m3u"
 HLS = "hls"  # /ALIAS/N/hls/... are the files of a video's prepared versions
 ASSETS = "assets"  # /ALIAS/assets/NAME are the player's own files
@@ -192,13 +196,20 @@ def videos_of(kind: str, path: Path, needs_read: Callable[[str], bool] = _always
     return [str(video) for video in found]
 
 
-def _ttl_seconds(value: Any) -> float | None:
+def _ttl_seconds(value: Any, https: bool = False) -> float | None:
     if value is None:
         value = DEFAULT_TTL_MINUTES
     if not is_number(value) or not value >= 0:
         raise StreamError(f"the time limit must be a number of minutes, 0 or more: {value!r}")
     if value > MAX_TTL_MINUTES:
         raise StreamError(f"the time limit can be at most {MAX_TTL_MINUTES:g} minutes (7 days)")
+    if https and not 0 < value <= MAX_HTTPS_TTL_MINUTES:
+        hours = MAX_HTTPS_TTL_MINUTES / 60
+        raise StreamError(
+            f"an HTTPS stream needs a time limit of at most {MAX_HTTPS_TTL_MINUTES:g} minutes "
+            f"({hours:g} hours, the life of its certificate); give a shorter --ttl, or start "
+            "it on plain HTTP with --http"
+        )
     return value * 60 or None
 
 
@@ -252,6 +263,7 @@ class Stream:
     entries: list[str] = field(default_factory=list)
     audio: str | None = None
     sub: str | None = None
+    https: bool = False  # served over HTTPS, with the host's certificate
 
     def __post_init__(self) -> None:
         if len(self.served) != len(self.videos):
@@ -259,12 +271,29 @@ class Stream:
 
     @classmethod
     def create(
-        cls, options: dict[str, Any], now: float, has_base: Callable[[str], bool] = _never
+        cls,
+        options: dict[str, Any],
+        now: float,
+        has_base: Callable[[str], bool] = _never,
+        https: bool = False,
     ) -> Stream:
         """A new stream from what `start` was given. Raises StreamError for anything wrong.
         `has_base` tells whether a video's base version is prepared: a browser stream plays
-        only what was prepared, so the service need not read such a video itself."""
-        known = {"file", "dir", "mode", "alias", "ttl", "policy", "audio", "sub", "confirmed"}
+        only what was prepared, so the service need not read such a video itself. `https`
+        says the host serves streams over HTTPS; the option `http` starts this one on plain
+        HTTP all the same."""
+        known = {
+            "file",
+            "dir",
+            "mode",
+            "alias",
+            "ttl",
+            "policy",
+            "audio",
+            "sub",
+            "confirmed",
+            "http",
+        }
         if extra := sorted(set(options) - known):
             raise StreamError(f"unknown option: {', '.join(extra)}")
         kind, source = source_of(options)
@@ -273,7 +302,11 @@ class Stream:
             raise StreamError(f"not a mode: {mode!r}. Use one of: {', '.join(MODES)}")
         policy = check_policy(options.get("policy") or DEFAULT_POLICY[mode])
         alias = check_alias(options["alias"]) if options.get("alias") else random_alias()
-        ttl = _ttl_seconds(options.get("ttl"))
+        plain = options.get("http", False)
+        if not isinstance(plain, bool):
+            raise StreamError(f"http must be true or false, not {plain!r}")
+        https = https and not plain
+        ttl = _ttl_seconds(options.get("ttl"), https)
         audio = check_choice("audio", options.get("audio"))
         sub = check_choice("sub", options.get("sub"))
         if mode == DIRECT and (audio or sub):
@@ -296,6 +329,7 @@ class Stream:
             mode=mode,
             audio=audio,
             sub=sub,
+            https=https,
         )
         stream.set_policy(policy)
         return stream
@@ -490,6 +524,7 @@ class Stream:
             "entries": self.entries,
             "audio": self.audio,
             "sub": self.sub,
+            "https": self.https,
         }
 
     @classmethod
@@ -513,6 +548,12 @@ class Stream:
             indexing = data.get("indexing", [])
             notes = data.get("notes", {})
             entries = data.get("entries", [])
+            https = data.get("https", False)  # a stream recorded before 0.14 is plain HTTP
+            if not isinstance(https, bool) or (
+                https
+                and (expires is None or expires - float(data["started"]) > LONGEST_STREAM_SECONDS)
+            ):
+                raise StreamError("the recorded stream is not usable")
             if (
                 not isinstance(served, list)
                 or len(served) != count
@@ -541,12 +582,13 @@ class Stream:
                 policy=check_policy(data["policy"]),
                 unlocked_policy=check_policy(data["unlocked_policy"]),
                 devices=gate.Devices.from_rows(data.get("devices"), count),
+                https=https,
             )
         except (KeyError, TypeError, ValueError) as exc:  # StreamError is a ValueError
             raise StreamError(f"the recorded stream is not usable: {exc}") from exc
 
     def describe(self, base_url: str, now: float) -> dict[str, Any]:
-        """What `status` and the dashboard show. `base_url` is `http://host:port`."""
+        """What `status` and the dashboard show. `base_url` is `http(s)://host:port`."""
         url = f"{base_url}/{self.alias}"
         return {
             "kind": self.kind,
@@ -559,6 +601,7 @@ class Stream:
             "sub": self.sub,
             "policy": self.policy,
             "unlocked_policy": self.unlocked_policy,
+            "https": self.https,
             "started": self.started,
             "expires": self.expires,
             "seconds_left": None if self.expires is None else max(0.0, self.expires - now),

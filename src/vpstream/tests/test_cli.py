@@ -143,6 +143,7 @@ def test_init_takes_the_mode_and_the_password(
     from vpstream import cli
 
     calls: list[tuple[object, object]] = []
+    schemes: list[object] = []
 
     class Svc:
         public = False
@@ -153,8 +154,11 @@ def test_init_takes_the_mode_and_the_password(
         def wants_password(self, public: bool | None = None) -> bool:
             return False
 
-        def init(self, public: object = None, password: object = None) -> None:
+        def init(
+            self, public: object = None, password: object = None, https: object = None
+        ) -> None:
             calls.append((public, password))
+            schemes.append(https)
 
     monkeypatch.setattr(cli, "_service", lambda args: Svc())
     path = tmp_path / "pw"
@@ -163,6 +167,10 @@ def test_init_takes_the_mode_and_the_password(
     assert cli.main(["init"]) == 0
     assert cli.main(["init", "--tailscale"]) == 0
     assert calls == [(True, "from the file"), (False, None), (False, None)]
+    assert schemes == [None, None, None]
+    assert cli.main(["init", "--https"]) == 0
+    assert cli.main(["init", "--no-https"]) == 0
+    assert schemes[3:] == [True, False]
     assert cli.main(["init", "--tailscale", "--dash-pass", "x" * 12]) == 2
     assert "public dashboard only" in capsys.readouterr().err
     with pytest.raises(SystemExit):
@@ -211,6 +219,22 @@ def test_status_says_where_the_dashboard_is_and_how_it_stands() -> None:
     assert "Caddy failed" in line and "NO PASSWORD" in line and "SHA-256" not in line
     tailnet = {"mode": "tailnet", "url": "https://host.ts.net:1338/"}
     assert cli._dashboard_line(tailnet) == "https://host.ts.net:1338/ (Tailscale only)"
+
+
+def test_status_tells_https_and_its_certificate() -> None:
+    import time
+
+    from vpstream import cli
+
+    assert cli._https_line({"enabled": False}) is None
+    assert "no certificate yet" in str(cli._https_line({"enabled": True, "certificate": None}))
+    soon = {"host": "203.0.113.5", "expires": time.time() + 2 * 3600 + 30}
+    line = str(cli._https_line({"enabled": True, "certificate": soon}))
+    assert "certificate for 203.0.113.5 until" in line and "2h" in line and "left" in line
+    old = {"host": "203.0.113.5", "expires": 1.0}
+    assert "expired" in str(cli._https_line({"enabled": True, "certificate": old}))
+    info = {"version": "1", "https": {"enabled": True, "certificate": None}, "dashboard": {}}
+    assert "HTTPS:        on; no certificate yet" in cli.format_status(info, "1")
 
 
 def test_dashboard_cert_prints_the_authority_to_install(

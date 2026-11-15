@@ -26,6 +26,7 @@ class FakeHost:
         self.serve = dict(OTHERS)
         self.https = True
         self.active = True
+        self.caddy = "v2.11.9 h1:x=\n"  # what `caddy version` prints
         self.fail: dict[tuple[str, ...], str] = {}
         self.calls: list[list[str]] = []
 
@@ -41,6 +42,8 @@ class FakeHost:
         for prefix, message in self.fail.items():
             if tuple(cmd[: len(prefix)]) == prefix:
                 return Result(1, "", message)
+        if cmd[0].endswith("/caddy") and cmd[1:] == ["version"]:
+            return Result(0, self.caddy, "")
         return getattr(self, f"_{cmd[0]}", lambda _: Result(0, "", ""))(cmd)
 
     def _getent(self, cmd: list[str]) -> Result:
@@ -178,7 +181,7 @@ def test_sudoers_rule_allows_exactly_the_helper_actions() -> None:
     helper = "/opt/v/bin/vpstream-fw"
     assert lines[1:] == [
         f"vpstream ALL=(root) NOPASSWD: {helper} open, {helper} close, "
-        f"{helper} dash-open, {helper} dash-close"
+        f"{helper} dash-open, {helper} dash-close, {helper} acme-open, {helper} acme-close"
     ]
 
 
@@ -771,3 +774,119 @@ def test_back_on_the_tailnet_the_known_devices_go_too(setup: Setup) -> None:
     setup.layout.paths.device_key.write_bytes(b"k" * 32)
     setup.service().init(public=False)
     assert not setup.layout.paths.device_key.exists()
+
+
+# --- HTTPS for streams
+
+
+def test_the_unit_may_bind_port_80_only_with_https() -> None:
+    args = (Path("/opt/v/bin/vpstream"), Path("/opt/v/bin/vpstream-fw"))
+    plain = service.unit_text(*args)
+    assert "CAP_NET_BIND_SERVICE" not in plain
+    https = service.unit_text(*args, https=True)
+    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" in https
+    assert "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n" in https
+    for text in (plain, https):  # whatever the mode, a stop closes what the helper opened
+        assert "ExecStopPost=+/opt/v/bin/vpstream-fw acme-close\n" in text
+    assert "NoNewPrivileges" not in https
+
+
+def _acme_opened(setup: Setup) -> None:
+    """What the daemon's `acme-open` leaves when it is cut off: the rule, and its record."""
+    setup.host.rules.add("80/tcp")
+    record = setup.layout.paths.open_acme_ports_file
+    record.write_text("80\n")
+    record.chmod(0o644)
+
+
+def _keep_certificate(setup: Setup) -> Path:
+    from vpstream.tests.fakes import store_certificate
+
+    store = setup.layout.paths.certificate_dir / "data" / "caddy"
+    return store_certificate(store, config.LETS_ENCRYPT, "203.0.113.5", 0.0, 1.0)
+
+
+def test_init_https_switches_streams_to_https_and_says_what_to_open(setup: Setup) -> None:
+    setup.service().init(https=True)
+    paths = setup.layout.paths
+    assert config.load(paths.config_file).stream_https is True
+    assert "CAP_NET_BIND_SERVICE" in setup.layout.unit_file.read_text()
+    said = "\n".join(setup.said)
+    assert "streams are now served over HTTPS" in said
+    assert "https://203.0.113.5:1337/<alias>" in said
+    assert "80/tcp" in said and "firewall of its own" in said
+    assert not any(c[:2] == ["ufw", "allow"] for c in setup.host.calls), "init opens nothing"
+    # Run again, it stays as it is; and the dashboard is not moved by it.
+    setup.service().init()
+    assert config.load(paths.config_file).stream_https is True
+    assert config.load(paths.config_file).dashboard_public is False
+
+
+def test_init_never_removes_the_certificate_and_uninstall_does(setup: Setup) -> None:
+    before = setup.snapshot()
+    setup.service().init(https=True)
+    kept = _keep_certificate(setup)
+    setup.service().init()  # an upgrade
+    setup.service().init(https=False)
+    setup.service().init(https=True)
+    assert (kept / "203.0.113.5.crt").is_file()
+    setup.service().uninstall()
+    assert not kept.exists() and setup.files() == []
+    assert setup.snapshot() == before
+
+
+def test_no_https_closes_port_80_if_a_request_left_it_open(setup: Setup) -> None:
+    before = setup.snapshot()
+    setup.service().init(https=True)
+    _acme_opened(setup)
+    setup.service().init(https=False)
+    assert config.load(setup.layout.paths.config_file).stream_https is False
+    assert "80/tcp" not in setup.host.rules
+    assert not setup.layout.paths.open_acme_ports_file.exists()
+    assert "CAP_NET_BIND_SERVICE" not in setup.layout.unit_file.read_text()
+    setup.service().uninstall()
+    assert setup.snapshot() == before
+
+
+def test_uninstall_closes_port_80_the_helper_opened_and_leaves_one_it_did_not(
+    setup: Setup,
+) -> None:
+    setup.service().init(https=True)
+    _acme_opened(setup)
+    setup.service().uninstall()
+    assert "80/tcp" not in setup.host.rules
+    setup.host.rules.add("80/tcp")  # a web server's, by hand
+    setup.service().init(https=True)
+    setup.service().uninstall()
+    assert "80/tcp" in setup.host.rules
+
+
+def test_https_needs_a_caddy_with_acme_profiles(setup: Setup) -> None:
+    setup.host.caddy = "2.6.2\n"
+    with pytest.raises(service.ServiceError, match=r"Caddy 2\.6\.2 cannot.*2\.10 or newer"):
+        setup.service().init(https=True)
+    assert setup.files() == [], "refused before anything changed"
+    setup.service().init()  # plain HTTP works with it
+    setup.host.available.discard("caddy")
+    with pytest.raises(service.ServiceError, match="missing on this host: caddy"):
+        setup.service().init(https=True)
+
+
+@pytest.mark.parametrize("found", ["", "2001:db8::5"])
+def test_https_needs_the_public_ipv4_address(setup: Setup, found: str) -> None:
+    with pytest.raises(service.ServiceError, match="public IPv4 address"):
+        setup.service(outgoing_address=lambda: found).init(https=True)
+    paths = setup.layout.paths
+    paths.config_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.config_file.write_text('[stream]\nhost = "media.example.org"\n')
+    with pytest.raises(service.ServiceError, match=r"'media\.example\.org'"):
+        setup.service().init(https=True)
+    paths.config_file.write_text('[stream]\nhost = "203.0.113.9"\n')
+    setup.service(outgoing_address=lambda: found).init(https=True)
+    assert any("https://203.0.113.9:1337/" in line for line in setup.said)
+
+
+def test_https_and_the_public_dashboard_go_together(setup: Setup) -> None:
+    setup.service().init(public=True, password=GOOD, https=True)
+    cfg = config.load(setup.layout.paths.config_file)
+    assert cfg.dashboard_public is True and cfg.stream_https is True

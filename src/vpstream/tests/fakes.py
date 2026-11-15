@@ -81,9 +81,12 @@ class FakeServer:
         self.calls: list[str] = []
         self.fail = fail
         self.up = False
+        self.certificate: Any = None  # what the last start serves HTTPS with
+        self.started_with: list[Any] = []
 
     def start(self) -> None:
         self.calls.append("start")
+        self.started_with.append(self.certificate)
         if self.fail:
             raise CaddyError(self.fail)
         self.up = True
@@ -274,3 +277,95 @@ class EventFirewall(FakeFirewall):
 
     def _call(self, action: str) -> None:
         super()._call(f"port {action}")
+
+
+def _der(tag: int, content: bytes) -> bytes:
+    size = len(content)
+    head = bytes([size]) if size < 0x80 else bytes([0x82]) + size.to_bytes(2, "big")
+    return bytes([tag]) + head + content
+
+
+def _der_time(seconds: float) -> bytes:
+    import time
+
+    stamp = time.gmtime(seconds)
+    if stamp.tm_year < 2050:  # what X.509 asks: UTCTime until 2049, then GeneralizedTime
+        return _der(0x17, time.strftime("%y%m%d%H%M%SZ", stamp).encode())
+    return _der(0x18, time.strftime("%Y%m%d%H%M%SZ", stamp).encode())
+
+
+def certificate_pem(not_before: float, not_after: float) -> str:
+    """A PEM certificate with these dates, laid out as X.509 is, as far as vpstream reads
+    one (it is not signed: nothing here checks a signature)."""
+    import base64
+
+    seq = lambda *parts: _der(0x30, b"".join(parts))  # noqa: E731
+    tbs = seq(
+        _der(0xA0, _der(0x02, b"\x02")),  # version 3
+        _der(0x02, b"\x01"),  # serial
+        seq(_der(0x06, b"\x2a\x86\x48\xce\x3d\x04\x03\x02")),  # ecdsa-with-SHA256
+        seq(),  # issuer
+        seq(_der_time(not_before), _der_time(not_after)),
+        seq(),  # subject
+    )
+    der = seq(tbs, seq(), _der(0x03, b"\x00"))
+    body = base64.b64encode(der).decode()
+    lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+    return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
+
+
+def store_certificate(
+    store: Path,
+    ca: str,
+    host: str,
+    not_before: float = 0.0,
+    not_after: float = 0.0,
+    sans: Any = None,
+    pem: str | None = None,
+    key: str = "key",
+) -> Path:
+    """Put a certificate where Caddy keeps one: a folder per authority, then per name.
+    `pem` and `key` are a real one; without, it is made up with these dates."""
+    import json
+    import re
+
+    folder = store / "certificates" / re.sub(r"[^A-Za-z0-9.]+", "-", ca) / host
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{host}.crt").write_text(pem or certificate_pem(not_before, not_after))
+    (folder / f"{host}.key").write_text(key)
+    meta = {"sans": [host] if sans is None else sans, "issuer_data": {"ca": ca}}
+    (folder / f"{host}.json").write_text(json.dumps(meta))
+    return folder
+
+
+class FakeIssuer:
+    """Stands in for the Caddy that requests a certificate: stores one that lasts
+    `lifetime` from `clock()`, or fails with `fail`. Records the hosts asked for, and
+    whether the port was open (`firewall.calls`) at that moment."""
+
+    def __init__(
+        self,
+        store: Path,
+        ca: str,
+        clock: Any,
+        lifetime: float = 160 * 3600,
+        fail: str = "",
+        firewall: Any = None,
+    ) -> None:
+        self.store, self.ca, self.clock = store, ca, clock
+        self.lifetime, self.fail, self.firewall = lifetime, fail, firewall
+        self.asked: list[str] = []
+        self.port_open: list[bool] = []
+
+    def obtain(self, host: str, done: Any) -> None:
+        from vpstream.certificate import CertificateError
+
+        self.asked.append(host)
+        if self.firewall is not None:
+            calls = self.firewall.calls
+            self.port_open.append(bool(calls) and calls[-1] == "open")
+        if self.fail:
+            raise CertificateError(self.fail)
+        now = self.clock()
+        store_certificate(self.store, self.ca, host, now - 3600, now - 3600 + self.lifetime)
+        assert done()

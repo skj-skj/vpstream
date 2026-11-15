@@ -135,9 +135,9 @@ def test_public_must_be_true_or_false(value: str) -> None:
 def test_init_sets_public_and_leaves_every_other_line(text: str, expect: str | None) -> None:
     if "public_x" in text:
         with pytest.raises(config.ConfigError):
-            config.with_public_dashboard(text, True)
+            config.with_switch(text, "dashboard", "public", True)
         return
-    result = config.with_public_dashboard(text, True)
+    result = config.with_switch(text, "dashboard", "public", True)
     assert config.parse(result).dashboard_public is True
     if expect is not None:
         assert result == expect
@@ -146,13 +146,57 @@ def test_init_sets_public_and_leaves_every_other_line(text: str, expect: str | N
             (a, b) for a, b in zip(text.splitlines(), result.splitlines(), strict=True) if a != b
         ]
         assert changed == [("public = false", "public = true")]
-    back = config.with_public_dashboard(result, False)
+    back = config.with_switch(result, "dashboard", "public", False)
     assert config.parse(back).dashboard_public is False
-    assert config.with_public_dashboard(back, False) == back
+    assert config.with_switch(back, "dashboard", "public", False) == back
 
 
 def test_a_public_setting_written_another_way_is_not_guessed_at() -> None:
     with pytest.raises(config.ConfigError, match="cannot set"):
-        config.with_public_dashboard("dashboard.public = false\n", True)
+        config.with_switch("dashboard.public = false\n", "dashboard", "public", True)
     with pytest.raises(config.ConfigError, match="cannot set"):
-        config.with_public_dashboard('[dashboard]\n"public" = false\n', True)
+        config.with_switch('[dashboard]\n"public" = false\n', "dashboard", "public", True)
+
+
+def test_https_is_off_unless_the_file_says_so() -> None:
+    assert config.parse("").stream_https is False
+    assert config.parse("[stream]\nhttps = true\n").stream_https is True
+    cfg = config.parse("")
+    assert (cfg.acme_ca, cfg.acme_ca_root, cfg.acme_port) == (config.LETS_ENCRYPT, "", 80)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ('[stream]\nhttps = "yes"\n', "stream.https must be true or false"),
+        ('[acme]\nca = "http://ca.example/dir"\n', "acme.ca must be an https://"),
+        ('[acme]\nca_root = "root.pem"\n', "acme.ca_root must be a full path"),
+        ("[acme]\nport = 443\n", "acme.port must be from 1024"),
+        ("[acme]\nport = 1337\n", "stream.port and acme.port are both 1337"),
+        ("[acme]\nport = 1338\n", "dashboard.port and acme.port are both 1338"),
+    ],
+)
+def test_bad_https_settings_are_refused(text: str, message: str) -> None:
+    with pytest.raises(config.ConfigError, match=message):
+        config.parse(text)
+
+
+def test_a_test_authority_can_be_set() -> None:
+    cfg = config.parse(
+        '[acme]\nca = "https://127.0.0.1:14000/dir"\nca_root = "/r.pem"\nport = 5002\n'
+    )
+    assert (cfg.acme_ca, cfg.acme_ca_root, cfg.acme_port) == (
+        "https://127.0.0.1:14000/dir",
+        "/r.pem",
+        5002,
+    )
+
+
+def test_init_sets_https_and_leaves_the_dashboard_as_it_is() -> None:
+    text = config.DEFAULT_TEXT
+    on = config.with_switch(text, "stream", "https", True)
+    assert config.parse(on).stream_https is True and config.parse(on).dashboard_public is False
+    assert on.count("https = true") == 1 and "public = false" in on
+    assert config.with_switch(on, "stream", "https", False) == text
+    added = config.with_switch('[media]\nfolder = "/m"\n', "stream", "https", True)
+    assert config.parse(added).stream_https is True and config.parse(added).media_folder == "/m"

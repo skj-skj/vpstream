@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Iterator
@@ -33,14 +34,21 @@ def _free_port() -> int:
 
 
 class Live:
-    def __init__(self, root: Path) -> None:
+    """`tls`: the stream is HTTPS, and this is what the viewer trusts. `settings` go in the
+    configuration, as for HTTPS through a test authority."""
+
+    def __init__(self, root: Path, tls: ssl.SSLContext | None = None, **settings: Any) -> None:
         self.paths = config.Paths.under(root)
-        self.cfg = config.Config(stream_port=_free_port(), dashboard_port=_free_port())
+        self.cfg = config.Config(stream_port=_free_port(), dashboard_port=_free_port(), **settings)
         self.log: list[str] = []
+        self.tls = tls
         runner = SystemRunner()
         self.server = caddy.CaddyServer(runner, self.cfg.stream_port, self.paths)
+        certificates = daemon.stream_certificates(
+            self.cfg, self.paths, runner, None, self.log.append
+        )
         self.daemon = daemon.Daemon(
-            self.cfg, self.paths, runner, None, self.server, log=self.log.append
+            self.cfg, self.paths, runner, None, self.server, certificates, log=self.log.append
         )
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.daemon.serve, args=(self.stop,), daemon=True)
@@ -51,7 +59,13 @@ class Live:
     def get(
         self, target: str, method: str = "GET", headers: dict[str, str] | None = None
     ) -> tuple[int, dict[str, str], bytes]:
-        conn = http.client.HTTPConnection("127.0.0.1", self.cfg.stream_port, timeout=10)
+        conn: http.client.HTTPConnection
+        if self.tls is None:
+            conn = http.client.HTTPConnection("127.0.0.1", self.cfg.stream_port, timeout=10)
+        else:
+            conn = http.client.HTTPSConnection(
+                "127.0.0.1", self.cfg.stream_port, timeout=10, context=self.tls
+            )
         try:
             conn.request(method, target, headers=headers or {})
             answer = conn.getresponse()

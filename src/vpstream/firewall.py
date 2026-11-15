@@ -8,7 +8,12 @@ and closes that too. It never enables, disables, resets or reloads ufw.
 
 `dash-open` and `dash-close` do the same for the dashboard port, which is open only in public
 mode: `dash-open` refuses unless the configuration says `[dashboard] public = true`, and
-`dash-close` closes only what was written down, never a rule it did not add.
+`dash-close` closes only what was written down, never a rule it did not add. `acme-open` and
+`acme-close` do it for the port Let's Encrypt checks (`[acme] port`, 80), open only while the
+stream's certificate is requested, and only with `[stream] https = true`.
+
+A port that ufw already allowed before an open (a rule of someone else's) is not written
+down, so no close removes it.
 """
 
 from __future__ import annotations
@@ -17,7 +22,8 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -28,7 +34,10 @@ from vpstream.tools import Result, Runner, SystemRunner, tail
 HELPER_NAME = "vpstream-fw"
 STREAM_ACTIONS = ("open", "close")
 DASHBOARD_ACTIONS = ("dash-open", "dash-close")
-ACTIONS = (*STREAM_ACTIONS, *DASHBOARD_ACTIONS)
+ACME_ACTIONS = ("acme-open", "acme-close")
+ACTIONS = (*STREAM_ACTIONS, *DASHBOARD_ACTIONS, *ACME_ACTIONS)
+# ufw's answer to an `allow` for a rule that is there already, for IPv4 and for IPv6.
+_EXISTING = "Skipping adding existing rule"
 UFW_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")  # never taken from the caller's PATH
 TIMEOUT = 60.0
 
@@ -85,7 +94,7 @@ def recorded_ports(path: Path, owner_uid: int = 0) -> list[int]:
         return []
     ports: list[int] = []
     for word in words:
-        if re.fullmatch(r"[0-9]{1,5}", word) and config.MIN_PORT <= int(word) <= 65535:
+        if re.fullmatch(r"[0-9]{1,5}", word) and config.usable_port(int(word), http=True):
             ports.append(int(word))
     return list(dict.fromkeys(ports))
 
@@ -120,6 +129,7 @@ def helper(
     config_file: Path,
     record_file: Path,
     dashboard_record_file: Path,
+    acme_record_file: Path,
     euid: int,
     ufw: str | None,
     owner_uid: int = 0,
@@ -136,10 +146,10 @@ def helper(
     if euid != 0:
         return 1, f"{HELPER_NAME} must run as root (the daemon calls it through sudo)"
     cfg, config_problem = _trusted_config(config_file, owner_uid)
-    if action in DASHBOARD_ACTIONS:
-        return _dashboard(
-            action, runner, cfg, config_problem, dashboard_record_file, ufw, owner_uid
-        )
+    for spec in _RECORDED:
+        if action in spec.actions:
+            record = acme_record_file if spec is ACME_PORT else dashboard_record_file
+            return _recorded(spec, action, runner, cfg, config_problem, record, ufw, owner_uid)
     port = None if cfg is None else cfg.stream_port
     recorded = recorded_ports(record_file, owner_uid)
     if port is None and (action == "open" or not recorded):
@@ -187,11 +197,26 @@ def _apply(
         except OSError as exc:
             return f"cannot write {record_file}, so the port stays closed: {exc.strerror}", {}
     said: dict[int, str] = {}
+    theirs: list[int] = []
     for one in ports:
         res = runner.run([ufw, *ufw_args(action, one)], timeout=TIMEOUT)
         if res.returncode != 0:
             return f"ufw failed: {tail(res, stdout=True)}", said
         said[one] = _first_line(res)
+        lines = res.stdout.strip().splitlines()
+        if (
+            action == "open"
+            and one not in recorded
+            and lines
+            and all(_EXISTING in x for x in lines)
+        ):
+            theirs.append(one)  # allowed before this open, by someone else: never closed
+    if theirs:
+        try:
+            kept = [p for p in dict.fromkeys([*recorded, *ports]) if p not in theirs]
+            _write_record(record_file, kept)
+        except OSError as exc:
+            return f"cannot write {record_file}: {exc.strerror}", said
     if action == "close":
         try:
             _write_record(record_file, [])
@@ -203,7 +228,37 @@ def _apply(
     return "", said
 
 
-def _dashboard(
+@dataclass(frozen=True)
+class RecordedPort:
+    """A port opened only while the configuration asks for it, and closed only as far as it
+    was written down: the dashboard's, and the one Let's Encrypt checks."""
+
+    name: str
+    actions: tuple[str, str]  # open, close
+    enabled: Callable[[config.Config], bool]
+    refusal: str  # why it is not opened when `enabled` says no
+    port: Callable[[config.Config], int]
+
+
+DASHBOARD_PORT = RecordedPort(
+    "dashboard port",
+    DASHBOARD_ACTIONS,
+    lambda cfg: cfg.dashboard_public,
+    "the dashboard is not public ([dashboard] public = false); not opening",
+    lambda cfg: cfg.dashboard_port,
+)
+ACME_PORT = RecordedPort(
+    "certificate check port",
+    ACME_ACTIONS,
+    lambda cfg: cfg.stream_https,
+    "streams are not served over HTTPS ([stream] https = false); not opening",
+    lambda cfg: cfg.acme_port,
+)
+_RECORDED = (DASHBOARD_PORT, ACME_PORT)
+
+
+def _recorded(
+    spec: RecordedPort,
     action: str,
     runner: Runner,
     cfg: config.Config | None,
@@ -212,25 +267,25 @@ def _dashboard(
     ufw: str | None,
     owner_uid: int,
 ) -> tuple[int, str]:
-    """`dash-open` and `dash-close`: the dashboard port, in public mode only. Only what
-    `dash-open` wrote down is ever closed."""
+    """Open a recorded port when the configuration asks for it, or close what was written
+    down. Only what the open wrote down is ever closed."""
     recorded = recorded_ports(record_file, owner_uid)
-    if action == "dash-open":
+    if action == spec.actions[0]:
         if cfg is None:
             return 1, config_problem
-        if not cfg.dashboard_public:
-            return 1, "the dashboard is not public ([dashboard] public = false); not opening"
-        ports = [cfg.dashboard_port]
+        if not spec.enabled(cfg):
+            return 1, spec.refusal
+        ports = [spec.port(cfg)]
     else:
         ports = recorded
         if not ports:
-            return 0, "dashboard port: nothing to close"
-    ufw_action = action.removeprefix("dash-")
+            return 0, f"{spec.name}: nothing to close"
+    ufw_action = "open" if action == spec.actions[0] else "close"
     problem, said = _apply(runner, ufw, ufw_action, ports, recorded, record_file)
     if problem:
         return 1, problem
     listed = "; ".join(f"{p}/tcp: {line}" for p, line in said.items())
-    return 0, f"dashboard port, {ufw_action}: {listed}"
+    return 0, f"{spec.name}, {ufw_action}: {listed}"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -242,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_file=paths.config_file,
         record_file=paths.open_ports_file,
         dashboard_record_file=paths.open_dashboard_ports_file,
+        acme_record_file=paths.open_acme_ports_file,
         euid=os.geteuid(),
         ufw=find_ufw(),
     )
@@ -260,22 +316,19 @@ class Firewall(Protocol):
     def close(self) -> None: ...
 
 
-STREAM, DASHBOARD = "stream", "dashboard"
+STREAM, DASHBOARD, ACME = "stream", "dashboard", "certificate check"
+_PORT_ACTIONS = {STREAM: STREAM_ACTIONS, DASHBOARD: DASHBOARD_ACTIONS, ACME: ACME_ACTIONS}
 
 
 class SudoFirewall:
-    """Opens and closes one port, the stream's or the dashboard's, by running the helper
-    through `sudo -n`."""
+    """Opens and closes one port, the stream's, the dashboard's or the one Let's Encrypt
+    checks, by running the helper through `sudo -n`."""
 
     def __init__(self, runner: Runner, helper: Path, port: str = STREAM) -> None:
         self.runner = runner
         self.helper = helper
         self.port = port
-        self._actions = dict(
-            zip(
-                STREAM_ACTIONS, STREAM_ACTIONS if port == STREAM else DASHBOARD_ACTIONS, strict=True
-            )
-        )
+        self._actions = dict(zip(STREAM_ACTIONS, _PORT_ACTIONS[port], strict=True))
 
     def _call(self, action: str) -> None:
         argv = ["sudo", "-n", str(self.helper), self._actions[action]]

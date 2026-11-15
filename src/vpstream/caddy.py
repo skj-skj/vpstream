@@ -1,9 +1,12 @@
 """Caddy, the public server: its configuration, running it, and reading its access log.
 
-Two Caddy processes can run, each a child of the daemon with a fixed configuration and no
+Three Caddy processes can run, each a child of the daemon with a fixed configuration and no
 admin endpoint. The stream's (`CaddyServer`) listens on the stream port only while a stream
-runs. The public dashboard's (`DashboardCaddy`), only in public mode, serves the dashboard
-over HTTPS with a certificate from its own local authority (`tls internal`).
+runs, over plain HTTP or, with `[stream] https`, over HTTPS with a certificate it loads from
+files. The public dashboard's (`DashboardCaddy`), only in public mode, serves the dashboard
+over HTTPS with a certificate from its own local authority (`tls internal`). The third
+(`CertificateCaddy`) runs only while the stream's certificate is requested (see
+`certificate`).
 
 The stream's Caddy hands every request to the daemon's gate over a unix socket. The gate
 answers either with the page itself (an index, a playlist, a refusal) or with the number of
@@ -16,8 +19,6 @@ a reload.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import os
@@ -26,18 +27,21 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from vpstream.certificate import PROFILE, Certificate, CertificateError, first_der
 from vpstream.checks import is_whole
-from vpstream.config import Paths
+from vpstream.config import Config, Paths
 from vpstream.files import write_atomic
 from vpstream.net import normal_ip, url_host
 from vpstream.tools import Runner, require
 
-# Set by Caddy on the way in, whatever the viewer sent: the address the request came from.
+# Set by Caddy on the way in, whatever the viewer sent: the address the request came from,
+# and whether it came over HTTPS.
 HEADER_IP = "X-Vpstream-Ip"
+HEADER_SCHEME = "X-Vpstream-Scheme"
 # Set by the gate on the way back: send the video with this number, with this type.
 HEADER_FILE = "X-Vpstream-File"
 HEADER_TYPE = "X-Vpstream-Type"
@@ -45,6 +49,9 @@ HEADER_TYPE = "X-Vpstream-Type"
 SERVER = "vpstream"
 DASHBOARD_SERVER = "dashboard"
 START_SECONDS = 10.0
+OBTAIN_SECONDS = 120.0  # a request that has not ended by then is given up
+# The first Caddy with ACME profiles; the only kind of certificate for an address needs one.
+PROFILES_VERSION = (2, 10)
 STOP_SECONDS = 5.0
 _SECOND = 1_000_000_000  # Caddy's JSON takes durations in nanoseconds
 
@@ -85,14 +92,27 @@ def _proxy_to(socket_path: Path) -> dict[str, Any]:
         "handler": "reverse_proxy",
         "upstreams": [{"dial": f"unix/{socket_path}"}],
         "headers": {
-            "request": {"set": {HEADER_IP: ["{http.request.remote.host}"]}},
+            "request": {
+                "set": {
+                    HEADER_IP: ["{http.request.remote.host}"],
+                    HEADER_SCHEME: ["{http.request.scheme}"],
+                }
+            },
             "response": {"delete": ["Server"]},  # what the daemon is built with is its own
         },
     }
 
 
-def config(port: int, gate_socket: Path, access_log: Path, videos_dir: Path) -> dict[str, Any]:
-    """The stream's Caddy: its whole configuration, as its native JSON."""
+def config(
+    port: int,
+    gate_socket: Path,
+    access_log: Path,
+    videos_dir: Path,
+    certificate: Certificate | None = None,
+) -> dict[str, Any]:
+    """The stream's Caddy: its whole configuration, as its native JSON. With a
+    `certificate` it serves HTTPS with it, loaded from its files: this Caddy never asks for
+    one (see `certificate`)."""
     send_file = [
         {
             "handler": "headers",
@@ -113,6 +133,22 @@ def config(port: int, gate_socket: Path, access_log: Path, videos_dir: Path) -> 
         "terminal": True,
     }
     access = f"http.log.access.{SERVER}"
+    server: dict[str, Any] = {
+        "listen": [f":{port}"],
+        "automatic_https": {"disable": True},
+        "read_header_timeout": 10 * _SECOND,
+        "idle_timeout": 120 * _SECOND,
+        "logs": {"default_logger_name": SERVER},
+        "routes": [refuse_method, {"handle": [ask_gate]}],
+    }
+    apps: dict[str, Any] = {"http": {"servers": {SERVER: server}}}
+    if certificate is not None:
+        files = {"certificate": str(certificate.cert_file), "key": str(certificate.key_file)}
+        apps["tls"] = {"certificates": {"load_files": [files]}}
+        # A viewer sends no server name for an address. HTTP/3 would listen on UDP, which
+        # the firewall does not open.
+        server["tls_connection_policies"] = [{"default_sni": certificate.host}]
+        server["protocols"] = ["h1", "h2"]
     return {
         # No admin endpoint: nothing changes this configuration while Caddy runs.
         "admin": _NO_ADMIN,
@@ -131,20 +167,7 @@ def config(port: int, gate_socket: Path, access_log: Path, videos_dir: Path) -> 
                 },
             }
         },
-        "apps": {
-            "http": {
-                "servers": {
-                    SERVER: {
-                        "listen": [f":{port}"],
-                        "automatic_https": {"disable": True},
-                        "read_header_timeout": 10 * _SECOND,
-                        "idle_timeout": 120 * _SECOND,
-                        "logs": {"default_logger_name": SERVER},
-                        "routes": [refuse_method, {"handle": [ask_gate]}],
-                    }
-                }
-            }
-        },
+        "apps": apps,
     }
 
 
@@ -184,21 +207,64 @@ def dashboard_config(port: int, hosts: list[str], socket_path: Path) -> dict[str
     }
 
 
-_PEM = re.compile(r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.S)
+def certificate_config(host: str, config: Config) -> dict[str, Any]:
+    """The Caddy that requests the stream's certificate: nothing but the request. Let's
+    Encrypt checks over plain HTTP on `config.acme_port`, where Caddy answers only for the
+    time of the check; TLS-ALPN is off, its port 443 is not opened."""
+    issuer: dict[str, Any] = {
+        "module": "acme",
+        "ca": config.acme_ca,
+        "profile": PROFILE,
+        "challenges": {
+            "http": {"alternate_port": config.acme_port},
+            "tls-alpn": {"disabled": True},
+        },
+    }
+    if config.acme_ca_root:
+        issuer["trusted_roots_pem_files"] = [config.acme_ca_root]
+    return {
+        "admin": _NO_ADMIN,
+        "apps": {
+            "pki": {"certificate_authorities": {"local": {"install_trust": False}}},
+            "tls": {
+                "certificates": {"automate": [host]},
+                "automation": {"policies": [{"subjects": [host], "issuers": [issuer]}]},
+            },
+        },
+    }
+
+
+def caddy_version(runner: Runner) -> tuple[int, ...] | None:
+    """Caddy's version, from `caddy version`: `v2.11.9 h1:...`, or `2.6.2` from Ubuntu's
+    package. None when it does not say (a build without its version, such as Termux's)."""
+    path = runner.which("caddy")
+    if path is None:
+        return None
+    found = re.match(
+        r"v?(\d+)\.(\d+)(?:\.(\d+))?\b", runner.run([path, "version"], timeout=30).stdout
+    )
+    return None if found is None else tuple(int(n or 0) for n in found.groups())
+
+
+def profiles_problem(runner: Runner) -> str | None:
+    """Why this host's Caddy cannot request the stream's certificate, or None."""
+    version = caddy_version(runner)
+    if version is None or version[:2] >= PROFILES_VERSION:
+        return None
+    need = ".".join(map(str, PROFILES_VERSION))
+    return (
+        f"Caddy {'.'.join(map(str, version))} cannot request a certificate for an address "
+        f"(that needs Caddy {need} or newer, for ACME profiles). Install the current Caddy "
+        "from Caddy's own package repository: vpstream install caddy "
+        "(see https://caddyserver.com/docs/install)"
+    )
 
 
 def certificate_fingerprint(pem: str) -> str:
     """The SHA-256 fingerprint of the first certificate in `pem`, as AB:CD:..., the way
     browsers and `openssl x509 -fingerprint -sha256` show it. Raises ValueError when there
     is no certificate in it."""
-    found = _PEM.search(pem)
-    if not found:
-        raise ValueError("no certificate in the file")
-    try:
-        der = base64.b64decode("".join(found.group(1).split()), validate=True)
-    except binascii.Error as exc:
-        raise ValueError(f"the certificate is not valid base64: {exc}") from exc
-    return ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
+    return ":".join(f"{b:02X}" for b in hashlib.sha256(first_der(pem)).digest())
 
 
 def read_certificate(path: Path) -> dict[str, str] | None:
@@ -284,6 +350,7 @@ class CaddyProcess:
     A subclass says what it serves (`config`)."""
 
     needed_for = "serving streams"
+    listens = True  # started once it accepts connections on `port`; False: once it runs
 
     def __init__(self, runner: Runner, port: int, work_dir: Path) -> None:
         self.runner = runner
@@ -319,7 +386,7 @@ class CaddyProcess:
         if self.running():
             return
         binary = require(self.runner, "caddy", self.needed_for)
-        if _accepts(self.port, self.probe_host):
+        if self.port_used():
             raise CaddyError(f"port {self.port} is already used by another program")
         self.work_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
         config_file = self.work_dir / "caddy.json"
@@ -341,7 +408,7 @@ class CaddyProcess:
             )
         deadline = time.monotonic() + START_SECONDS
         while proc.poll() is None and time.monotonic() < deadline:
-            if _accepts(self.port, self.probe_host):
+            if not self.listens or _accepts(self.port, self.probe_host):
                 self._proc = proc
                 return
             time.sleep(0.1)
@@ -349,6 +416,9 @@ class CaddyProcess:
             _end(proc)
             raise CaddyError(f"Caddy did not listen on port {self.port}: {self._why()}")
         raise CaddyError(f"Caddy stopped at once (exit {proc.returncode}): {self._why()}")
+
+    def port_used(self) -> bool:
+        return _accepts(self.port, self.probe_host)
 
     def stop(self) -> None:
         proc, self._proc = self._proc, None
@@ -363,6 +433,12 @@ class CaddyProcess:
         return self._why()
 
 
+class StreamServer(Server, Protocol):
+    """The stream's Caddy as the daemon uses it. Tests swap in a fake."""
+
+    certificate: Certificate | None  # HTTPS with it, or plain HTTP; set before each start
+
+
 class CaddyServer(CaddyProcess):
     """The stream's Caddy: the stream port, asking the gate about every request."""
 
@@ -371,9 +447,12 @@ class CaddyServer(CaddyProcess):
         self.gate_socket = paths.gate_socket
         self.access_log = paths.access_log
         self.videos_dir = paths.videos_dir
+        self.certificate: Certificate | None = None
 
     def config(self) -> dict[str, Any]:
-        return config(self.port, self.gate_socket, self.access_log, self.videos_dir)
+        return config(
+            self.port, self.gate_socket, self.access_log, self.videos_dir, self.certificate
+        )
 
     def start(self) -> None:
         if not self.running():
@@ -410,6 +489,81 @@ class DashboardCaddy(CaddyProcess):
     def probe_host(self) -> str:
         first = next((h for h in self.hosts if normal_ip(h)), "")
         return first or "127.0.0.1"
+
+
+class CertificateCaddy(CaddyProcess):
+    """Requests the stream's certificate, then stops: started for one request at a time,
+    with port 80 open only meanwhile (see `certificate.Certificates`). Caddy keeps what it
+    gets in its storage."""
+
+    needed_for = "HTTPS for streams"
+    listens = False  # it listens only while Let's Encrypt checks
+
+    def __init__(self, runner: Runner, config: Config, paths: Paths) -> None:
+        super().__init__(runner, config.acme_port, paths.certificate_dir)
+        self.settings = config
+        self.host = ""
+        self.timeout = OBTAIN_SECONDS
+
+    def config(self) -> dict[str, Any]:
+        return certificate_config(self.host, self.settings)
+
+    def port_used(self) -> bool:
+        return _accepts(self.port, "127.0.0.1")
+
+    def obtain(self, host: str, done: Callable[[], bool]) -> None:
+        """Request a certificate for `host`, until `done()` says it is stored. Caddy is
+        stopped at the first failure: left alone it tries again every minute or so, and
+        every failed check counts against a limit (5 an hour for an address)."""
+        self.host = host
+        try:
+            self.start()
+        except (CaddyError, OSError) as exc:
+            raise CertificateError(f"Caddy could not request the certificate: {exc}") from exc
+        try:
+            deadline = time.monotonic() + self.timeout
+            while not done():
+                if failure := obtain_failure(self._log_text()):
+                    raise CertificateError(f"the certificate was refused: {failure}")
+                if not self.running():
+                    raise CertificateError(
+                        f"Caddy stopped before it had the certificate: {self._why()}"
+                    )
+                if time.monotonic() > deadline:
+                    raise CertificateError(
+                        f"no certificate after {self.timeout:g} seconds: {self._why()}"
+                    )
+                time.sleep(0.2)
+        finally:
+            self.stop()
+
+    def _log_text(self) -> str:
+        try:
+            return self.error_log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+
+def obtain_failure(log: str) -> str | None:
+    """Why the request failed, from Caddy's log, or None while it has not. The check's own
+    answer says most (the port could not be reached, the rate limit), so it is preferred."""
+    problem = None
+    for line in log.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("level") != "error":
+            continue
+        logger = str(entry.get("logger", ""))
+        if entry.get("msg") == "challenge failed" and isinstance(entry.get("problem"), dict):
+            problem = problem or str(entry["problem"].get("detail") or "")
+        elif logger == "tls.obtain" and entry.get("msg") in (
+            "will retry",
+            "could not get certificate from issuer",
+        ):
+            return problem or str(entry.get("error") or entry.get("msg"))
+    return None
 
 
 def _end(proc: subprocess.Popen[bytes]) -> None:

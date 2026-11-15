@@ -238,6 +238,29 @@ const { check, finish } = runner();
     eq(page.posts()[0].body, { ttl: 60, mode: "direct", file: "/m/film.mkv", alias: "film" });
   });
 
+  await check("plain HTTP is offered only on an HTTPS host, and sent only when ticked", async () => {
+    const plain = load({ status: status(), "stream/start": status({ stream: stream() }) });
+    await settle();
+    eq(plain.$("plainfield").hidden, true);
+    plain.$("plain").checked = true; // hidden: never sent
+    plain.$("path").value = "/m/film.mkv";
+    plain.$("start").dispatch("submit");
+    await settle();
+    eq("http" in plain.posts()[0].body, false);
+    const https = { enabled: true, certificate: null };
+    const page = load({ status: status({ https }), "stream/start": status({ stream: stream(), https }) });
+    await settle();
+    eq(page.$("plainfield").hidden, false);
+    page.$("path").value = "/m/film.mkv";
+    page.$("start").dispatch("submit");
+    await settle();
+    eq("http" in page.posts()[0].body, false);
+    page.$("plain").checked = true;
+    page.$("start").dispatch("submit");
+    await settle();
+    eq(page.posts()[1].body.http, true);
+  });
+
   await check("a transcode is asked about, and sent again confirmed only on yes", async () => {
     let asked = 0;
     const page = load({ status: status(), "stream/start": (b) => {

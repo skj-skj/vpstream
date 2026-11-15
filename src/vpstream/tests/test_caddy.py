@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from vpstream import caddy, config
+from vpstream.certificate import Certificate
 from vpstream.tests.fakes import FakeRunner
 
 # A stand-in for the caddy program: it listens where the configuration says, as Caddy does.
 FAKE_CADDY = """\
 #!{python}
 import json, signal, socket, sys, time
+from pathlib import Path
 assert sys.argv[1:3] == ["run", "--config"], sys.argv
 cfg = json.load(open(sys.argv[3]))
 mode = open(sys.argv[0] + ".mode").read().strip()
@@ -22,6 +24,21 @@ if mode == "broken":
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 if mode == "deaf":
     time.sleep(60)
+if "http" not in cfg["apps"]:  # the Caddy that requests a certificate: it never ends itself
+    import os
+    open(sys.argv[0] + ".pid", "w").write(str(os.getpid()))
+    host = cfg["apps"]["tls"]["certificates"]["automate"][0]
+    if mode == "issue":
+        from vpstream.tests.fakes import store_certificate
+        ca = cfg["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["ca"]
+        now = time.time()
+        store_certificate(Path(os.environ["XDG_DATA_HOME"]) / "caddy", ca, host, now, now + 576000)
+    elif mode == "refuse":
+        entry = dict(level="error", logger="tls.obtain", msg="will retry",
+                     error="HTTP 429 rateLimited")
+        print(json.dumps(entry), file=sys.stderr, flush=True)
+    while True:
+        time.sleep(1)
 port = int(cfg["apps"]["http"]["servers"]["vpstream"]["listen"][0].lstrip(":"))
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -84,7 +101,10 @@ def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
     (proxy,) = ask["handle"]
     assert proxy["upstreams"] == [{"dial": "unix//run/vpstream/gate.sock"}]
     # `set` replaces whatever the viewer sent under that name.
-    assert proxy["headers"]["request"]["set"] == {"X-Vpstream-Ip": ["{http.request.remote.host}"]}
+    assert proxy["headers"]["request"]["set"] == {
+        "X-Vpstream-Ip": ["{http.request.remote.host}"],
+        "X-Vpstream-Scheme": ["{http.request.scheme}"],
+    }
 
 
 def test_a_file_is_sent_only_when_the_gate_names_one() -> None:
@@ -278,7 +298,10 @@ def test_the_dashboard_config_is_https_for_the_address_and_never_touches_trust_s
     assert server["automatic_https"] == {"disable_redirects": True}
     [proxy] = server["routes"][0]["handle"]
     assert proxy["upstreams"] == [{"dial": f"unix/{tmp_path / 'd.sock'}"}]
-    assert proxy["headers"]["request"]["set"] == {caddy.HEADER_IP: ["{http.request.remote.host}"]}
+    assert proxy["headers"]["request"]["set"] == {
+        caddy.HEADER_IP: ["{http.request.remote.host}"],
+        caddy.HEADER_SCHEME: ["{http.request.scheme}"],
+    }
 
 
 def test_both_caddies_hand_on_the_address_the_same_way(tmp_path: Path) -> None:
@@ -334,3 +357,208 @@ def test_each_address_gets_a_listener_whose_certificate_is_its_own(tmp_path: Pat
     [server] = only_a_name["apps"]["http"]["servers"].values()
     assert server["listen"] == [":1338"]
     assert server["tls_connection_policies"] == [{"default_sni": "vps.example.org"}]
+
+
+# --- HTTPS for the stream
+
+
+def _cert(tmp_path: Path) -> Certificate:
+    return Certificate("203.0.113.5", tmp_path / "c.crt", tmp_path / "c.key", 0.0, 1.0)
+
+
+def test_the_stream_is_plain_http_without_a_certificate(tmp_path: Path) -> None:
+    cfg = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v")
+    assert "tls" not in cfg["apps"]
+    server = cfg["apps"]["http"]["servers"]["vpstream"]
+    assert "tls_connection_policies" not in server
+    assert server["automatic_https"] == {"disable": True}
+
+
+def test_the_stream_serves_its_certificate_from_files_and_never_asks(tmp_path: Path) -> None:
+    cert = _cert(tmp_path)
+    cfg = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v", cert)
+    assert cfg["apps"]["tls"] == {
+        "certificates": {
+            "load_files": [{"certificate": str(cert.cert_file), "key": str(cert.key_file)}]
+        }
+    }
+    server = cfg["apps"]["http"]["servers"]["vpstream"]
+    assert server["listen"] == [":1337"]
+    # A viewer sends no server name for an address.
+    assert server["tls_connection_policies"] == [{"default_sni": "203.0.113.5"}]
+    assert server["protocols"] == ["h1", "h2"]  # no HTTP/3 on UDP, which ufw does not open
+    # Nothing in this Caddy ever asks an authority, or listens on port 80.
+    assert server["automatic_https"] == {"disable": True}
+    assert "automation" not in cfg["apps"]["tls"]
+    assert cfg["admin"]["disabled"] is True
+
+
+def test_the_requesting_caddy_asks_for_a_short_lived_certificate_over_http(
+    tmp_path: Path,
+) -> None:
+    cfg = caddy.certificate_config("203.0.113.5", config.Config(stream_https=True))
+    tls = cfg["apps"]["tls"]
+    assert tls["certificates"] == {"automate": ["203.0.113.5"]}
+    [policy] = tls["automation"]["policies"]
+    assert policy["subjects"] == ["203.0.113.5"]
+    assert policy["issuers"] == [
+        {
+            "module": "acme",
+            "ca": config.LETS_ENCRYPT,
+            "profile": "shortlived",
+            "challenges": {"http": {"alternate_port": 80}, "tls-alpn": {"disabled": True}},
+        }
+    ]
+    assert cfg["apps"]["pki"] == {"certificate_authorities": {"local": {"install_trust": False}}}
+    assert "http" not in cfg["apps"], "it serves nothing; Caddy answers the check by itself"
+    assert cfg["admin"]["disabled"] is True
+
+
+def test_a_test_authority_comes_with_its_root(tmp_path: Path) -> None:
+    settings = config.Config(
+        acme_ca="https://127.0.0.1:14000/dir", acme_ca_root="/r.pem", acme_port=5002
+    )
+    [issuer] = caddy.certificate_config("127.0.0.1", settings)["apps"]["tls"]["automation"][
+        "policies"
+    ][0]["issuers"]
+    assert issuer["ca"] == "https://127.0.0.1:14000/dir"
+    assert issuer["trusted_roots_pem_files"] == ["/r.pem"]
+    assert issuer["challenges"]["http"] == {"alternate_port": 5002}
+
+
+def _log_entry(**entry: object) -> str:
+    return json.dumps(entry)
+
+
+def test_a_failed_check_is_told_with_the_authority_s_own_words() -> None:
+    # What Caddy 2.11.9 wrote when Pebble could not reach the port.
+    detail = 'Get "http://127.0.0.1:18080/.well-known/acme-challenge/x": connection refused'
+    log = "\n".join(
+        [
+            _log_entry(level="info", logger="tls.obtain", msg="acquiring lock"),
+            _log_entry(
+                level="error",
+                logger="tls.issuance.acme.acme_client",
+                msg="challenge failed",
+                problem={"type": "urn:ietf:params:acme:error:connection", "detail": detail},
+            ),
+            _log_entry(
+                level="error",
+                logger="tls.obtain",
+                msg="could not get certificate from issuer",
+                error="HTTP 400 ...",
+            ),
+            _log_entry(level="error", logger="tls.obtain", msg="will retry", retrying_in=60),
+        ]
+    )
+    assert caddy.obtain_failure(log) == detail
+
+
+def test_a_refusal_without_a_check_says_what_caddy_said() -> None:
+    error = "HTTP 429 urn:ietf:params:acme:error:rateLimited - too many certificates"
+    log = _log_entry(
+        level="error", logger="tls.obtain", msg="could not get certificate from issuer", error=error
+    )
+    assert caddy.obtain_failure(log) == error
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "",
+        "not json\n{",
+        _log_entry(level="info", logger="tls.obtain", msg="obtaining certificate"),
+        _log_entry(level="error", logger="pki.ca.local", msg="failed to install root certificate"),
+        # A failed check alone: Caddy may still be trying another way; it says when it is not.
+        _log_entry(level="error", msg="challenge failed", problem={"detail": "x"}),
+    ],
+)
+def test_nothing_else_counts_as_a_failure(log: str) -> None:
+    assert caddy.obtain_failure(log) is None
+
+
+@pytest.mark.parametrize(
+    ("output", "version", "refused"),
+    [
+        ("2.6.2\n", (2, 6, 2), True),  # Ubuntu's package
+        ("v2.9.1 h1:abc=\n", (2, 9, 1), True),
+        ("v2.10.0 h1:abc=\n", (2, 10, 0), False),
+        ("v2.11.9 h1:wKoF=\n", (2, 11, 9), False),
+        ("v3.0.0\n", (3, 0, 0), False),
+        ("unknown\n", None, False),  # a build that does not say: it is tried
+    ],
+)
+def test_only_a_caddy_with_acme_profiles_may_request(
+    output: str, version: tuple[int, ...] | None, refused: bool
+) -> None:
+    runner = FakeRunner(("caddy",))
+    runner.on("/usr/bin/caddy", "version", stdout=output)
+    assert caddy.caddy_version(runner) == version
+    problem = caddy.profiles_problem(runner)
+    assert (problem is not None) is refused
+    if refused:
+        assert "2.10 or newer" in problem and "caddyserver.com/docs/install" in problem
+
+
+def test_without_caddy_there_is_no_version() -> None:
+    assert caddy.caddy_version(FakeRunner(())) is None
+
+
+# --- the Caddy that requests the stream's certificate, run for real (a stand-in program)
+
+
+def _requester(program: Path, tmp_path: Path) -> tuple[caddy.CertificateCaddy, config.Paths]:
+    paths = config.Paths.under(tmp_path / "root")
+    settings = config.Config(
+        stream_https=True, acme_ca="https://ca.test/dir", acme_port=_free_port()
+    )
+    requester = caddy.CertificateCaddy(Which(program), settings, paths)
+    requester.timeout = 3
+    return requester, paths
+
+
+def _gone(program: Path) -> bool:
+    import os
+
+    pid = int(Path(f"{program}.pid").read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [
+        ("issue", None),
+        ("refuse", "refused: HTTP 429 rateLimited"),
+        ("quiet", "no certificate after 3"),
+    ],
+)
+def test_the_requesting_caddy_is_stopped_however_it_ends(
+    program: Path, tmp_path: Path, mode: str, error: str | None
+) -> None:
+    from vpstream.certificate import CertificateError, stored
+
+    Path(f"{program}.mode").write_text(mode)
+    requester, paths = _requester(program, tmp_path)
+    store = paths.certificate_dir / "data" / "caddy"
+    done = lambda: stored(store, "https://ca.test/dir", "203.0.113.5") is not None  # noqa: E731
+    if error is None:
+        requester.obtain("203.0.113.5", done)
+    else:
+        with pytest.raises(CertificateError, match=error):
+            requester.obtain("203.0.113.5", done)
+    assert not requester.running()
+    assert _gone(program), "Caddy keeps trying when left running; each try may count"
+
+
+def test_a_requesting_caddy_that_cannot_start_says_so(program: Path, tmp_path: Path) -> None:
+    from vpstream.certificate import CertificateError
+
+    Path(f"{program}.mode").write_text("broken")
+    requester, _ = _requester(program, tmp_path)
+    said = r"(could not request|stopped before it had the certificate).*something is wrong"
+    with pytest.raises(CertificateError, match=said):
+        requester.obtain("203.0.113.5", lambda: False)
