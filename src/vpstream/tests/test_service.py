@@ -911,3 +911,30 @@ def test_https_and_the_public_dashboard_go_together(setup: Setup) -> None:
     _https_ready(setup).init(public=True, password=GOOD, https=True)
     cfg = config.load(setup.layout.paths.config_file)
     assert cfg.dashboard_public is True and cfg.stream_https is True
+
+
+@pytest.mark.parametrize("theirs", ["80/tcp", PORT_80])
+def test_a_port_80_rule_that_was_there_before_vpstream_stays(setup: Setup, theirs: str) -> None:
+    """Opened by hand before vpstream came (a web server's `ufw allow 80/tcp`, or a rule just
+    like vpstream's): requests, --no-https and uninstall all leave it."""
+    from vpstream import firewall
+
+    setup.host.rules.add(theirs)
+    _https_ready(setup).init(https=True)
+    paths = setup.layout.paths
+    helper = dict(
+        config_file=paths.config_file,
+        record_file=paths.open_ports_file,
+        dashboard_record_file=paths.open_dashboard_ports_file,
+        acme_record_file=paths.open_acme_ports_file,
+        euid=0,
+        ufw="ufw",
+        owner_uid=os.getuid(),
+    )
+    for action in ("acme-open", "acme-close", "acme-open"):  # a request, then one cut off
+        assert firewall.helper([action], setup.host, **helper)[0] == 0  # type: ignore[arg-type]
+    setup.service().init(https=False)
+    assert theirs in setup.host.rules
+    assert PORT_80 not in setup.host.rules or theirs == PORT_80, "only ours is taken out"
+    setup.service().uninstall()
+    assert theirs in setup.host.rules

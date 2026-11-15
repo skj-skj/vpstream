@@ -214,6 +214,13 @@ sudo -u vpstream sudo -n "$FW" acme-close
 v4_80                                        # theirs stays
 sudo ufw delete allow proto tcp from 0.0.0.0/0 to any port 80
 no v4_80
+sudo ufw allow 80/tcp   # the usual hand-made rule, IPv4 and IPv6, before vpstream came
+sudo -u vpstream sudo -n "$FW" acme-open
+sudo -u vpstream sudo -n "$FW" acme-close
+v4_80 && v6_80          # both halves stay
+has_rule "ufw allow 80/tcp"
+sudo ufw delete allow 80/tcp
+no v4_80
 
 step "init --no-https goes back"
 sudo vpstream init --no-https
