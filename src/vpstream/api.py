@@ -19,12 +19,12 @@ from werkzeug.exceptions import HTTPException
 
 from vpstream import login as auth
 from vpstream.caddy import HEADER_IP
+from vpstream.client import API
 from vpstream.control import Control, ControlError
 from vpstream.gate import GateError
 from vpstream.net import normal_ip
 from vpstream.stream import NeedsConfirm, StreamError, Unreadable
 
-API = "/api/v1"
 # The `code` of a refusal the command line can put right: by giving the service access to
 # the files, or by asking whether a long prepare should go ahead.
 UNREADABLE = Unreadable.CODE

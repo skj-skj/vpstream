@@ -232,7 +232,7 @@ def _request(
     """Ask the daemon to start a stream or a prepare of a file or folder. When the service
     cannot read the videos, give it access (an ACL entry for its user alone) and ask once
     more; when it would take long, say what and ask whether to go ahead."""
-    from vpstream import access, api, client, config
+    from vpstream import access, client, config
     from vpstream.tools import SystemRunner, ToolMissing
 
     socket = config.default_paths().socket
@@ -247,7 +247,7 @@ def _request(
                 return info
             except client.DaemonRefused as exc:
                 code = exc.data.get("code")
-                if code == api.UNREADABLE and not granted:
+                if code == stream.Unreadable.CODE and not granted:
                     granted = True
                     user = str(exc.data.get("user"))
                     try:
@@ -262,7 +262,7 @@ def _request(
                         "your files and folders.",
                         file=sys.stderr,
                     )
-                elif code == api.CONFIRM and not confirmed:
+                elif code == stream.NeedsConfirm.CODE and not confirmed:
                     confirmed = True
                     print(f"{exc.data.get('error')}\n{format_plans(exc.data.get('plans') or [])}")
                     if not _confirm("Go ahead?", yes):

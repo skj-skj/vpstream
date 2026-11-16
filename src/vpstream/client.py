@@ -8,8 +8,9 @@ import socket
 from pathlib import Path
 from typing import Any
 
-from vpstream import api
-
+# The routes of the daemon's API (see `api`), kept here so the command line does not load
+# Flask to talk to the daemon.
+API = "/api/v1"
 TIMEOUT = 10.0
 CHANGE_TIMEOUT = 90.0  # a start or a stop waits for Caddy and for the firewall helper
 # A start may also wait for a certificate: up to caddy.OBTAIN_SECONDS, and the helper's
@@ -62,7 +63,7 @@ def call(
         body = json.dumps(payload)
     conn = _UnixConnection(socket_path, timeout or (TIMEOUT if body is None else CHANGE_TIMEOUT))
     try:
-        conn.request(method, f"{api.API}/{route}", body=body, headers=headers)
+        conn.request(method, f"{API}/{route}", body=body, headers=headers)
         response = conn.getresponse()
         answer = response.read()
     except (FileNotFoundError, ConnectionRefusedError) as exc:
