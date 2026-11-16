@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.15.0 (2026-11-16)
+
+### Features
+
+- Clean-install check, README in step with the CLI, uninstall --purge removes ffmpeg
+  ([#26](https://github.com/skj-skj/vpstream/pull/26),
+  [`6ccc0a7`](https://github.com/skj-skj/vpstream/commit/6ccc0a73cf3d12ccb037db12fb75032b52c45ded))
+
+
 ## v0.14.0 (2026-11-15)
 
 ### Features
