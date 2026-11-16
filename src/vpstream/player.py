@@ -42,8 +42,9 @@ def choices(
     track that is prepared soft and/or burned in, in track order. `hls` is where the
     video's prepared files are, for the subtitles' addresses."""
     have = prepared.versions(entry)
+    meta = prepared.read_meta(entry) or {}  # read once for both kinds of track
     options: list[tuple[prepared.Track, dict[str, Any]]] = []
-    for track in prepared.meta_tracks(entry, "subtitles"):
+    for track in prepared.meta_tracks(entry, "subtitles", meta):
         n = track.number
         for kind, made, url in (
             (SOFT, have.soft, f"{hls}subs/{n}.vtt"),
@@ -52,7 +53,7 @@ def choices(
             if n in made:
                 option = {"id": f"{n}-{kind}", "label": track.label, "number": n, "kind": kind}
                 options.append((track, {**option, "url": url}))
-    return prepared.meta_tracks(entry, "audio"), options
+    return prepared.meta_tracks(entry, "audio", meta), options
 
 
 def menu(entry: Path) -> dict[str, list[dict[str, Any]]]:
