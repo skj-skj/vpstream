@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -60,6 +61,24 @@ class Http(Protocol):
     def download(self, url: str, dest: Path, progress: Callable[[int, int], None]) -> str:
         """Save `url` to `dest` and return its sha256."""
         ...
+
+
+@dataclass
+class Installer:
+    """What installing one program needs: programs to run, files to fetch, a question and a
+    progress line for the user, a folder to download to, and whether this runs as root
+    (None: look)."""
+
+    runner: Runner
+    http: Http
+    confirm: Callable[[str], bool]
+    progress: Callable[[str], None]
+    tmp_dir: str | None = None
+    is_root: bool | None = None
+
+    def _root(self, *args: str | Path, what: str) -> str:
+        """Run one step as root (see `as_root`)."""
+        return as_root(self.runner, self.is_root, *args, what=what)
 
 
 class UrlHttp:

@@ -17,20 +17,14 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from vpstream.ffargs import parse_ffmpeg_list
 from vpstream.files import read_json_object
-from vpstream.system_install import (
-    APT_GET,
-    Cancelled,
-    Http,
-    SetupError,
-    as_root,
-)
+from vpstream.system_install import APT_GET, Cancelled, Installer, SetupError
 from vpstream.tools import Runner, tail
 
 REPO = "FFmpeg-Builds/FFmpeg-Builds"  # formerly BtbN/FFmpeg-Builds
@@ -247,20 +241,11 @@ def apt_removals(runner: Runner, packages: Sequence[str]) -> list[str]:
 
 
 @dataclass
-class Setup:
-    runner: Runner
-    http: Http
-    confirm: Callable[[str], bool]
-    progress: Callable[[str], None]
+class Setup(Installer):
     layout: Layout = Layout()
-    tmp_dir: str | None = None
-    is_root: bool | None = None
     system: str | None = None  # sys.platform, platform.machine() and the C library,
     machine: str | None = None  # given by tests
     libc: str | None = None
-
-    def _system(self, *args: str | Path, what: str) -> None:
-        as_root(self.runner, self.is_root, *args, what=what)
 
     def _arch(self) -> str:
         if not (self.system or sys.platform).startswith("linux"):
@@ -351,7 +336,7 @@ class Setup:
                 missing.append(pkg)
         if missing:
             self.progress(f"installing {', '.join(missing)}")
-            self._system(
+            self._root(
                 *APT_GET, "install", "-y", "--no-install-recommends", *missing,
                 what="installing the libraries and fonts ffmpeg needs",
             )  # fmt: skip
@@ -456,15 +441,15 @@ class Setup:
         target = self.layout.install_dir
         new = self.layout.staging_dir
         self.progress(f"installing to {target}")
-        self._system("mkdir", "-p", target.parent, what="creating the install folder")
-        self._system("rm", "-rf", new, what="clearing an old partial install")
-        self._system("cp", "-R", staged, new, what="copying ffmpeg")
-        self._system("chmod", "-R", "u+rwX,go+rX,go-w", new, what="setting permissions")
-        self._system("rm", "-rf", target, what="removing the previous vpstream ffmpeg")
-        self._system("mv", new, target, what="moving ffmpeg into place")
-        self._system("mkdir", "-p", self.layout.bin_dir, what="creating the bin folder")
+        self._root("mkdir", "-p", target.parent, what="creating the install folder")
+        self._root("rm", "-rf", new, what="clearing an old partial install")
+        self._root("cp", "-R", staged, new, what="copying ffmpeg")
+        self._root("chmod", "-R", "u+rwX,go+rX,go-w", new, what="setting permissions")
+        self._root("rm", "-rf", target, what="removing the previous vpstream ffmpeg")
+        self._root("mv", new, target, what="moving ffmpeg into place")
+        self._root("mkdir", "-p", self.layout.bin_dir, what="creating the bin folder")
         for prog in PROGRAMS:
-            self._system(
+            self._root(
                 "ln", "-sfn", target / "bin" / prog, self.layout.bin_dir / prog,
                 what=f"linking {prog}",
             )  # fmt: skip
@@ -472,10 +457,10 @@ class Setup:
     def _uninstall(self, old: Sequence[Existing], removals: Sequence[str]) -> None:
         if removals:
             self.progress(f"uninstalling apt packages: {', '.join(removals)}")
-            self._system(*APT_GET, "remove", "-y", *removals, what="removing the old ffmpeg")
+            self._root(*APT_GET, "remove", "-y", *removals, what="removing the old ffmpeg")
         for name in dict.fromkeys(e.package for e in old if e.owner == "snap"):
             self.progress(f"uninstalling snap {name}")
-            self._system("snap", "remove", name, what="removing the old ffmpeg")
+            self._root("snap", "remove", name, what="removing the old ffmpeg")
 
     def _report(self, build: Build) -> str:
         lines = [f"Installed ffmpeg {build.version} to {self.layout.install_dir}"]

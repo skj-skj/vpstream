@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import re
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from vpstream import caddy
-from vpstream.system_install import APT_GET, Cancelled, Http, SetupError, as_root
-from vpstream.tools import Runner, tail
+from vpstream.system_install import APT_GET, Cancelled, Installer, SetupError
+from vpstream.tools import tail
 
 REPOSITORY = "https://dl.cloudsmith.io/public/caddy/stable"
 KEY_URL = f"{REPOSITORY}/gpg.key"
@@ -101,17 +100,8 @@ def _shown(version: tuple[int, ...] | None) -> str:
 
 
 @dataclass
-class Setup:
-    runner: Runner
-    http: Http
-    confirm: Callable[[str], bool]
-    progress: Callable[[str], None]
+class Setup(Installer):
     layout: Layout = Layout()
-    tmp_dir: str | None = None
-    is_root: bool | None = None
-
-    def _root(self, *args: str | Path, what: str) -> str:
-        return as_root(self.runner, self.is_root, *args, what=what)
 
     def run(self, *, update: bool) -> str:
         """Install (or update) Caddy: an older one, from Ubuntu's own packages for example, is
