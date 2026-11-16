@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.15.1 (2026-11-16)
+
+### Bug Fixes
+
+- Guess limit per IPv6 network, a dashboard authority for this host only, no control characters on
+  the terminal ([#27](https://github.com/skj-skj/vpstream/pull/27),
+  [`4a85bcb`](https://github.com/skj-skj/vpstream/commit/4a85bcb75904e0c3fb0999bd6f43b988fd664889))
+
+
 ## v0.15.0 (2026-11-16)
 
 ### Features
