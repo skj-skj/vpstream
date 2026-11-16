@@ -147,7 +147,7 @@ jobs:
           sudo systemctl disable --now caddy   # the package's own web server is not used
       - name: Make the image's own sudoers files valid (24.04's has bad permissions for visudo)
         run: |
-          sudo chmod 0440 /etc/sudoers.d/*
+          sudo find /etc/sudoers.d -type f -exec chmod 0440 {} +   # the folder is root's only
           sudo visudo -c
       - name: Stand in for Tailscale (the runner is on no tailnet)
         run: sudo install -m 0755 scripts/ci-fake-tailscale /usr/local/bin/tailscale

@@ -67,21 +67,28 @@ class UrlHttp:
 
     def _open(self, url: str, accept: str = "*/*") -> Any:
         headers = {"User-Agent": f"vpstream/{__version__}", "Accept": accept}
-        request = urllib.request.Request(url, headers=headers)
-        token = os.environ.get(TOKEN_ENV)
-        if token and urllib.parse.urlsplit(url).hostname == API_HOST:
-            # Unredirected: a redirect to another host never carries it.
-            request.add_unredirected_header("Authorization", f"Bearer {token}")
-        try:
-            return urllib.request.urlopen(request, timeout=self.timeout)
-        except urllib.error.HTTPError as exc:
-            if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0":
-                msg = "GitHub's API limit for this IP is used up; try again in an hour"
-                raise SetupError(msg) from exc
-            raise SetupError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
-        except (urllib.error.URLError, OSError) as exc:
-            reason = getattr(exc, "reason", exc)
-            raise SetupError(f"cannot download {url}: {reason}") from exc
+        api = urllib.parse.urlsplit(url).hostname == API_HOST
+        token = os.environ.get(TOKEN_ENV) if api else None
+        # A stale or narrow token makes GitHub refuse (401) even what it gives anyone, so it
+        # is asked once more without one.
+        for attempt in (token, None) if token else (None,):
+            request = urllib.request.Request(url, headers=headers)
+            if attempt:
+                # Unredirected: a redirect to another host never carries it.
+                request.add_unredirected_header("Authorization", f"Bearer {attempt}")
+            try:
+                return urllib.request.urlopen(request, timeout=self.timeout)
+            except urllib.error.HTTPError as exc:
+                if attempt and exc.code == 401:
+                    continue
+                if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0":
+                    msg = "GitHub's API limit for this IP is used up; try again in an hour"
+                    raise SetupError(msg) from exc
+                raise SetupError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
+            except (urllib.error.URLError, OSError) as exc:
+                reason = getattr(exc, "reason", exc)
+                raise SetupError(f"cannot download {url}: {reason}") from exc
+        raise AssertionError("unreachable: the last attempt has no token")
 
     def get_json(self, url: str) -> Any:
         with self._open(url, "application/vnd.github+json") as resp:

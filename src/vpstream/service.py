@@ -724,10 +724,14 @@ class Service:
         for link in ff.links():
             link.unlink()
             self.say(f"{link}: removed")
+        removed = False
         for folder in (ff.install_dir, ff.staging_dir):
             if folder.exists() or folder.is_symlink():
                 _remove_tree(folder)
+                removed = True
                 self.say(f"{folder}: removed (the ffmpeg vpstream installed)")
+        if removed:
+            self.say("An ffmpeg it replaced is not put back; for apt's: sudo apt install ffmpeg")
 
 
 def _remove_tree(path: Path) -> None:

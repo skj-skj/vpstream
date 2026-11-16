@@ -571,3 +571,59 @@ def test_a_github_token_goes_to_the_api_only(
     monkeypatch.delenv(si.TOKEN_ENV)
     si.UrlHttp()._open(url)
     assert "Authorization" not in seen[1].unredirected_hdrs
+
+
+def test_owns_resolves_a_linked_opt_but_never_a_linked_install_dir(tmp_path: Path) -> None:
+    disk = tmp_path / "disk" / "opt" / "vpstream-ffmpeg" / "bin"
+    disk.mkdir(parents=True)
+    (disk / "ffmpeg").write_text("elf")
+    (tmp_path / "opt").symlink_to(tmp_path / "disk" / "opt")  # /opt on another disk
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "ffmpeg").symlink_to(tmp_path / "opt" / "vpstream-ffmpeg" / "bin" / "ffmpeg")
+    layout = fi.Layout(install_dir=tmp_path / "opt" / "vpstream-ffmpeg", bin_dir=bin_dir)
+    assert layout.links() == [bin_dir / "ffmpeg"]
+    assert layout.owns(bin_dir / "ffmpeg")
+    # An install_dir that is a link to a broad folder makes nothing in it vpstream's.
+    usr = tmp_path / "usr"
+    (usr / "bin").mkdir(parents=True)
+    (usr / "bin" / "ffprobe").write_text("apt's")
+    (bin_dir / "ffprobe").symlink_to(usr / "bin" / "ffprobe")
+    linked = fi.Layout(install_dir=tmp_path / "linked", bin_dir=bin_dir)
+    linked.install_dir.symlink_to(usr)
+    assert not linked.owns(bin_dir / "ffprobe") and linked.links() == []
+
+
+def test_a_refused_token_is_dropped_and_the_api_asked_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import email.message
+    import urllib.error
+
+    sent: list[str | None] = []
+
+    def urlopen(req: urllib.request.Request, timeout: float) -> str:
+        sent.append(req.unredirected_hdrs.get("Authorization"))
+        if len(sent) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Bad credentials", email.message.Message(), None
+            )
+        return "answer"
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv(si.TOKEN_ENV, "stale")
+    assert si.UrlHttp()._open("https://api.github.com/repos/x/y/releases") == "answer"
+    assert sent == ["Bearer stale", None]
+    # Without a token, a 401 is an error at once, never asked again.
+    sent.clear()
+    monkeypatch.delenv(si.TOKEN_ENV)
+    sent.append("first call already made")
+    with pytest.raises(si.SetupError, match="HTTP 401"):
+        monkeypatch.setattr(
+            urllib.request,
+            "urlopen",
+            lambda req, timeout: (_ for _ in ()).throw(
+                urllib.error.HTTPError(req.full_url, 401, "no", email.message.Message(), None)
+            ),
+        )
+        si.UrlHttp()._open("https://api.github.com/x")

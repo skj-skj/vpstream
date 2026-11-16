@@ -72,14 +72,19 @@ class Layout:
         """Where a new build is copied before it takes the place of the old one."""
         return self.install_dir.with_name(self.install_dir.name + ".new")
 
+    def owns(self, path: Path | str) -> bool:
+        """Whether `path` leads into install_dir, so it is a program vpstream installed. Both
+        sides are resolved (/opt may be a link to another disk), but an install_dir that is
+        itself a link owns nothing: it could make any folder look like vpstream's."""
+        if self.install_dir.is_symlink():
+            return False
+        home = Path(os.path.realpath(self.install_dir))
+        return Path(os.path.realpath(path)).is_relative_to(home)
+
     def links(self) -> list[Path]:
         """The programs in bin_dir that are links into install_dir: what vpstream put there."""
-        home = Path(os.path.realpath(self.install_dir))
-        return [
-            link
-            for link in (self.bin_dir / prog for prog in PROGRAMS)
-            if link.is_symlink() and Path(os.path.realpath(link)).is_relative_to(home)
-        ]
+        found = (self.bin_dir / prog for prog in PROGRAMS)
+        return [link for link in found if link.is_symlink() and self.owns(link)]
 
     @classmethod
     def under(cls, root: Path) -> Layout:
@@ -213,7 +218,7 @@ def find_existing(runner: Runner, layout: Layout) -> list[Existing]:
         if not path:
             continue
         real = os.path.realpath(path)
-        if Path(real).is_relative_to(layout.install_dir):
+        if layout.owns(path):
             version = str(read_marker(layout).get("version") or "")
             found.append(Existing(prog, path, "vpstream", version=version))
             continue
@@ -331,13 +336,11 @@ class Setup:
         """Refuse to overwrite a program in bin_dir that is not our link."""
         for prog in PROGRAMS:
             link = self.layout.bin_dir / prog
-            if link.exists() or link.is_symlink():
-                target = Path(os.path.realpath(link))
-                if not target.is_relative_to(self.layout.install_dir):
-                    raise SetupError(
-                        f"{link} exists and was not installed by vpstream: remove it yourself, "
-                        "then run this again"
-                    )
+            if (link.exists() or link.is_symlink()) and not self.layout.owns(link):
+                raise SetupError(
+                    f"{link} exists and was not installed by vpstream: remove it yourself, "
+                    "then run this again"
+                )
 
     def _removals(self, existing: Sequence[Existing]) -> list[str]:
         packages = list(dict.fromkeys(e.package for e in existing if e.owner == "apt"))

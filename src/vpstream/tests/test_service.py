@@ -393,6 +393,7 @@ def test_uninstall_purge_removes_the_ffmpeg_vpstream_installed(setup: Setup) -> 
     assert not folder.exists() and not setup.layout.ffmpeg.staging_dir.exists()
     assert sorted(p.name for p in bin_dir.iterdir()) == ["caddy"]
     assert f"{bin_dir / 'ffprobe'}: removed" in setup.said
+    assert any("is not put back" in line for line in setup.said)
 
 
 def test_uninstall_purge_leaves_an_ffmpeg_that_is_not_vpstreams(setup: Setup) -> None:
@@ -406,6 +407,21 @@ def test_uninstall_purge_leaves_an_ffmpeg_that_is_not_vpstreams(setup: Setup) ->
     setup.service().uninstall(purge=True)
     assert (bin_dir / "ffmpeg").is_symlink() and (other / "ffmpeg").read_text() == "apt's"
     assert (bin_dir / "ffprobe").read_text() == "built by hand"
+    assert not any("is not put back" in line for line in setup.said)  # nothing was removed
+
+
+def test_uninstall_purge_never_follows_an_install_folder_that_is_a_link(setup: Setup) -> None:
+    usr = setup.root / "usr"
+    (usr / "bin").mkdir(parents=True)
+    (usr / "bin" / "ffmpeg").write_text("apt's")
+    ff = setup.layout.ffmpeg
+    ff.install_dir.parent.mkdir(parents=True)
+    ff.install_dir.symlink_to(usr)
+    ff.bin_dir.mkdir(parents=True)
+    (ff.bin_dir / "ffmpeg").symlink_to(usr / "bin" / "ffmpeg")
+    setup.service().uninstall(purge=True)
+    assert (ff.bin_dir / "ffmpeg").is_symlink() and (usr / "bin" / "ffmpeg").read_text() == "apt's"
+    assert not ff.install_dir.is_symlink()  # the link itself goes, never what it points at
 
 
 def test_a_changed_dashboard_port_moves_the_published_port(setup: Setup) -> None:
