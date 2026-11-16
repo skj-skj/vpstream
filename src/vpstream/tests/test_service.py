@@ -680,7 +680,7 @@ def test_init_no_tailscale_makes_the_dashboard_public_with_only_a_verifier(
 def test_init_prints_the_authority_the_browser_must_trust(setup: Setup) -> None:
     from vpstream import caddy
 
-    cert = caddy.dashboard_root_cert(setup.layout.paths)
+    cert = setup.layout.paths.dashboard_ca_cert
     cert.parent.mkdir(parents=True)
     pem = (Path(__file__).parent / "data" / "caddy-root.crt").read_text()
     cert.write_text(pem)

@@ -488,7 +488,7 @@ class Service:
         host = net.public_host(cfg.stream_host, self.outgoing_address)
         port = cfg.dashboard_port
         self.say(f"dashboard: public at {net.url('https', host, port)}/ (password)")
-        cert = caddy.read_certificate(caddy.dashboard_root_cert(self.layout.paths))
+        cert = caddy.read_certificate(self.layout.paths.dashboard_ca_cert)
         if cert is not None:
             what = "A new authority was made: install it" if made else "Install it"
             self.say(

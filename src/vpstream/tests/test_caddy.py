@@ -381,7 +381,7 @@ def test_the_dashboard_caddy_keeps_its_files_apart_from_the_streams(tmp_path: Pa
     dash = caddy.DashboardCaddy(FakeRunner(), 1338, ["203.0.113.5"], paths)
     stream = caddy.CaddyServer(FakeRunner(), 1337, paths)
     assert dash.work_dir != stream.work_dir
-    assert dash.root_cert == caddy.dashboard_root_cert(paths) == paths.dashboard_ca_cert
+    assert dash.root_cert == paths.dashboard_ca_cert
     assert dash.config() == caddy.dashboard_config(
         1338,
         ["203.0.113.5"],
