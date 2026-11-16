@@ -324,12 +324,13 @@ def test_what_is_served_survives_a_round_trip(show: Path) -> None:
     assert (visit(again, "aaa/3").status, visit(again, "aaa/3").kind) == (503, "preparing")
 
 
-def test_a_stream_recorded_by_an_older_version_serves_its_videos(show: Path) -> None:
+@pytest.mark.parametrize("key", ["served", "indexing", "notes", "entries", "https"])
+def test_a_stream_recorded_by_a_version_before_0_14_is_not_taken_up(show: Path, key: str) -> None:
     data = make(dir=str(show)).to_dict()
-    for key in ("served", "indexing", "notes"):
-        del data[key]
-    again = Stream.from_dict(data)
-    assert again.served == again.videos and again.indexing == set() and again.notes == {}
+    Stream.from_dict(data)
+    del data[key]
+    with pytest.raises(StreamError, match="not usable"):
+        Stream.from_dict(data)
 
 
 @pytest.mark.parametrize(

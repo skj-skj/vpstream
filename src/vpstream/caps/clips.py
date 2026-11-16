@@ -213,11 +213,8 @@ def _read_manifest(path: Path) -> dict[str, object] | None:
 
 
 def made_by_vpstream(out: Path) -> bool:
-    """The marker file, or a clip manifest from a build that predates the marker."""
-    if (out / MARKER).is_file():
-        return True
-    manifest = _read_manifest(out / "clips.json")
-    return manifest is not None and {"version", "clips", "extras"} <= manifest.keys()
+    """Whether vpstream made the folder: it holds the marker file."""
+    return (out / MARKER).is_file()
 
 
 def _has_clips(manifest: dict[str, object]) -> bool:

@@ -169,8 +169,9 @@ def test_the_record_keeps_https(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("vpstream.stream.videos_of", lambda *a: ["/m/f.mkv"])
     assert Stream.from_dict(_record()).https is True
     old = _record()
-    del old["https"]  # recorded before HTTPS existed
-    assert Stream.from_dict(old).https is False
+    del old["https"]  # recorded before HTTPS existed: not taken up again
+    with pytest.raises(StreamError, match="not usable"):
+        Stream.from_dict(old)
 
 
 @pytest.mark.parametrize(

@@ -380,7 +380,7 @@ def _row(data: dict[str, Any], videos: int) -> Device | None:
             return None
         row = Device(ip, id=key, kind=BROWSER, token=token, confirmed=data.get("confirmed") is True)
         row.client = Client.from_dict(data.get("client"), videos)
-    elif data.get("id", ip) == ip:  # a row recorded before 0.11 has no id
+    elif data.get("id", ip) == ip:  # a player's id is its address, and may be left out
         row = Device(ip)
     else:
         return None

@@ -548,11 +548,9 @@ class Stream:
             ):
                 raise StreamError("the recorded stream is not usable")
             count = len(videos)
-            served = data.get("served", videos)  # a stream recorded before 0.9 has none
-            indexing = data.get("indexing", [])
-            notes = data.get("notes", {})
-            entries = data.get("entries", [])
-            https = data.get("https", False)  # a stream recorded before 0.14 is plain HTTP
+            # Every key is required: a record from before 0.14 is not taken up again.
+            served, indexing, notes = data["served"], data["indexing"], data["notes"]
+            entries, https = data["entries"], data["https"]
             if not isinstance(https, bool) or (
                 https
                 and (expires is None or expires - float(data["started"]) > LONGEST_STREAM_SECONDS)
