@@ -30,7 +30,6 @@ from vpstream.system_install import (
     Http,
     SetupError,
     as_root,
-    sudo_prefix,
 )
 from vpstream.tools import Runner, tail
 
@@ -259,9 +258,6 @@ class Setup:
     system: str | None = None  # sys.platform, platform.machine() and the C library,
     machine: str | None = None  # given by tests
     libc: str | None = None
-
-    def _sudo(self) -> list[str]:
-        return sudo_prefix(self.runner, self.is_root)
 
     def _system(self, *args: str | Path, what: str) -> None:
         as_root(self.runner, self.is_root, *args, what=what)
