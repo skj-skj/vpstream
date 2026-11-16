@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from vpstream import gate, media, net
@@ -208,6 +210,54 @@ def test_the_guesser_count_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
         for _ in range(gate.MAX_MISSES):
             table.miss(f"192.0.2.{n}")
     assert table.guessers() == ["192.0.2.1", "192.0.2.2"]
+
+
+def test_misses_from_one_ipv6_64_count_together() -> None:
+    table = Devices()
+    for n in range(gate.MAX_MISSES):  # a new address of the same /64 for every try
+        table.miss(f"2001:db8:0:1::{n + 1:x}")
+    assert table.guesser("2001:db8:0:1::ffff")
+    assert not table.guesser("2001:db8:0:2::1")  # the next /64 is someone else
+    assert table.guessers() == ["2001:db8:0:1::/64"]
+    table.decide("2001:db8:0:1::5", True, 1.0)  # enabling a device there forgives it
+    assert not table.guesser("2001:db8:0:1::ffff")
+
+
+def test_misses_from_many_64s_of_one_48_count_together() -> None:
+    table = Devices()
+    for n in range(gate.MAX_NETWORK_MISSES):  # under the limit of each /64
+        table.miss(f"2001:db8:0:{n:x}::1")
+    assert table.guesser("2001:db8:0:ffff::1")  # the whole /48 is shut out
+    assert not table.guesser("2001:db8:1::1")
+    assert "2001:db8::/48" in table.guessers()
+
+
+def test_ipv4_addresses_are_counted_one_by_one() -> None:
+    table = Devices()
+    for _ in range(gate.MAX_MISSES):
+        table.miss("192.0.2.1")
+    assert table.guesser("192.0.2.1") and not table.guesser("192.0.2.2")
+
+
+def test_a_full_table_still_counts_new_viewers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate, "MAX_GUESSERS", 10)
+    table = Devices()
+    for n in range(10):  # one miss each fills the table
+        table.miss(f"192.0.2.{n}")
+    for _ in range(gate.MAX_MISSES):
+        table.miss("198.51.100.1")
+    assert table.guesser("198.51.100.1")
+
+
+def test_one_64_cannot_try_every_short_alias(tmp_path: Path) -> None:
+    from vpstream.stream import Stream
+
+    film = tmp_path / "film.mkv"
+    film.write_bytes(b"video")
+    s = Stream.create({"file": str(film), "alias": "zzz"}, 1000.0)
+    for n in range(1000):  # the first 1000 three-letter names, each from a new address
+        s.visit(f"/a{n:03d}", f"2001:db8:0:1::{n + 1:x}", "scanner", False, 1001.0)
+    assert s.visit("/zzz", "2001:db8:0:1::ffff", "x", False, 1001.0).kind == "missing"
 
 
 def test_passes_counts_nothing() -> None:

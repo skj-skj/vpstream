@@ -31,6 +31,19 @@ def normal_ip(text: str | None) -> str | None:
     return str(ip)
 
 
+def address_key(ip: str | None, prefix: int = 64) -> str:
+    """What one viewer is counted under when it fails: its address, or for IPv6 the network
+    of `prefix` bits around it (a /64 by default), which one viewer gets by the million.
+    "unknown" for anything that is not an address."""
+    normal = normal_ip(ip)
+    if normal is None:
+        return "unknown"
+    address = ipaddress.ip_address(normal)
+    if isinstance(address, ipaddress.IPv6Address):
+        return str(ipaddress.IPv6Network(f"{address}/{prefix}", strict=False))
+    return normal
+
+
 def is_ipv4(text: str) -> bool:
     try:
         return isinstance(ipaddress.ip_address(text), ipaddress.IPv4Address)

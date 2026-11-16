@@ -19,7 +19,7 @@ from typing import Any
 
 from vpstream.checks import is_finite, is_token
 from vpstream.clients import Client, name_value
-from vpstream.net import normal_ip
+from vpstream.net import address_key, normal_ip
 
 APPROVAL = "approval"  # only approved devices; the others wait on the list, marked WL
 OPEN = "open"  # everyone, except the devices that were disabled
@@ -32,6 +32,10 @@ MAX_UNCONFIRMED = 3  # browsers per address whose cookie has not come back yet
 MAX_UNDECIDED = 8  # browsers per address nobody decided about: one address cannot fill the table
 MAX_USER_AGENT = 200
 MAX_MISSES = 20  # wrong addresses one viewer may try before it is shut out as a guesser
+# One IPv6 viewer has a /64, often a whole /48: 65536 of them. Misses are counted per /64,
+# and per /48 too, so trying every short alias takes that many networks, not one.
+NETWORK_PREFIX = 48
+MAX_NETWORK_MISSES = 100
 MAX_GUESSERS = 5000
 COOKIE = "vpstream"
 # Over HTTPS a name of its own: browsers keep a plain HTTP page from setting a cookie with
@@ -276,7 +280,8 @@ class Devices:
                 if not allowed or browser.allowed is None:
                     browser.allowed = allowed
         if allowed:
-            self._misses.pop(row.ip, None)
+            for key, _ in _miss_keys(row.ip):
+                self._misses.pop(key, None)
         return row
 
     # --- viewers that try addresses until one works
@@ -287,15 +292,30 @@ class Devices:
         return row is not None and allows(policy, row.allowed)
 
     def miss(self, ip: str) -> None:
-        """Count a request for an address that does not exist."""
-        if ip in self._misses or len(self._misses) < MAX_GUESSERS:
-            self._misses[ip] = self._misses.get(ip, 0) + 1
+        """Count a request for an address that does not exist, against the viewer's address
+        (its /64 for IPv6) and, for IPv6, its /48."""
+        for key, _ in _miss_keys(ip):
+            if key in self._misses or self._room_for_misses():
+                self._misses[key] = self._misses.get(key, 0) + 1
+
+    def _room_for_misses(self) -> bool:
+        """Room for one more viewer's count. A full table drops the count furthest from its
+        limit, never a guesser: a viewer that fills it with one miss from each of many
+        addresses must not make the next ones go uncounted."""
+        if len(self._misses) < MAX_GUESSERS:
+            return True
+        counting = [k for k, n in self._misses.items() if n < _miss_limit(k)]
+        if not counting:
+            return False  # every one is a guesser; they are kept
+        del self._misses[min(counting, key=lambda k: self._misses[k] / _miss_limit(k))]
+        return True
 
     def guesser(self, ip: str) -> bool:
-        return self._misses.get(ip, 0) >= MAX_MISSES
+        return any(self._misses.get(key, 0) >= limit for key, limit in _miss_keys(ip))
 
     def guessers(self) -> list[str]:
-        return sorted(ip for ip in self._misses if self.guesser(ip))
+        """The addresses and networks shut out for guessing."""
+        return sorted(k for k, n in self._misses.items() if n >= _miss_limit(k))
 
     def keep_current(self, policy: str) -> None:
         """Before a lock: every device that gets in now is enabled, so the lock keeps the
@@ -335,6 +355,18 @@ class Devices:
             if row is not None and row.id not in table._rows:
                 table._add(row)
         return table
+
+
+def _miss_keys(ip: str) -> list[tuple[str, int]]:
+    """What a viewer's misses are counted under, each with its limit."""
+    keys = [(address_key(ip), MAX_MISSES)]
+    if ":" in keys[0][0]:  # IPv6: its /64, and its /48 as well
+        keys.append((address_key(ip, NETWORK_PREFIX), MAX_NETWORK_MISSES))
+    return keys
+
+
+def _miss_limit(key: str) -> int:
+    return MAX_NETWORK_MISSES if key.endswith(f"/{NETWORK_PREFIX}") else MAX_MISSES
 
 
 def _row(data: dict[str, Any], videos: int) -> Device | None:

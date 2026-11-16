@@ -119,7 +119,8 @@ vpstream stop
   browser and an M3U playlist in a player; videos are numbered in natural order of their names.
 - **Who gets in:** `--policy open` (default; disable single addresses), `approval` (only those
   you approve; others wait, marked WL) or `locked` (only enabled ones). Change it live with
-  `vpstream devices` or the dashboard. An address that tries 20 wrong paths is shut out.
+  `vpstream devices` or the dashboard. An address that tries 20 wrong paths is shut out; for
+  IPv6 that is its whole /64, and a /48 after 100.
 - **Time limit:** `--ttl MINUTES`, default 180, 0 for none.
 - **Your files:** the service reads videos as its own user. If it cannot, `start` gives it
   read access with an ACL entry for that user alone (needs the `acl` package and you owning
@@ -195,8 +196,8 @@ The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale ser
 
 `sudo vpstream init --no-tailscale` asks for a password (or takes `--dash-pass-file FILE`, or
 `--dash-pass`, which stays in shell history) and puts the dashboard on the internet at
-`https://<ip>:1338/`, through a Caddy of its own with a certificate from a local authority
-(`tls internal`). Only a salted PBKDF2 verifier of the password is kept, in
+`https://<ip>:1338/`, through a Caddy of its own with a certificate from an authority `init`
+makes for this host (with `openssl`). Only a salted PBKDF2 verifier of the password is kept, in
 `/etc/vpstream/dashboard.key` (readable by root and the service's group only).
 
 - **Certificate:** what Caddy serves lasts 12 hours and renews itself, so `init` prints the
@@ -204,6 +205,13 @@ The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale ser
   login (`vpstream dashboard-cert > vpstream-ca.crt`; Android: Settings, Security, Install a
   certificate, CA certificate) and the browser trusts the dashboard with no warning. Each
   public address, IPv4 and IPv6, gets a certificate of its own.
+- **The authority** is valid for this host's addresses only (X.509 name constraints): even with
+  its key, nobody can make your phone trust it for another site. It is kept in
+  `/etc/vpstream/dashboard-ca.{crt,key}` (the key for root and the service's group). When the
+  host gets a new address, the dashboard stops serving it until `sudo vpstream init` makes a new
+  authority; install that one and remove the old. Upgrading from 0.15.0 or earlier: run
+  `sudo vpstream init`, install the new authority and remove "Caddy Local Authority" from the
+  phone.
 - **Login:** challenge-response. The page derives a key from the password (WebCrypto, or plain
   JavaScript where the page has none) and answers a one-time nonce with an HMAC of it; the
   password never crosses the wire and a captured answer cannot be used again. That protects
@@ -218,7 +226,8 @@ The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale ser
 - **Firewall:** the service opens the dashboard port in ufw while it serves it, and closes it
   on stop, crash or reboot. Open it in your provider's firewall too, if it has one.
 - The command line keeps talking to the daemon over its socket, with no password.
-  `sudo vpstream init --tailscale` goes back: the password is removed and the port closed.
+  `sudo vpstream init --tailscale` goes back: the password and the authority are removed and
+  the port closed.
 
 ## HTTPS for streams
 

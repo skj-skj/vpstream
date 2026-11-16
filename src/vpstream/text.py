@@ -18,6 +18,13 @@ def duration(seconds: float) -> str:
     return f"{secs}s"
 
 
+def printable(value: str) -> str:
+    """Text from elsewhere (a viewer, a TV's report) as it may go to a terminal: a control
+    character, C0 or C1, would move the cursor, clear the screen or set the title, so each
+    becomes "?"."""
+    return "".join(c if c.isprintable() or c == " " else "?" for c in value)
+
+
 def size(count: float) -> str:
     """0 B, 999 B, 1.0 kB ... in GB at most."""
     for unit in ("B", "kB", "MB", "GB"):

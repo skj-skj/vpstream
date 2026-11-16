@@ -15,6 +15,9 @@ OTHERS = {443: "http://127.0.0.1:2283", 8443: "http://127.0.0.1:3000"}  # not vp
 MINE = "http://127.0.0.1:1338"
 
 
+CA_PEM = (Path(__file__).parent / "data" / "caddy-root.crt").read_text()
+
+
 class FakeHost:
     """A host that remembers its users, groups and ufw rules, like the real commands do."""
 
@@ -108,6 +111,15 @@ class FakeHost:
             return Result(0, "", "")
         raise AssertionError(f"vpstream must never run: {' '.join(cmd)}")
 
+    def _openssl(self, cmd: list[str]) -> Result:
+        """Writes what `req -x509` would: a key and a certificate (a real one, for its
+        fingerprint)."""
+        if cmd[1:3] != ["req", "-x509"]:
+            raise AssertionError(f"vpstream must never run: {' '.join(cmd)}")
+        Path(cmd[cmd.index("-keyout") + 1]).write_text("KEY\n")
+        Path(cmd[cmd.index("-out") + 1]).write_text(CA_PEM)
+        return Result(0, "", "")
+
     def _systemctl(self, cmd: list[str]) -> Result:
         if cmd[1] == "is-active":
             return Result(0 if self.active else 3, "", "")
@@ -131,6 +143,7 @@ class Setup:
             "program_problem": lambda path: None,
             "port_busy": lambda port: False,
             "outgoing_address": lambda: "203.0.113.5",
+            "outgoing_address6": lambda: "",
             "ask_daemon": lambda socket, route: self.asked.append(route),
             "owner_uid": os.getuid(),
             "say": self.said.append,
@@ -677,11 +690,50 @@ def test_init_prints_the_authority_the_browser_must_trust(setup: Setup) -> None:
     assert "vpstream dashboard-cert" in said
 
 
-def test_init_says_so_when_the_authority_is_not_made_yet(setup: Setup) -> None:
-    waited: list[float] = []
-    setup.service(pause=waited.append).init(public=True, password=GOOD)
-    assert waited.count(1.0) == service.CERT_SECONDS, "a second at a time, then it gives up"
-    assert any("not made yet" in line for line in setup.said)
+def test_init_makes_an_authority_for_this_host_only(setup: Setup) -> None:
+    from vpstream import dashboard_ca
+
+    setup.service(outgoing_address6=lambda: "2001:db8::5").init(public=True, password=GOOD)
+    paths = setup.layout.paths
+    [make] = setup.host.ran("openssl")
+    assert make[1:4] == ["req", "-x509", "-new"]
+    assert dashboard_ca.covered(paths) == ["203.0.113.5", "2001:db8::5"]
+    key = paths.dashboard_ca_key
+    assert key.stat().st_mode & 0o777 == 0o640 and paths.dashboard_ca_cert.read_text() == CA_PEM
+    assert paths.dashboard_ca_cert.stat().st_mode & 0o777 == 0o644
+    # Given to the group before it took its place.
+    chown = [c for c in setup.host.ran("chown") if c[1] == "root:vpstream" and "ca.key" in c[2]]
+    assert chown and not chown[0][2].startswith(str(key))
+    assert not paths.dashboard_ca_cert.with_name("dashboard-ca.new").exists()
+    said = "\n".join(setup.said)
+    assert "A new authority was made" in said and "Caddy Local Authority" in said
+
+
+def test_init_keeps_the_authority_while_it_covers_the_host(setup: Setup) -> None:
+    setup.service().init(public=True, password=GOOD)
+    setup.service().init()
+    assert len(setup.host.ran("openssl")) == 1
+    assert "A new authority was made" not in setup.said[-8:]
+    # A new address of this host needs a new authority: a phone would refuse the old one.
+    setup.service(outgoing_address=lambda: "198.51.100.7").init()
+    assert len(setup.host.ran("openssl")) == 2
+
+
+def test_init_refuses_when_the_authority_cannot_be_made(setup: Setup) -> None:
+    setup.host.fail[("openssl",)] = "unable to load config"
+    with pytest.raises(service.ServiceError, match="certificate authority"):
+        setup.service().init(public=True, password=GOOD)
+    assert not setup.layout.paths.dashboard_ca_hosts.exists()
+
+
+def test_going_back_to_the_tailnet_removes_the_authority(setup: Setup) -> None:
+    setup.service().init(public=True, password=GOOD)
+    setup.service().init(public=False)
+    paths = setup.layout.paths
+    assert not any(
+        p.exists()
+        for p in (paths.dashboard_ca_cert, paths.dashboard_ca_key, paths.dashboard_ca_hosts)
+    )
 
 
 def test_init_without_a_switch_keeps_the_dashboard_where_it_is(setup: Setup) -> None:

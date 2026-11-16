@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 import re
@@ -44,7 +43,7 @@ from typing import Any
 
 from vpstream.checks import is_finite, is_token
 from vpstream.files import write_atomic
-from vpstream.net import normal_ip
+from vpstream.net import address_key
 
 SCHEME = "pbkdf2-sha256"
 ITERATIONS = 600_000  # OWASP's figure for PBKDF2-HMAC-SHA256
@@ -177,18 +176,6 @@ def load_verifier(path: Path) -> Verifier | None:
 
 
 # --- who a login is: a browser that logged in before, or an address
-
-
-def address_key(ip: str | None) -> str:
-    """What failures of a browser not known yet are counted under: its address, or the /64
-    of an IPv6 address."""
-    normal = normal_ip(ip)
-    if normal is None:
-        return "unknown"
-    address = ipaddress.ip_address(normal)
-    if isinstance(address, ipaddress.IPv6Address):
-        return str(ipaddress.IPv6Network(f"{address}/64", strict=False))
-    return normal
 
 
 @dataclass(frozen=True)

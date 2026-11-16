@@ -27,3 +27,7 @@ def test_duration(seconds: float, shown: str) -> None:
 )
 def test_size(count: float, shown: str) -> None:
     assert text.size(count) == shown
+
+
+def test_printable_replaces_c0_and_c1_controls_and_keeps_the_rest() -> None:
+    assert text.printable("a\tb\nc\x1b[2J\u009bd é中") == "a?b?c?[2J?d é中"

@@ -85,6 +85,22 @@ class Paths:
         return self.config_file.parent / "dashboard.key"
 
     @property
+    def dashboard_ca_cert(self) -> Path:
+        """The public dashboard's certificate authority, which the owner's phone trusts:
+        made by `init`, valid only for this host (see `dashboard_ca`)."""
+        return self.config_file.parent / "dashboard-ca.crt"
+
+    @property
+    def dashboard_ca_key(self) -> Path:
+        """Its key: root's, readable by the service's group, whose Caddy signs with it."""
+        return self.config_file.parent / "dashboard-ca.key"
+
+    @property
+    def dashboard_ca_hosts(self) -> Path:
+        """The hosts the authority permits."""
+        return self.config_file.parent / "dashboard-ca.json"
+
+    @property
     def dashboard_socket(self) -> Path:
         """Where the public dashboard's Caddy hands on every request."""
         return self.run_dir / "dashboard.sock"
