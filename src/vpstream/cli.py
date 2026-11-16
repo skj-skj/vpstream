@@ -69,12 +69,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
     path = Path(args.file)
     if not path.is_file():
-        print(f"not a file: {path}", file=sys.stderr)
-        return 2
+        return _error(f"not a file: {path}", 2)
     presets = tuple(p.strip() for p in args.presets.split(",") if p.strip())
     if not presets:
-        print("--presets needs at least one x264 preset", file=sys.stderr)
-        return 2
+        return _error("--presets needs at least one x264 preset", 2)
     if args.tmp and not Path(args.tmp).is_dir():
         return _error(f"--tmp folder does not exist: {args.tmp}", 2)
     # Checked first, so a long benchmark is not lost to a bad path at the end.

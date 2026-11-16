@@ -14,7 +14,7 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_bench_missing_file(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["bench", "/no/such/file.mkv"]) == 2
-    assert "not a file" in capsys.readouterr().err
+    assert capsys.readouterr().err == "error: not a file: /no/such/file.mkv\n"
 
 
 def test_selftest_args() -> None:
