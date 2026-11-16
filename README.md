@@ -59,6 +59,7 @@ one may write settings an older one rejects.
 
 ```text
 vpstream stop
+vpstream revoke                 # file access a stream that ended by itself left behind
 sudo vpstream uninstall --purge
 sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx uninstall vpstream
 ```

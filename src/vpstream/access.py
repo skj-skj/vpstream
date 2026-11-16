@@ -13,6 +13,7 @@ is never written down, so it is never removed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pwd
@@ -98,6 +99,10 @@ def _record(path: Path, grants: dict[str, list[str]]) -> None:
     grants = {user: paths for user, paths in grants.items() if paths}
     if not grants:
         path.unlink(missing_ok=True)
+        # Its folder too, which only this file lives in: nothing is left behind once
+        # everything is taken back. One that holds anything else stays.
+        with contextlib.suppress(OSError):
+            path.parent.rmdir()
         return
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     write_atomic(path, json.dumps(grants, indent=1) + "\n")

@@ -17,9 +17,16 @@ PIPX=(sudo env "PIPX_HOME=$PIPX_HOME" PIPX_BIN_DIR=/usr/local/bin /usr/bin/pipx)
 ROOTS=(/etc /var/lib /var/cache /var/log /var/tmp /opt /srv /usr/local /usr/share/keyrings
   /run /home /root)
 # Left by others, never vpstream: pipx's own home (its shared pip, logs and lock; the venv
-# itself must go), root's pip cache, and the system's ufw lock, man cache and logrotate state.
-ALLOWED="^[<>] ($PIPX_HOME[/ ]|/root/\.cache[/ ]|/run/ufw\.lock |/var/cache/man[/ ]|/var/lib/logrotate/status )"
-OURS="^[<>] ($PIPX_HOME/venvs/vpstream[/ ]|/usr/local/bin/vpstream|/opt/vpstream-ffmpeg)"
+# itself must go), root's pip cache, a user's standard ~/.local/state folders (the folders
+# only), the system's ufw lock, man cache, logrotate state, sudo's timestamps and systemd's
+# transient units and private temporary folders, the runner's Azure agent, and the fake
+# tailscale's own state.
+ALLOWED="^[<>] ($PIPX_HOME[/ ]|/root/\.cache[/ ]|/home/[^/ ]+/\.local(/state)? d |\
+/run/ufw\.lock |/var/cache/man[/ ]|/var/lib/logrotate/status |/run/sudo[/ ]|\
+/run/systemd/transient[/ ]|/var/tmp/systemd-private-|/var/lib/waagent[/ ]|\
+/var/tmp/ci-fake-tailscale\.json )"
+OURS="^[<>] ($PIPX_HOME/venvs/vpstream[/ ]|/usr/local/bin/vpstream|/opt/vpstream-ffmpeg|\
+/home/[^/ ]+/\.local/state/vpstream[/ ])"
 
 snapshot() {  # every entry's path, type, mode and owner
   # An entry that goes away during the walk (under /run, say) makes find exit 1: that is

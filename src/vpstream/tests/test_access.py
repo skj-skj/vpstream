@@ -523,3 +523,15 @@ def test_a_mask_is_dropped_only_when_nothing_else_is_left() -> None:
     runner = Acls(("setfacl", "getfacl"))
     access._drop_bare_masks(runner, list(acls))
     assert [c for c in runner.calls if c[0] == "setfacl"] == [["setfacl", "-b", "--", "/bare"]]
+
+
+def test_the_record_and_its_folder_go_once_everything_is_taken_back(own_record: Path) -> None:
+    access._record(own_record, {"vpstream": ["/srv/media/film.mkv"]})
+    assert access.recorded(own_record) == {"vpstream": ["/srv/media/film.mkv"]}
+    access._record(own_record, {"vpstream": []})
+    assert not own_record.parent.exists()  # no empty ~/.local/state/vpstream is left
+    access._record(own_record, {})  # and again, with nothing there
+    access._record(own_record, {"vpstream": ["/srv/media/film.mkv"]})
+    (own_record.parent / "notes.txt").write_text("not ours")
+    access._record(own_record, {})
+    assert not own_record.exists() and (own_record.parent / "notes.txt").exists()
