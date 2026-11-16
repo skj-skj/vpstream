@@ -160,7 +160,7 @@ def test_init_takes_the_mode_and_the_password(
             calls.append((public, password))
             schemes.append(https)
 
-    monkeypatch.setattr(cli, "_service", lambda args: Svc())
+    monkeypatch.setattr(cli, "_service", lambda: Svc())
     path = tmp_path / "pw"
     path.write_text("from the file\n")
     assert cli.main(["init", "--no-tailscale", "--dash-pass-file", str(path)]) == 0

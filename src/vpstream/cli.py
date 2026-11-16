@@ -133,7 +133,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from vpstream import doctor
     from vpstream.tools import SystemRunner
 
-    checks = doctor.run_checks(SystemRunner(), status=_status_quietly())
+    checks = doctor.run_checks(SystemRunner(), status=_daemon("status", quiet=True))
     print(doctor.format_report(checks))
     return doctor.exit_code(checks)
 
@@ -405,9 +405,11 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     return "\n".join(lines)
 
 
-def _daemon(route: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Ask the daemon (a change when there is a payload). On failure the reason is printed
-    and None is returned."""
+def _daemon(
+    route: str, payload: dict[str, Any] | None = None, quiet: bool = False
+) -> dict[str, Any] | None:
+    """Ask the daemon (a change when there is a payload). On failure None is returned, and
+    the reason printed unless `quiet`."""
     from vpstream import client, config
 
     try:
@@ -415,7 +417,8 @@ def _daemon(route: str, payload: dict[str, Any] | None = None) -> dict[str, Any]
             config.default_paths().socket, "GET" if payload is None else "POST", route, payload
         )
     except (client.DaemonUnavailable, client.DaemonRefused) as exc:
-        _error(str(exc))
+        if not quiet:
+            _error(str(exc))
         return None
     return info
 
@@ -461,21 +464,6 @@ def _idle(info: dict[str, Any] | None) -> bool:
     return not info.get("stream") and not any(
         j.get("state") in ACTIVE for j in info.get("prepare") or []
     )
-
-
-def _quietly(route: str) -> dict[str, Any] | None:
-    """Ask the daemon; None when it does not answer, with nothing printed."""
-    from vpstream import client, config
-
-    try:
-        info: dict[str, Any] = client.call(config.default_paths().socket, "GET", route)
-    except (client.DaemonUnavailable, client.DaemonRefused):
-        return None
-    return info
-
-
-def _status_quietly() -> dict[str, Any] | None:
-    return _quietly("status")
 
 
 def _confirm(question: str, yes: bool) -> bool:
@@ -587,7 +575,7 @@ def _follow(ids: set[int], run: Any) -> int:
         return 0
     if lost:
         _error(lost)
-    if _idle(_status_quietly()):
+    if _idle(_daemon("status", quiet=True)):
         _revoke()
     return 1 if lost or any(state != "done" for state in ended.values()) else 0
 
@@ -688,7 +676,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
             return _error(str(exc))
     if not folder.is_dir():
         return _error(f"not a folder: {folder}", 2)
-    answer = _quietly("prepared")
+    answer = _daemon("prepared", quiet=True)
     cache = None
     if answer is not None:
         rows = answer.get("prepared") or []
@@ -742,7 +730,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     info = _daemon("stream/stop", {})
     # Also after "no stream is running": one that ended by itself left its access behind.
     # Not while prepares still read the files: `revoke`, a later stop or start take it back.
-    if _idle(info if info is not None else _status_quietly()):
+    if _idle(info if info is not None else _daemon("status", quiet=True)):
         _revoke()
     else:
         print(KEPT_ACCESS)
@@ -811,7 +799,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         return _error(f"the daemon cannot start: {exc}")
 
 
-def _service(args: argparse.Namespace) -> Any:
+def _service() -> Any:
     from vpstream import service
     from vpstream.tools import SystemRunner
 
@@ -855,7 +843,7 @@ def _password(args: argparse.Namespace, ask: bool) -> str | None:
 def cmd_init(args: argparse.Namespace) -> int:
     from vpstream import service
 
-    svc = _service(args)
+    svc = _service()
     try:
         public = svc.dashboard_public(args.public)
         given = args.dash_pass is not None or args.dash_pass_file is not None
@@ -864,9 +852,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         # Not asked for a password that a refusal for want of root would throw away.
         ask = os.geteuid() == 0 and svc.wants_password(public)
         svc.init(public, _password(args, ask), args.https)
-    except ValueError as exc:
-        return _error(str(exc))
-    except (service.ServiceError, OSError) as exc:
+    except (ValueError, service.ServiceError, OSError) as exc:
         return _error(str(exc))
     return 0
 
@@ -880,10 +866,8 @@ def cmd_dash_pass(args: argparse.Namespace) -> int:
         password = _password(args, ask=True)
         if password is None:
             return _error("no terminal to ask on; give the password with --dash-pass-file FILE", 2)
-        _service(args).set_password(password)
-    except ValueError as exc:
-        return _error(str(exc))
-    except (service.ServiceError, OSError) as exc:
+        _service().set_password(password)
+    except (ValueError, service.ServiceError, OSError) as exc:
         return _error(str(exc))
     return 0
 
@@ -916,7 +900,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             print("Cancelled; nothing was changed.")
             return 1
     try:
-        _service(args).uninstall(purge=args.purge)
+        _service().uninstall(purge=args.purge)
     except (service.ServiceError, OSError) as exc:
         return _error(str(exc))
     return 0
