@@ -315,45 +315,10 @@ def test_format_devices_and_states() -> None:
             },
         ]
     }
-    lines = cli.format_devices(stream, 100.0).splitlines()
-    assert lines[0].split() == [
-        "DEVICE",
-        "ADDRESS",
-        "STATE",
-        "CODE",
-        "REQUESTS",
-        "BLOCKED",
-        "SENT",
-        "LAST",
-        "SEEN",
-        "PLAYER",
-    ]
-    assert lines[1].split() == [
-        "192.0.2.1",
-        "192.0.2.1",
-        "allowed",
-        "-",
-        "3",
-        "0",
-        "1.5",
-        "MB",
-        "10s",
-        "ago",
-        "VLC/3.0.20",
-    ]
-    assert lines[2].split() == [
-        "2001:db8::1",
-        "2001:db8::1",
-        "waiting",
-        "WL",
-        "0420",
-        "2",
-        "2",
-        "0",
-        "B",
-        "never",
-        "-",
-    ]
+    lines = [" ".join(line.split()) for line in cli.format_devices(stream, 100.0).splitlines()]
+    assert lines[0] == "DEVICE ADDRESS STATE CODE REQUESTS BLOCKED SENT LAST SEEN PLAYER"
+    assert lines[1] == "192.0.2.1 192.0.2.1 allowed - 3 0 1.5 MB 10s ago VLC/3.0.20"
+    assert lines[2] == "2001:db8::1 2001:db8::1 waiting WL 0420 2 2 0 B never -"
     assert "enabled WL" in lines[3] and "disabled" in lines[4]
     # A browser is listed by its id, and by the name the owner gave it.
     assert lines[5].split()[:3] == ["b-0a1b2c", "192.0.2.5", "enabled"]

@@ -7,11 +7,6 @@ import pytest
 from vpstream import config
 
 
-def test_defaults_and_default_text_agree() -> None:
-    assert config.parse("") == config.Config()
-    assert config.parse(config.DEFAULT_TEXT) == config.Config(stream_port=1337, dashboard_port=1338)
-
-
 def test_values_are_read() -> None:
     cfg = config.parse("[stream]\nport = 2000\n[dashboard]\nport = 2001\n")
     assert (cfg.stream_port, cfg.dashboard_port) == (2000, 2001)
@@ -28,9 +23,31 @@ def test_values_are_read() -> None:
         ("port = 1337\n", "unknown setting 'port'"),
         ("[stream]\nport = 1338\n", "both 1338"),
         ("[stream\n", "not valid TOML"),
+        ('[stream]\nhost = "a b"\n', r"stream\.host must be"),
+        ('[stream]\nhost = "http://x/"\n', r"stream\.host must be"),
+        ("[stream]\nhost = 5\n", r"stream\.host must be"),
+        ('[stream]\nhost = "x/y"\n', r"stream\.host must be"),
+        ('[dashboard]\npublic = "yes"\n', "true or false"),
+        ("[dashboard]\npublic = 1\n", "true or false"),
+        ("[dashboard]\npublic = 0\n", "true or false"),
+        ('[dashboard]\npublic = "true"\n', "true or false"),
+        ("[prepare]\nencode_speed = 0\n", "times real time"),
+        ("[prepare]\nencode_speed = -1\n", "times real time"),
+        ("[prepare]\nencode_speed = true\n", "times real time"),
+        ('[prepare]\nencode_speed = "fast"\n', "times real time"),
+        ("[prepare]\nencode_speed = 5000\n", "times real time"),
+        ('[media]\nfolder = "films"\n', "full path"),
+        ("[media]\nfolder = 3\n", "full path"),
+        ('[media]\nfolder = ""\n', "full path"),
+        ('[stream]\nhttps = "yes"\n', "stream.https must be true or false"),
+        ('[acme]\nca = "http://ca.example/dir"\n', "acme.ca must be an https://"),
+        ('[acme]\nca_root = "root.pem"\n', "acme.ca_root must be a full path"),
+        ("[acme]\nport = 443\n", "acme.port must be from 1024"),
+        ("[acme]\nport = 1337\n", "stream.port and acme.port are both 1337"),
+        ("[acme]\nport = 1338\n", "dashboard.port and acme.port are both 1338"),
     ],
 )
-def test_bad_values_are_refused(text: str, message: str) -> None:
+def test_bad_settings_are_refused(text: str, message: str) -> None:
     with pytest.raises(config.ConfigError, match=message):
         config.parse(text)
 
@@ -55,6 +72,8 @@ def test_paths_under_a_root(tmp_path: Path) -> None:
     paths = config.Paths.under(tmp_path)
     assert paths.config_file == tmp_path / "etc/vpstream/config.toml"
     assert paths.socket == tmp_path / "run/vpstream/daemon.sock"
+    assert paths.gate_socket == tmp_path / "run/vpstream/gate.sock"
+    assert paths.access_log == tmp_path / "var/lib/vpstream/caddy/access.log"
     assert config.Paths().socket == Path("/run/vpstream/daemon.sock")
 
 
@@ -62,41 +81,24 @@ def test_stream_host() -> None:
     assert config.parse('[stream]\nhost = "203.0.113.5"').stream_host == "203.0.113.5"
     assert config.parse('[stream]\nhost = "tv.example.org"\nport = 2000').stream_port == 2000
     assert config.parse("").stream_host == ""
-    for bad in ('"a b"', '"http://x/"', "5", '"x/y"'):
-        with pytest.raises(config.ConfigError, match=r"stream\.host must be"):
-            config.parse(f"[stream]\nhost = {bad}")
-    with pytest.raises(config.ConfigError, match=r"stream\.port must be a whole number"):
-        config.parse('[stream]\nport = "1337"')
 
 
 def test_the_default_text_still_parses_to_the_defaults() -> None:
+    assert config.parse("") == config.Config()
     assert config.parse(config.DEFAULT_TEXT) == config.Config()
     uncommented = config.DEFAULT_TEXT.replace('# host = "', 'host = "')
     assert config.parse(uncommented).stream_host == "203.0.113.5"
-
-
-def test_paths_for_caddy_live_under_the_root(tmp_path: Path) -> None:
-    paths = config.Paths.under(tmp_path)
-    assert paths.gate_socket == tmp_path / "run/vpstream/gate.sock"
-    assert paths.access_log == tmp_path / "var/lib/vpstream/caddy/access.log"
 
 
 def test_prepare_speeds_from_bench() -> None:
     cfg = config.parse("[prepare]\ncopy_speed = 14.5\nencode_speed = 2\n")
     assert (cfg.copy_speed, cfg.encode_speed) == (14.5, 2)
     assert (config.Config().copy_speed, config.Config().encode_speed) == (11.0, 1.6)
-    for bad in ("0", "-1", "true", '"fast"', "5000"):
-        with pytest.raises(config.ConfigError, match="times real time"):
-            config.parse(f"[prepare]\nencode_speed = {bad}\n")
-    assert config.parse(config.DEFAULT_TEXT) == config.Config()
 
 
 def test_media_folder() -> None:
     assert config.Config().media_folder == "/srv/media"
     assert config.parse('[media]\nfolder = "/data/films"\n').media_folder == "/data/films"
-    for bad in ('"films"', "3", '""'):
-        with pytest.raises(config.ConfigError, match="full path"):
-            config.parse(f"[media]\nfolder = {bad}\n")
 
 
 # --- where the dashboard is
@@ -104,14 +106,7 @@ def test_media_folder() -> None:
 
 def test_the_dashboard_is_on_the_tailnet_unless_the_file_says_public() -> None:
     assert config.parse("").dashboard_public is False
-    assert config.parse(config.DEFAULT_TEXT).dashboard_public is False
     assert config.parse("[dashboard]\npublic = true\n").dashboard_public is True
-
-
-@pytest.mark.parametrize("value", ['"yes"', "1", "0", '"true"'])
-def test_public_must_be_true_or_false(value: str) -> None:
-    with pytest.raises(config.ConfigError, match="true or false"):
-        config.parse(f"[dashboard]\npublic = {value}\n")
 
 
 @pytest.mark.parametrize(
@@ -163,22 +158,6 @@ def test_https_is_off_unless_the_file_says_so() -> None:
     assert config.parse("[stream]\nhttps = true\n").stream_https is True
     cfg = config.parse("")
     assert (cfg.acme_ca, cfg.acme_ca_root, cfg.acme_port) == (config.LETS_ENCRYPT, "", 80)
-
-
-@pytest.mark.parametrize(
-    ("text", "message"),
-    [
-        ('[stream]\nhttps = "yes"\n', "stream.https must be true or false"),
-        ('[acme]\nca = "http://ca.example/dir"\n', "acme.ca must be an https://"),
-        ('[acme]\nca_root = "root.pem"\n', "acme.ca_root must be a full path"),
-        ("[acme]\nport = 443\n", "acme.port must be from 1024"),
-        ("[acme]\nport = 1337\n", "stream.port and acme.port are both 1337"),
-        ("[acme]\nport = 1338\n", "dashboard.port and acme.port are both 1338"),
-    ],
-)
-def test_bad_https_settings_are_refused(text: str, message: str) -> None:
-    with pytest.raises(config.ConfigError, match=message):
-        config.parse(text)
 
 
 def test_a_test_authority_can_be_set() -> None:

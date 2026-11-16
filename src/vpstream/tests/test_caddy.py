@@ -77,7 +77,7 @@ def _server(tmp_path: Path, program: Path | None) -> caddy.CaddyServer:
 # --- the configuration
 
 
-def test_config_is_json_and_never_opens_an_admin_port() -> None:
+def test_config_is_json_plain_http_and_never_opens_an_admin_port() -> None:
     cfg = caddy.config(
         1337, Path("/run/vpstream/gate.sock"), Path("/var/lib/x/access.log"), Path("/v")
     )
@@ -85,7 +85,9 @@ def test_config_is_json_and_never_opens_an_admin_port() -> None:
     assert cfg["admin"] == {"disabled": True, "config": {"persist": False}}
     server = cfg["apps"]["http"]["servers"]["vpstream"]
     assert server["listen"] == [":1337"]
+    # Without a certificate: plain HTTP, and Caddy never asks for one.
     assert server["automatic_https"] == {"disable": True}
+    assert "tls" not in cfg["apps"] and "tls_connection_policies" not in server
 
 
 def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
@@ -407,14 +409,6 @@ def test_each_address_gets_a_listener_whose_certificate_is_its_own(tmp_path: Pat
 
 def _cert(tmp_path: Path) -> Certificate:
     return Certificate("203.0.113.5", tmp_path / "c.crt", tmp_path / "c.key", 0.0, 1.0)
-
-
-def test_the_stream_is_plain_http_without_a_certificate(tmp_path: Path) -> None:
-    cfg = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v")
-    assert "tls" not in cfg["apps"]
-    server = cfg["apps"]["http"]["servers"]["vpstream"]
-    assert "tls_connection_policies" not in server
-    assert server["automatic_https"] == {"disable": True}
 
 
 def test_the_stream_serves_its_certificate_from_files_and_never_asks(tmp_path: Path) -> None:
