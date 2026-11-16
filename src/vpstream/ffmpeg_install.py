@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream.ffargs import parse_ffmpeg_list
+from vpstream.files import read_json_object
 from vpstream.system_install import (
     APT_GET,
     Cancelled,
@@ -194,11 +195,7 @@ class Existing:
 
 
 def read_marker(layout: Layout) -> dict[str, Any]:
-    try:
-        data = json.loads((layout.install_dir / MARKER).read_text())
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_json_object(layout.install_dir / MARKER) or {}
 
 
 def _program_version(runner: Runner, path: str) -> str:

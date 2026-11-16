@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import socket
 import sys
 import time
@@ -41,7 +40,7 @@ from vpstream import (
     net,
     tailscale,
 )
-from vpstream.files import write_atomic
+from vpstream.files import remove_path, write_atomic
 from vpstream.tools import Result, Runner, tail
 
 USER = "vpstream"  # the service user, and its group
@@ -733,10 +732,10 @@ class Service:
                 self._run("groupdel", USER, what=f"removing the group {USER}")
 
         for folder in (lay.paths.state_dir, lay.paths.run_dir, lay.etc_dir):
-            _remove_tree(folder)
+            remove_path(folder)
         cache = lay.paths.cache_dir
         if purge or (cache.is_dir() and not any(cache.iterdir())):
-            _remove_tree(cache)
+            remove_path(cache)
         elif cache.exists():
             self.say(
                 f"{cache}: kept (prepared videos). Remove it with: sudo vpstream uninstall --purge"
@@ -755,16 +754,8 @@ class Service:
         removed = False
         for folder in (ff.install_dir, ff.staging_dir):
             if folder.exists() or folder.is_symlink():
-                _remove_tree(folder)
+                remove_path(folder)
                 removed = True
                 self.say(f"{folder}: removed (the ffmpeg vpstream installed)")
         if removed:
             self.say("An ffmpeg it replaced is not put back; for apt's: sudo apt install ffmpeg")
-
-
-def _remove_tree(path: Path) -> None:
-    """Remove one of vpstream's own folders. A link is removed as a link, never followed."""
-    if path.is_symlink():
-        path.unlink()
-    elif path.exists():
-        shutil.rmtree(path)

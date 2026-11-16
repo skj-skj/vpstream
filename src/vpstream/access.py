@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vpstream import media
-from vpstream.files import write_atomic
+from vpstream.files import read_json_object, write_atomic
 from vpstream.tools import Runner, require, tail
 
 TOOL = "setfacl"
@@ -82,12 +82,7 @@ def record_file() -> Path:
 
 def recorded(path: Path) -> dict[str, list[str]]:
     """Service user -> paths, as written down. An unusable file counts as empty."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    data = read_json_object(path) or {}
     return {
         user: [p for p in paths if isinstance(p, str)]
         for user, paths in data.items()
