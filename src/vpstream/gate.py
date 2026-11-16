@@ -280,8 +280,8 @@ class Devices:
                 if not allowed or browser.allowed is None:
                     browser.allowed = allowed
         if allowed:
-            for key, _ in _miss_keys(row.ip):
-                self._misses.pop(key, None)
+            for miss_key, _ in _miss_keys(row.ip):
+                self._misses.pop(miss_key, None)
         return row
 
     # --- viewers that try addresses until one works
@@ -335,8 +335,7 @@ class Devices:
         normal = normal_ip(ip) or ""
         row = self._rows.get(normal)
         if row is None:
-            from_there = [d for d in self.browsers() if d.ip == normal]
-            row = max(from_there, key=lambda d: d.last_seen, default=None)
+            row = max(self._at(normal), key=lambda d: d.last_seen, default=None)
         if row is not None:
             row.bytes += count
 

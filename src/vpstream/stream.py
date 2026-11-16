@@ -196,6 +196,10 @@ def videos_of(kind: str, path: Path, needs_read: Callable[[str], bool] = _always
     return [str(video) for video in found]
 
 
+def _full_paths(values: list[Any]) -> bool:
+    return all(isinstance(v, str) and v.startswith("/") for v in values)
+
+
 def _ttl_seconds(value: Any, https: bool = False) -> float | None:
     if value is None:
         value = DEFAULT_TTL_MINUTES
@@ -538,7 +542,7 @@ class Stream:
                 or data["mode"] not in MODES
                 or not isinstance(videos, list)
                 or not videos
-                or not all(isinstance(v, str) and v.startswith("/") for v in videos)
+                or not _full_paths(videos)
                 or not (expires is None or isinstance(expires, int | float))
                 or data["unlocked_policy"] == gate.LOCKED
             ):
@@ -557,11 +561,11 @@ class Stream:
             if (
                 not isinstance(served, list)
                 or len(served) != count
-                or not all(isinstance(v, str) and v.startswith("/") for v in served)
+                or not _full_paths(served)
                 or not all(isinstance(n, int) and 0 < n <= count for n in indexing)
                 or not isinstance(notes, dict)
                 or not isinstance(entries, list)
-                or not all(isinstance(e, str) and e.startswith("/") for e in entries)
+                or not _full_paths(entries)
                 or len(entries) != (count if data["mode"] == BROWSER else 0)
             ):
                 raise StreamError("the recorded stream is not usable")

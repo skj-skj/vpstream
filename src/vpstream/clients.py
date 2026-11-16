@@ -273,14 +273,10 @@ class Client:
             value = _float(data.get(name), limit=None if name == "reported" else MAX_SECONDS)
             setattr(client, name, value or 0.0)
         client.paused = data.get("paused") is not False
-        try:
-            client.audio = None if data.get("audio") is None else audio_value(data["audio"])
-        except ClientError:
-            client.audio = None
-        try:
-            client.sub = None if data.get("sub") is None else sub_value(data["sub"])
-        except ClientError:
-            client.sub = None
+        for name, read in ((AUDIO, audio_value), (SUB, sub_value)):
+            if data.get(name) is not None:
+                with contextlib.suppress(ClientError):
+                    setattr(client, name, read(data[name]))
         positions = data.get("positions")
         for key, at in positions.items() if isinstance(positions, dict) else []:
             n, seconds = _int(key), _float(at)

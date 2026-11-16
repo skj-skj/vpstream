@@ -241,6 +241,9 @@ def benchmark(
     def step(name: str, build: ArgsBuilder, note: str = "", check_fonts: bool = False) -> None:
         steps.append(run_step(runner, name, build, work, media_seconds, prefix, note, check_fonts))
 
+    def skip(name: str, note: str) -> None:
+        steps.append(skipped_step(name, media_seconds, f"skipped: {note}"))
+
     with tempfile.TemporaryDirectory(prefix="vpstream-bench-", dir=tmp_dir) as tmp:
         work = Path(tmp)
 
@@ -263,29 +266,18 @@ def benchmark(
 
         preset = presets[0]
         if burn is None:
-            steps.append(
-                skipped_step(
-                    "burn-in", media_seconds, "skipped: no image, ASS or SSA subtitle track"
-                )
-            )
+            skip("burn-in", "no image, ASS or SSA subtitle track")
         elif burn.kind != "image" and "subtitles" not in filters:
-            steps.append(
-                skipped_step(
-                    "burn-in", media_seconds, "skipped: this ffmpeg has no subtitles filter"
-                )
-            )
+            skip("burn-in", "this ffmpeg has no subtitles filter")
         else:
             image = burn.kind == "image"
             try:
                 link = filter_source(work, source)
             except (OSError, ValueError) as exc:
-                steps.append(
-                    skipped_step(
-                        f"burn-in {preset}",
-                        media_seconds,
-                        f"skipped: the temporary folder cannot be used ({exc}); "
-                        "pass --tmp with a plain path on a disk that allows links",
-                    )
+                skip(
+                    f"burn-in {preset}",
+                    f"the temporary folder cannot be used ({exc}); "
+                    "pass --tmp with a plain path on a disk that allows links",
                 )
             else:
                 progress(f"burn in subtitle {burn.number} ({burn.codec}, {preset})")
