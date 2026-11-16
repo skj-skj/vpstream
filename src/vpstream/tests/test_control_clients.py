@@ -10,18 +10,11 @@ import pytest
 
 from vpstream import api, caddy, control, gate, player, public, state
 from vpstream.stream import Answer, StreamError
+from vpstream.tests.fakes import Clock
 from vpstream.tests.test_control_browser import Rig
 
 TV, PHONE = "192.0.2.10", "192.0.2.20"
 PLAYER = {player.REPORT_HEADER: "1"}
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = 1000.0
-
-    def __call__(self) -> float:
-        return self.now
 
 
 class Viewers(Rig):

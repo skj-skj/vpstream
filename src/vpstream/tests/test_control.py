@@ -11,15 +11,7 @@ from vpstream import config, mkv, state
 from vpstream.control import Control, ControlError
 from vpstream.stream import StreamError
 from vpstream.tests import mkvdata
-from vpstream.tests.fakes import FakeFirewall, FakeMkvmerge, FakeRunner, FakeServer
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = 1000.0
-
-    def __call__(self) -> float:
-        return self.now
+from vpstream.tests.fakes import Clock, FakeFirewall, FakeMkvmerge, FakeRunner, FakeServer
 
 
 class Rig:

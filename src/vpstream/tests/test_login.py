@@ -18,17 +18,11 @@ import pytest
 
 from vpstream import login
 from vpstream.login import Limiter, Login, LoginRefused, Verifier
+from vpstream.tests.fakes import Clock
 
 PASSWORD = "correct horse battery"
 FEW = 1000  # iterations: enough to be real, few enough for tests
-
-
-class Clock:
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.now = now
-
-    def __call__(self) -> float:
-        return self.now
+NOW = 1_000_000.0  # the clocks start here, well past every window
 
 
 def verifier(password: str = PASSWORD) -> Verifier:
@@ -49,7 +43,7 @@ def answer(challenge: dict[str, Any], password: str = PASSWORD) -> str:
 
 
 def make(path: Path | None = None, wall: Clock | None = None) -> tuple[Login, Clock, Clock]:
-    mono, wall = Clock(), wall or Clock()
+    mono, wall = Clock(NOW), wall or Clock(NOW)
     limiter = Limiter(path, clock=wall, log=lambda m: None)
     return Login(verifier(), limiter, clock=mono), mono, wall
 
@@ -365,7 +359,7 @@ def test_ipv6_addresses_of_one_network_count_together() -> None:
 
 def test_failed_logins_outlive_a_restart(tmp_path: Path) -> None:
     record = tmp_path / "dashboard-logins.json"
-    wall = Clock()
+    wall = Clock(NOW)
     auth, _, _ = make(record, wall)
     fail(auth, "192.0.2.1", login.FAILS_PER_ADDRESS)
     assert "192.0.2.1" in record.read_text()
@@ -377,7 +371,7 @@ def test_failed_logins_outlive_a_restart(tmp_path: Path) -> None:
 
 def test_the_whole_count_outlives_a_restart_too(tmp_path: Path) -> None:
     record = tmp_path / "dashboard-logins.json"
-    wall = Clock()
+    wall = Clock(NOW)
     auth, _, _ = make(record, wall)
     for n in range(login.FAILS_ALL):
         fail(auth, f"10.2.{n // 200}.{n % 200}")
@@ -397,7 +391,7 @@ def test_a_broken_record_starts_from_nothing_and_says_so(tmp_path: Path, text: s
     record = tmp_path / "dashboard-logins.json"
     record.write_text(text)
     said: list[str] = []
-    limiter = Limiter(record, clock=Clock(), log=said.append)
+    limiter = Limiter(record, clock=Clock(NOW), log=said.append)
     assert limiter.wait(login.Who("192.0.2.1")) == 0
     Login(verifier(), limiter).challenge("192.0.2.1")
     if text.startswith("{not"):
@@ -408,7 +402,7 @@ def test_a_clock_set_back_does_not_lock_an_address_out_for_longer_than_a_window(
     tmp_path: Path,
 ) -> None:
     record = tmp_path / "dashboard-logins.json"
-    wall = Clock()
+    wall = Clock(NOW)
     auth, _, _ = make(record, wall)
     fail(auth, "192.0.2.1", login.FAILS_PER_ADDRESS)
     wall.now -= 30 * 86400  # set back a month: the failures now lie in the future
@@ -421,7 +415,7 @@ def test_a_clock_set_back_does_not_lock_an_address_out_for_longer_than_a_window(
 
 def test_the_record_stays_small_when_many_addresses_fail(tmp_path: Path) -> None:
     record = tmp_path / "dashboard-logins.json"
-    limiter = Limiter(record, clock=Clock(), log=lambda m: None)
+    limiter = Limiter(record, clock=Clock(NOW), log=lambda m: None)
     for _ in range(login.FAILS_PER_ADDRESS * 3):
         limiter.failed(login.Who("192.0.2.1"))
     data = json.loads(record.read_text())
@@ -433,7 +427,7 @@ def test_the_addresses_kept_are_bounded_and_the_quietest_go_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(login, "MAX_ADDRESSES", 3)
-    wall = Clock()
+    wall = Clock(NOW)
     limiter = Limiter(None, clock=wall, log=lambda m: None)
     for n in range(6):
         wall.now += 1
@@ -444,7 +438,7 @@ def test_the_addresses_kept_are_bounded_and_the_quietest_go_first(
 def test_a_record_that_cannot_be_written_does_not_stop_the_count(tmp_path: Path) -> None:
     folder = tmp_path / "gone"
     said: list[str] = []
-    auth = Login(verifier(), Limiter(folder / "x.json", clock=Clock(), log=said.append))
+    auth = Login(verifier(), Limiter(folder / "x.json", clock=Clock(NOW), log=said.append))
     fail(auth, "192.0.2.1", login.FAILS_PER_ADDRESS)
     refused(429, auth.challenge, "192.0.2.1")
     assert said and "could not be written" in said[0]

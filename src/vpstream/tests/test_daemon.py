@@ -21,6 +21,7 @@ from vpstream.tests.fakes import (
     FakeFirewall,
     FakeRunner,
     FakeServer,
+    free_port,
     node_status,
     serve_status,
 )
@@ -31,12 +32,6 @@ def no_host_ipv6(monkeypatch: pytest.MonkeyPatch) -> None:
     """The public dashboard also serves this host's global IPv6 address, when it has one
     (a VPS does; a phone or a CI runner often not). The tests must not depend on that."""
     monkeypatch.setattr(daemon.net, "outgoing_address6", lambda: "")
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 class Running:
@@ -93,7 +88,7 @@ def tailnet() -> FakeRunner:
 
 @pytest.fixture
 def running(short_tmp: Path, tailnet: FakeRunner) -> Iterator[Running]:
-    cfg = config.Config(stream_port=_free_port(), dashboard_port=_free_port())
+    cfg = config.Config(stream_port=free_port(), dashboard_port=free_port())
     run = Running(short_tmp, tailnet, cfg).start()
     yield run
     run.close()
@@ -132,7 +127,7 @@ def test_socket_is_for_the_owner_and_group_only(running: Running) -> None:
 
 
 def test_socket_file_is_removed_on_stop(short_tmp: Path, tailnet: FakeRunner) -> None:
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     assert run.paths.socket.exists()
     run.close()
     assert not run.paths.socket.exists()
@@ -145,7 +140,7 @@ def test_a_leftover_socket_file_is_replaced(short_tmp: Path, tailnet: FakeRunner
     stale = socket.socket(socket.AF_UNIX)
     stale.bind(str(paths.socket))
     stale.close()  # the file stays, as after a crash
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     try:
         assert client.call(paths.socket, "GET", "status")["pid"]
     finally:
@@ -241,7 +236,7 @@ def test_dashboard_is_never_bound_to_every_interface(
         return real(host, port)
 
     monkeypatch.setattr(daemon, "bind_tcp", spy)
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     try:
         run.wait_for_dashboard()
     finally:
@@ -366,7 +361,7 @@ def test_a_firewall_failure_is_reported_not_hidden(tmp_path: Path) -> None:
 
 def test_serving_reconciles_first(short_tmp: Path, tailnet: FakeRunner) -> None:
     fw = FakeFirewall()
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()), fw).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()), fw).start()
     try:
         assert fw.calls == ["close"]
         assert client.call(run.paths.socket, "GET", "status")["stream_port_state"] == "closed"
@@ -453,7 +448,7 @@ def _gate(path: Path, target: str, ip: str = "192.0.2.1") -> tuple[int, dict[str
 def streaming(
     short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Running]:
-    cfg = config.Config(dashboard_port=_free_port(), stream_host="192.0.2.9")
+    cfg = config.Config(dashboard_port=free_port(), stream_host="192.0.2.9")
     run = Running(short_tmp, tailnet, cfg, FakeFirewall(), FakeServer()).start()
     monkeypatch.setenv(config.ROOT_ENV, str(short_tmp))
     yield run
@@ -547,7 +542,7 @@ def test_an_empty_path_is_refused_without_a_traceback(
 def test_a_daemon_that_fails_while_starting_leaves_no_socket_behind(
     short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()))
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()))
     monkeypatch.setattr(
         run.daemon.control, "reconcile", lambda: (_ for _ in ()).throw(OSError("no disk"))
     )
@@ -559,7 +554,7 @@ def test_a_daemon_that_fails_while_starting_leaves_no_socket_behind(
 def test_a_stream_that_will_not_stop_does_not_keep_the_sockets(
     short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     monkeypatch.setattr(
         run.daemon.control, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("stuck"))
     )
@@ -594,9 +589,7 @@ def test_stopping_the_daemon_stops_the_stream_and_removes_both_sockets(
     short_tmp: Path, tailnet: FakeRunner, tmp_path: Path
 ) -> None:
     fw, server = FakeFirewall(), FakeServer()
-    run = Running(
-        short_tmp, tailnet, config.Config(dashboard_port=_free_port()), fw, server
-    ).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()), fw, server).start()
     film = tmp_path / "film.mkv"
     film.write_bytes(b"x")
     client.call(run.paths.socket, "POST", "stream/start", {"file": str(film)})
@@ -611,7 +604,7 @@ def test_the_daemon_ends_a_stream_when_its_time_is_over(
 ) -> None:
     monkeypatch.setattr(daemon, "TICK_SECONDS", 0.05)
     fw = FakeFirewall()
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()), fw, FakeServer())
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()), fw, FakeServer())
     run.start()
     try:
         film = tmp_path / "film.mkv"
@@ -873,8 +866,8 @@ class PublicRun(Running):
         from vpstream.tests.test_login import verifier
 
         cfg = config.Config(
-            stream_port=_free_port(),
-            dashboard_port=_free_port(),
+            stream_port=free_port(),
+            dashboard_port=free_port(),
             dashboard_public=True,
             stream_host=host,
         )
