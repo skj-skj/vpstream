@@ -570,7 +570,7 @@ def _gone(program: Path) -> bool:
     [
         ("issue", None),
         ("refuse", "refused: HTTP 429 rateLimited"),
-        ("quiet", "no certificate after 3"),
+        ("quiet", "no certificate after 1 seconds"),
     ],
 )
 def test_the_requesting_caddy_is_stopped_however_it_ends(
@@ -580,6 +580,8 @@ def test_the_requesting_caddy_is_stopped_however_it_ends(
 
     Path(f"{program}.mode").write_text(mode)
     requester, paths = _requester(program, tmp_path)
+    if mode == "quiet":
+        requester.timeout = 1  # it waits all of it out
     store = paths.certificate_dir / "data" / "caddy"
     done = lambda: stored(store, "https://ca.test/dir", "203.0.113.5") is not None  # noqa: E731
     if error is None:

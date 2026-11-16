@@ -466,15 +466,16 @@ def test_a_used_start_position_and_a_new_cookie_are_written_down_at_the_next_tic
 
 def test_the_dashboard_gets_the_tracks_of_the_videos_in_use_only(tmp_path: Path) -> None:
     rig = Viewers(tmp_path)
-    for n in range(2, 6):
+    for n in range(2, 5):
         (rig.media / f"e{n}.mkv").write_bytes(b"video")
     rig.control.start({"dir": str(rig.media), "alias": "aaa", "mode": "browser"})
     assert rig.preparer.wait()
     rig.let_in("tv")
     rig.report("tv", number=3)
-    rig.ask("tv", start_at=10, video=5)
+    rig.ask("tv", start_at=10, video=4)
     videos = rig.control.status()["stream"]["videos"]
-    assert [v["number"] for v in videos if v["menu"] is not None] == [1, 3, 5]
+    # 1 for a browser that has not played yet, 3 where it is, 4 where it starts next.
+    assert [v["number"] for v in videos if v["menu"] is not None] == [1, 3, 4]
 
 
 def test_enabling_an_address_lets_the_browser_waiting_there_in(rig: Viewers) -> None:
