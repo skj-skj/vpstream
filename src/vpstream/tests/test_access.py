@@ -43,13 +43,13 @@ def own_record(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mon
 def only_the_tests_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The folders above the test's own are the host's, and differ from host to host (in
     Termux they are private to the app). The tests look at what is below."""
-    real = access.Plan.add
+    real = access._wanted
 
-    def add(self: access.Plan, path: Path, perms: str, uid: int) -> None:
-        if path.is_relative_to(tmp_path) and path != tmp_path:
-            real(self, path, perms, uid)
+    def wanted(kind: str, source: Path) -> list[tuple[Path, str]]:
+        found = real(kind, source)
+        return [(p, perms) for p, perms in found if p.is_relative_to(tmp_path) and p != tmp_path]
 
-    monkeypatch.setattr(access.Plan, "add", add)
+    monkeypatch.setattr(access, "_wanted", wanted)
 
 
 def _mine(tmp_path: Path, plan: access.Plan) -> dict[str, list[str]]:
@@ -380,6 +380,29 @@ def test_entry_reads_the_acl_of_a_file(library: Path, real: Any) -> None:
     subprocess.run(["setfacl", "-m", f"u:{ME}:rx", str(film)], check=True)
     assert access.entry(real, film, ME) == 5
     assert access.entry(FakeRunner(()), film, ME) is None  # no getfacl: nothing is known
+
+
+def test_entries_ask_getfacl_once_and_agree_with_entry(library: Path, real: Any) -> None:
+    files = [library / "film.mkv", library / "show/e1.mkv", library / "show"]
+    subprocess.run(["setfacl", "-m", f"u:{ME}:r", str(files[0])], check=True)
+    subprocess.run(["setfacl", "-d", "-m", f"u:{ME}:rx", str(files[2])], check=True)
+
+    calls: list[list[str]] = []
+
+    class Counting(type(real)):  # type: ignore[misc]
+        def run(self, args, *, timeout=None):  # type: ignore[no-untyped-def]
+            calls.append(list(args))
+            return super().run(args, timeout=timeout)
+
+    counting = Counting()
+    assert access.entries(counting, files, ME) == [access.entry(real, f, ME) for f in files]
+    assert access.entries(counting, files, ME)[0] == 4
+    assert sum(c[0] == "getfacl" for c in calls) == 2  # one call each time
+    # A file that cannot be read makes getfacl leave it out: then each file is asked alone.
+    calls.clear()
+    with_gone = [files[0], library / "nope", files[1]]
+    assert access.entries(counting, with_gone, ME) == [4, None, None]
+    assert sum(c[0] == "getfacl" for c in calls) == 4
 
 
 def test_entry_reads_what_getfacl_prints() -> None:
