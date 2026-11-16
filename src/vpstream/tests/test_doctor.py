@@ -272,7 +272,7 @@ def test_dashboard_is_checked_only_once_the_service_is_set_up(tmp_path: Path) ->
     assert _by_name(doctor.run_checks(runner, **kwargs))["dashboard"].status == "warning"
 
 
-# --- found in the review before milestone 2
+# --- Tailscale that is not up, the helper's owner, Caddy's own service
 
 
 @pytest.mark.parametrize(

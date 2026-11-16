@@ -177,7 +177,7 @@ def test_an_unusable_state_file_means_no_stream(tmp_path: Path, text: str) -> No
     assert loaded.stream is None and problem and str(path) in problem
 
 
-# --- found in the review before milestone 2: what was opened is what gets closed
+# --- what was opened is what gets closed
 
 
 class Ufw(FakeRunner):

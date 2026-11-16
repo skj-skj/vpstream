@@ -551,7 +551,7 @@ def test_cli_init_and_uninstall_need_root(capsys: pytest.CaptureFixture[str]) ->
     assert "sudo vpstream uninstall" in capsys.readouterr().err
 
 
-# --- found in the review before milestone 2
+# --- interrupted inits, busy ports and a helper others can change
 
 
 def test_uninstall_on_a_host_that_was_never_set_up_touches_no_ufw_rule(setup: Setup) -> None:

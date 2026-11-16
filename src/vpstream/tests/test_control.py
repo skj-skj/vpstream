@@ -327,7 +327,7 @@ def test_shutdown_stops_the_stream(rig: Rig) -> None:
     assert rig.recorded() is None and "the daemon is stopping" in rig.log[-1]
 
 
-# --- found in the review of milestone 2
+# --- slow helpers, a second start, and failures that must not leave the port open
 
 
 def test_status_and_viewers_do_not_wait_for_a_slow_firewall_or_caddy(rig: Rig) -> None:

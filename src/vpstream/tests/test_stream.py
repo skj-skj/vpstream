@@ -285,7 +285,7 @@ def test_describe(show: Path) -> None:
     assert s.describe("x", 99999.0)["seconds_left"] == 0.0
 
 
-# --- found in the review of milestone 2
+# --- what a file stream serves, and its record
 
 
 def test_only_a_video_can_be_streamed_as_a_file(tmp_path: Path) -> None:

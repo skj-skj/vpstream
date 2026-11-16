@@ -326,7 +326,7 @@ def test_shutdown_stops_the_worker(rig: Rig) -> None:
     assert done.wait(15)
 
 
-# --- found in the review of milestone 3
+# --- estimates from what ffprobe could not tell, and versions that are not whole
 
 
 def test_a_size_ffprobe_did_not_tell_counts_as_1080p_not_as_nothing() -> None:

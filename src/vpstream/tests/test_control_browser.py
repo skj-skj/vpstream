@@ -340,7 +340,7 @@ def test_a_browser_stream_taken_up_after_a_crash_makes_what_is_missing(rig: Rig)
     assert prepared.base_ready(rig.entry())
 
 
-# --- found in the review of milestone 3
+# --- restarts, jobs and removals
 
 
 def test_a_restart_after_the_video_is_gone_leaves_the_daemon_running(rig: Rig) -> None:
