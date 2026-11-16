@@ -35,7 +35,7 @@ from vpstream.caddy import (
 from vpstream.certificate import Certificates
 from vpstream.config import Config, Paths
 from vpstream.control import Control
-from vpstream.firewall import Firewall, FirewallError
+from vpstream.firewall import Firewall, FirewallError, switch
 from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out
@@ -384,14 +384,10 @@ class Daemon:
             self.dashboard_port_state = "not opened (no firewall helper)"
             return
         try:
-            if action == "open":
-                self.dashboard_firewall.open()
-            else:
-                self.dashboard_firewall.close()
+            self.dashboard_port_state = switch(self.dashboard_firewall, action)
         except FirewallError:
             self.dashboard_port_state = "unknown"
             raise
-        self.dashboard_port_state = "open" if action == "open" else "closed"
 
     def _dashboard_failed(self, problem: str, wait: float | None = None) -> None:
         if problem != self.dashboard_problem:

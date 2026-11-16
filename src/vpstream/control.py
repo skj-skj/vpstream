@@ -28,7 +28,7 @@ from vpstream.certificate import Certificate, CertificateError, Certificates
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import under
-from vpstream.firewall import Firewall, FirewallError
+from vpstream.firewall import Firewall, FirewallError, switch
 from vpstream.media import shown
 from vpstream.stream import (
     BROWSER,
@@ -131,12 +131,10 @@ class Control:
         if self.firewall is None:
             return
         try:
-            self.firewall.open() if action == "open" else self.firewall.close()
+            self.port_state = switch(self.firewall, action)
         except FirewallError as exc:
-            self.port_state = "unknown"
-            self.firewall_problem = str(exc)
+            self.port_state, self.firewall_problem = "unknown", str(exc)
             raise
-        self.port_state = "open" if action == "open" else "closed"
         self.firewall_problem = None
 
     def host(self) -> str:
