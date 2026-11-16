@@ -97,7 +97,7 @@ grep -qE '^ok +ffmpeg ' "$W/doctor-1.txt"
 grep -qE '^ok +ffprobe ' "$W/doctor-1.txt"
 
 step "selftest from the system install"
-(cd "$W" && vpstream selftest -- -k "not record_and_its_folder")  # MUTATION run only
+(cd "$W" && vpstream selftest)  # not in the checkout, which is under /home
 
 step "init, streams, the helper, crashes and uninstall"
 "$(dirname "$0")/ci-service-check.sh"
