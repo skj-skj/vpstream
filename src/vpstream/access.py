@@ -102,7 +102,7 @@ def _record(path: Path, grants: dict[str, list[str]]) -> None:
         # Its folder too, which only this file lives in: nothing is left behind once
         # everything is taken back. One that holds anything else stays.
         with contextlib.suppress(OSError):
-            path.parent.rmdir()
+            pass  # MUTATION: leave the folder (temporary)
         return
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     write_atomic(path, json.dumps(grants, indent=1) + "\n")
