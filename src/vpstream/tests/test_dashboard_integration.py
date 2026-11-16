@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import caddy, client, config, daemon, login
+from vpstream import caddy, client, config, daemon, dashboard_ca, login
 from vpstream.tests.fakes import FakeFirewall
 from vpstream.tests.test_login import PASSWORD, answer, verifier
 from vpstream.tools import SystemRunner
@@ -66,6 +66,7 @@ class Public:
         self.log: list[str] = []
         self.fw = FakeFirewall()
         runner = SystemRunner()
+        dashboard_ca.make(runner, self.paths, HOSTS)  # what init does
         self.caddy = caddy.DashboardCaddy(runner, self.cfg.dashboard_port, HOSTS, self.paths)
         self.daemon = daemon.Daemon(
             self.cfg,
@@ -172,7 +173,7 @@ def test_the_dashboard_is_https_with_a_certificate_from_its_own_authority(
 ) -> None:
     status, headers, _ = public.https("GET", "/login")
     assert status == 200 and "html" in headers["content-type"]
-    # Trusting the root that Caddy made is enough, address and all: what a phone gets once
+    # Trusting the root that init made is enough, address and all: what a phone gets once
     # the authority is installed. The certificate itself is for the address (no SNI sent).
     with (
         socket.create_connection((HOST, public.cfg.dashboard_port), timeout=5) as raw,
@@ -181,7 +182,7 @@ def test_the_dashboard_is_https_with_a_certificate_from_its_own_authority(
         cert = tls.getpeercert()
     assert ("IP Address", HOST) in cert["subjectAltName"]
     issuer = dict(item[0] for item in cert["issuer"])
-    assert "Caddy Local Authority" in issuer["commonName"]
+    assert "vpstream dashboard" in issuer["commonName"]  # never Caddy's own authority
     # The warning clicked through also works.
     assert public.https("GET", "/login", trusted=False)[0] == 200
     dash = public.status()

@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from vpstream import dashboard_ca
 from vpstream.certificate import PROFILE, Certificate, CertificateError, first_der
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
@@ -172,9 +173,15 @@ def config(
     }
 
 
-def dashboard_config(port: int, hosts: list[str], socket_path: Path) -> dict[str, Any]:
-    """The public dashboard's Caddy: HTTPS with certificates from Caddy's own local
-    authority, for every address in `hosts` (IPv4 and IPv6; a name works by its SNI).
+DASHBOARD_CA = "vpstream"  # Caddy's name for it, apart from its own "local"
+
+
+def dashboard_config(
+    port: int, hosts: list[str], socket_path: Path, ca_cert: Path, ca_key: Path
+) -> dict[str, Any]:
+    """The public dashboard's Caddy: HTTPS for every address in `hosts` (IPv4 and IPv6; a
+    name works by its SNI), with certificates signed under the authority `init` made for
+    this host (`dashboard_ca`), never Caddy's own, which would be valid for any site.
 
     A browser sends no server name for an address, so the certificate cannot be picked by
     it. Each address gets a listener of its own, whose `default_sni` is that address. The
@@ -196,11 +203,28 @@ def dashboard_config(port: int, hosts: list[str], socket_path: Path) -> dict[str
     return {
         "admin": _NO_ADMIN,
         "apps": {
-            "pki": {"certificate_authorities": {"local": {"install_trust": False}}},
+            "pki": {
+                "certificate_authorities": {
+                    DASHBOARD_CA: {
+                        "name": "vpstream dashboard",
+                        "install_trust": False,
+                        "root": {
+                            "certificate": str(ca_cert),
+                            "private_key": str(ca_key),
+                            "format": "pem_file",
+                        },
+                    }
+                }
+            },
             "tls": {
                 "certificates": {"automate": hosts},
                 "automation": {
-                    "policies": [{"subjects": hosts, "issuers": [{"module": "internal"}]}]
+                    "policies": [
+                        {
+                            "subjects": hosts,
+                            "issuers": [{"module": "internal", "ca": DASHBOARD_CA}],
+                        }
+                    ]
                 },
             },
             "http": {"servers": servers},
@@ -469,10 +493,9 @@ class CaddyServer(CaddyProcess):
 
 
 def dashboard_root_cert(paths: Paths) -> Path:
-    """The public dashboard's local authority certificate, made by Caddy the first time it
-    starts. Only this is stable: what Caddy serves lasts 12 hours, its intermediate 7 days.
-    Caddy keeps it readable by the service user only."""
-    return paths.dashboard_caddy_dir / "data/caddy/pki/authorities/local/root.crt"
+    """The public dashboard's authority certificate, made by `init` (see `dashboard_ca`).
+    Only this is stable: what Caddy serves lasts 12 hours, its intermediate 7 days."""
+    return paths.dashboard_ca_cert
 
 
 class DashboardCaddy(CaddyProcess):
@@ -484,10 +507,36 @@ class DashboardCaddy(CaddyProcess):
         super().__init__(runner, port, paths.dashboard_caddy_dir)
         self.hosts = hosts  # the daemon sets them before each start
         self.socket_path = paths.dashboard_socket
+        self.paths = paths
         self.root_cert = dashboard_root_cert(paths)
 
     def config(self) -> dict[str, Any]:
-        return dashboard_config(self.port, self.hosts, self.socket_path)
+        return dashboard_config(
+            self.port,
+            self.hosts,
+            self.socket_path,
+            self.paths.dashboard_ca_cert,
+            self.paths.dashboard_ca_key,
+        )
+
+    def start(self) -> None:
+        """Serve only the addresses the authority permits: a phone refuses the others. Not
+        at all without the authority, rather than with Caddy's own."""
+        if not self.running():
+            permitted = dashboard_ca.covered(self.paths)
+            if permitted is None:
+                raise CaddyError(
+                    "the dashboard has no certificate authority of its own yet; run: "
+                    "sudo vpstream init, then install the authority it shows on your phone"
+                )
+            if not any(h in permitted for h in self.hosts):
+                raise CaddyError(
+                    f"this host's addresses ({', '.join(self.hosts)}) are not the ones its "
+                    f"authority is for ({', '.join(permitted)}); run: sudo vpstream init, "
+                    "then install the new authority on your phone"
+                )
+            self.hosts = [h for h in self.hosts if h in permitted]
+        super().start()
 
     @property
     def probe_host(self) -> str:

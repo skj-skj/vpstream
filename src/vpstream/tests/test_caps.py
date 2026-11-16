@@ -318,3 +318,15 @@ def test_a_clip_set_made_while_ffmpeg_failed_is_not_reused(tmp_path: Path) -> No
     assert manifest["clips"][0]["encoder"] == "libx264"  # type: ignore[index]
     r = _clip_runner()
     assert clips.generate(r, out) == manifest and r.calls == []  # a good set is reused
+
+
+def test_a_report_cannot_write_control_characters_to_the_terminal(tmp_path: Path) -> None:
+    said: list[str] = []
+    state = server.CapsState(clip_dir=tmp_path, results_path=tmp_path / "r.json", log=said.append)
+    evil = "\x1b]0;title\x07\x1b[2J\u009b31m done"
+    state.record("192.0.2.1", "TV", {"session": "s", "stage": evil, "playback": [{"name": evil}]})
+    out = "\n".join(said)
+    assert not any(c in out for c in "\x1b\x07\u009b")
+    assert "?[2J?31m done" in out  # the rest is still shown
+    saved = json.loads(state.results_path.read_text())
+    assert saved["s"]["stage"] == evil  # the results file keeps what was sent

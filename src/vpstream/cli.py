@@ -207,7 +207,7 @@ def _ago(when: Any, now: float) -> str:
 
 def _device_name(device: dict[str, Any]) -> str:
     """The name the owner gave a device, else its user agent."""
-    return str(device.get("name") or device.get("user_agent") or "-")
+    return text.printable(str(device.get("name") or device.get("user_agent") or "-"))
 
 
 def _clock(seconds: float) -> str:

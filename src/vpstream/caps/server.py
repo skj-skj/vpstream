@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from vpstream.files import write_atomic
 from vpstream.media import HLS_TYPES
+from vpstream.text import printable
 
 MAX_SPEED_MB = 256
 MAX_REPORT_BYTES = 256 * 1024
@@ -95,8 +96,8 @@ def media_file(root: Path, rel: str) -> Path | None:
 
 
 def _short(value: Any, width: int = 200) -> str:
-    text = value if isinstance(value, str) else json.dumps(value)
-    return text[:width]
+    shown = value if isinstance(value, str) else json.dumps(value)
+    return printable(shown[:width])
 
 
 def summarize(report: dict[str, Any]) -> list[str]:

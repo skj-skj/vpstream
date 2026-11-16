@@ -33,6 +33,7 @@ from vpstream import (
     certificate,
     client,
     config,
+    dashboard_ca,
     doctor,
     ffmpeg_install,
     firewall,
@@ -59,8 +60,7 @@ NEEDED = (
     "chown",
 )
 # What each place of the dashboard needs as well: public (True) or the tailnet (False).
-NEEDED_FOR = {False: ("tailscale",), True: ("caddy",)}
-CERT_SECONDS = 30  # how long init waits for the public dashboard's Caddy to make its authority
+NEEDED_FOR = {False: ("tailscale",), True: ("caddy", "openssl")}
 # A path goes into the sudoers rule and the unit file as it is, so it must need no quoting.
 _PLAIN_PATH = re.compile(r"/[A-Za-z0-9_./+-]+")
 
@@ -192,6 +192,7 @@ class Service:
     program_problem: Callable[[Path], str | None] = doctor.program_problem
     port_busy: Callable[[int], bool] = port_busy
     outgoing_address: Callable[[], str] = net.outgoing_address
+    outgoing_address6: Callable[[], str] = net.outgoing_address6
     ask_daemon: Callable[[Path, str], object] = lambda socket, route: client.call(
         socket, "POST", route, {}
     )
@@ -376,12 +377,15 @@ class Service:
             folder.chmod(0o750)
             self._run("chown", "-R", f"{USER}:{USER}", folder, what=f"giving {folder} to {USER}")
         self._init_sudoers()
+        made = False
         if public:
             if password is not None:
                 self._write_password(password)
+            made = self._init_authority(cfg)
             self._unpublish(manifest)
         else:
             self._remove_password()
+            self._remove_authority()
             self._close_recorded(lay.paths.open_dashboard_ports_file, "dashboard port")
             self._init_serve(manifest, cfg.dashboard_port)
         if not https:
@@ -389,7 +393,7 @@ class Service:
         self._init_member(manifest)
         self._init_unit(https)
         if public:
-            self._report_public(cfg)
+            self._report_public(cfg, made)
         if https:
             self._report_https(cfg)
         self.say(
@@ -452,28 +456,52 @@ class Service:
         manifest.serve_port = None
         manifest.save(self.layout.manifest)
 
-    def _report_public(self, cfg: config.Config) -> None:
-        """The address, and the fingerprint of the certificate authority, which Caddy makes
-        when the service starts it."""
+    def _public_hosts(self, cfg: config.Config) -> list[str]:
+        """The addresses the daemon serves the public dashboard on (`net.public_hosts`)."""
+        return net.public_hosts(cfg.stream_host, self.outgoing_address, self.outgoing_address6)
+
+    def _init_authority(self, cfg: config.Config) -> bool:
+        """Make the dashboard's certificate authority, valid for this host only, unless the
+        one there already covers its addresses. Returns whether a new one was made."""
+        hosts = self._public_hosts(cfg)
+        have = dashboard_ca.covered(self.layout.paths)
+        if have is not None and set(hosts) <= set(have):
+            return False
+        cert = self.layout.paths.dashboard_ca_cert
+
+        def give_to_group(key: Path) -> None:  # before it takes the old key's place
+            self._run("chown", f"root:{USER}", key, what=f"giving the authority's key to {USER}")
+            key.chmod(0o640)
+
+        try:
+            dashboard_ca.make(self.runner, self.layout.paths, hosts, give_to_group)
+        except (dashboard_ca.AuthorityError, OSError) as exc:
+            raise ServiceError(f"the dashboard's certificate authority: {exc}") from exc
+        self.say(f"{cert}: a certificate authority for {', '.join(hosts)} only")
+        return True
+
+    def _remove_authority(self) -> None:
+        for path in dashboard_ca.remove(self.layout.paths):
+            self.say(f"{path}: removed (the dashboard is on the tailnet only)")
+
+    def _report_public(self, cfg: config.Config, made: bool = False) -> None:
+        """The address, and the fingerprint of the certificate authority to install."""
         host = net.public_host(cfg.stream_host, self.outgoing_address)
         port = cfg.dashboard_port
         self.say(f"dashboard: public at {net.url('https', host, port)}/ (password)")
-        path = caddy.dashboard_root_cert(self.layout.paths)
-        for _ in range(CERT_SECONDS):
-            if cert := caddy.read_certificate(path):
-                break
-            self.pause(1.0)
-        if cert is None:
-            self.say("The certificate is not made yet; see it later with: vpstream status")
-        else:
+        cert = caddy.read_certificate(caddy.dashboard_root_cert(self.layout.paths))
+        if cert is not None:
+            what = "A new authority was made: install it" if made else "Install it"
             self.say(
                 "Its certificate comes from this host's own authority, which your browser does "
-                "not know. Install that authority on your phone once, before you first log "
-                "in: until then, someone on the way to this host could show you a login page "
-                "of their own.\n"
+                f"not know. {what} on your phone, before you log in: until then, someone on the "
+                "way to this host could show you a login page of their own. It can vouch for "
+                "this host's addresses only, never for another site.\n"
                 "  vpstream dashboard-cert > vpstream-ca.crt\n"
                 "  (Android: Settings, Security, Install a certificate, CA certificate)\n"
-                f"Check that it is this one: SHA-256 {cert['fingerprint']}"
+                f"Check that it is this one: SHA-256 {cert['fingerprint']}\n"
+                "Remove from the phone any authority installed for vpstream before (one named "
+                "Caddy Local Authority, or an older vpstream one)."
             )
         self.say(
             f"The service opens {port}/tcp in ufw while it runs. If your provider has a "

@@ -247,3 +247,21 @@ def test_dashboard_cert_prints_the_authority_to_install(
     assert cli.main(["dashboard-cert"]) == 0
     out = capsys.readouterr()
     assert out.out == pem + "\n" and "SHA-256 AB:CD" in out.err
+
+
+def test_a_user_agent_cannot_write_control_characters_to_the_terminal() -> None:
+    device = {
+        "id": "192.0.2.1",
+        "ip": "192.0.2.1",
+        "kind": "player",
+        "allowed": None,
+        "user_agent": "VLC\u009b2J\x1b[31m/3.0",
+        "requests": 1,
+        "blocked": 0,
+        "bytes": 0,
+        "last_seen": 1.0,
+        "passes": True,
+    }
+    out = cli.format_devices({"devices": [device]}, 2.0)
+    assert "\u009b" not in out and "\x1b" not in out
+    assert "VLC?2J?[31m/3.0" in out

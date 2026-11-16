@@ -4,12 +4,14 @@ import json
 import socket
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from vpstream import caddy, config
 from vpstream.certificate import Certificate
 from vpstream.tests.fakes import FakeRunner
+from vpstream.tools import ToolMissing
 
 # A stand-in for the caddy program: it listens where the configuration says, as Caddy does.
 FAKE_CADDY = """\
@@ -281,16 +283,58 @@ def test_running_notices_a_caddy_that_died(tmp_path: Path, program: Path) -> Non
 # --- the public dashboard's Caddy
 
 
+def _dashboard_config(tmp_path: Path, hosts: list[str], sock: Path | None = None) -> dict[str, Any]:
+    return caddy.dashboard_config(
+        1338, hosts, sock or tmp_path / "d.sock", tmp_path / "ca.crt", tmp_path / "ca.key"
+    )
+
+
+def _authority(paths: config.Paths, hosts: list[str]) -> None:
+    """An authority as init leaves it, made for `hosts`."""
+    paths.config_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.dashboard_ca_cert.write_text("CERT")
+    paths.dashboard_ca_key.write_text("KEY")
+    paths.dashboard_ca_hosts.write_text(json.dumps({"hosts": hosts}))
+
+
+def test_the_dashboard_caddy_does_not_start_without_its_own_authority(tmp_path: Path) -> None:
+    paths = config.Paths.under(tmp_path)
+    dash = caddy.DashboardCaddy(FakeRunner(), 1338, ["203.0.113.5"], paths)
+    with pytest.raises(caddy.CaddyError, match="sudo vpstream init"):
+        dash.start()
+
+
+def test_the_dashboard_caddy_serves_only_the_addresses_its_authority_permits(
+    tmp_path: Path,
+) -> None:
+    paths = config.Paths.under(tmp_path)
+    _authority(paths, ["203.0.113.5"])
+    dash = caddy.DashboardCaddy(FakeRunner(), 1338, ["198.51.100.7"], paths)
+    with pytest.raises(caddy.CaddyError, match="install the new authority"):
+        dash.start()  # the host has a new address: a phone would refuse it
+    dash.hosts = ["203.0.113.5", "2001:db8::5"]  # IPv6 came up after init
+    with pytest.raises(ToolMissing):  # FakeRunner has no caddy: it got that far
+        dash.start()
+    assert dash.hosts == ["203.0.113.5"]
+
+
 def test_the_dashboard_config_is_https_for_the_address_and_never_touches_trust_stores(
     tmp_path: Path,
 ) -> None:
-    cfg = caddy.dashboard_config(1338, ["203.0.113.5"], tmp_path / "d.sock")
+    cfg = _dashboard_config(tmp_path, ["203.0.113.5"])
     assert cfg["admin"]["disabled"] is True
-    assert cfg["apps"]["pki"]["certificate_authorities"]["local"]["install_trust"] is False
+    [(name, ca)] = cfg["apps"]["pki"]["certificate_authorities"].items()
+    assert name == caddy.DASHBOARD_CA != "local" and ca["install_trust"] is False
+    # Signed under the authority init made for this host, never Caddy's own.
+    assert ca["root"] == {
+        "certificate": str(tmp_path / "ca.crt"),
+        "private_key": str(tmp_path / "ca.key"),
+        "format": "pem_file",
+    }
     tls = cfg["apps"]["tls"]
     assert tls["certificates"]["automate"] == ["203.0.113.5"]
     assert tls["automation"]["policies"] == [
-        {"subjects": ["203.0.113.5"], "issuers": [{"module": "internal"}]}
+        {"subjects": ["203.0.113.5"], "issuers": [{"module": "internal", "ca": name}]}
     ]
     [server] = cfg["apps"]["http"]["servers"].values()
     assert server["listen"] == ["203.0.113.5:1338"]
@@ -307,7 +351,7 @@ def test_the_dashboard_config_is_https_for_the_address_and_never_touches_trust_s
 def test_both_caddies_hand_on_the_address_the_same_way(tmp_path: Path) -> None:
     stream = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v")
     gate = stream["apps"]["http"]["servers"]["vpstream"]["routes"][1]["handle"][0]
-    dash = caddy.dashboard_config(1338, ["h"], tmp_path / "g.sock")
+    dash = _dashboard_config(tmp_path, ["h"], tmp_path / "g.sock")
     proxy = dash["apps"]["http"]["servers"][caddy.DASHBOARD_SERVER]["routes"][0]["handle"][0]
     assert proxy["headers"] == gate["headers"] and proxy["upstreams"] == gate["upstreams"]
 
@@ -337,23 +381,28 @@ def test_the_dashboard_caddy_keeps_its_files_apart_from_the_streams(tmp_path: Pa
     dash = caddy.DashboardCaddy(FakeRunner(), 1338, ["203.0.113.5"], paths)
     stream = caddy.CaddyServer(FakeRunner(), 1337, paths)
     assert dash.work_dir != stream.work_dir
-    assert dash.root_cert == caddy.dashboard_root_cert(paths)
-    assert dash.root_cert.is_relative_to(dash.data_dir)
-    assert dash.config() == caddy.dashboard_config(1338, ["203.0.113.5"], paths.dashboard_socket)
+    assert dash.root_cert == caddy.dashboard_root_cert(paths) == paths.dashboard_ca_cert
+    assert dash.config() == caddy.dashboard_config(
+        1338,
+        ["203.0.113.5"],
+        paths.dashboard_socket,
+        paths.dashboard_ca_cert,
+        paths.dashboard_ca_key,
+    )
     assert dash.probe_host == "203.0.113.5" and stream.probe_host == "127.0.0.1"
 
 
 def test_each_address_gets_a_listener_whose_certificate_is_its_own(tmp_path: Path) -> None:
     """No SNI is sent for an address, so a listener can pick only one certificate."""
     hosts = ["vps.example.org", "203.0.113.5", "2001:db8::5"]
-    cfg = caddy.dashboard_config(1338, hosts, tmp_path / "d.sock")
+    cfg = _dashboard_config(tmp_path, hosts)
     servers = cfg["apps"]["http"]["servers"]
     assert [(s["listen"], s["tls_connection_policies"]) for s in servers.values()] == [
         (["203.0.113.5:1338"], [{"default_sni": "203.0.113.5"}]),
         (["[2001:db8::5]:1338"], [{"default_sni": "2001:db8::5"}]),
     ]
     assert cfg["apps"]["tls"]["certificates"]["automate"] == hosts, "the name by its SNI"
-    only_a_name = caddy.dashboard_config(1338, ["vps.example.org"], tmp_path / "d.sock")
+    only_a_name = _dashboard_config(tmp_path, ["vps.example.org"])
     [server] = only_a_name["apps"]["http"]["servers"].values()
     assert server["listen"] == [":1338"]
     assert server["tls_connection_policies"] == [{"default_sni": "vps.example.org"}]
