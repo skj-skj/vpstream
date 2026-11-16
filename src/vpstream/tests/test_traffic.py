@@ -96,6 +96,19 @@ def test_a_request_logged_before_its_connection_was_seen_is_not_counted_twice(
     assert rig.read() == {}
 
 
+def test_connections_only_the_log_saw_are_forgotten_in_time(tmp_path: Path) -> None:
+    """Without `ss`, or for connections that ended between two looks, the log is all there
+    is; what was counted for them must not pile up over a long stream."""
+    rig = Rig(tmp_path, programs=())
+    rig.logged("192.0.2.1", 4000, 1000)
+    assert rig.read() == {"192.0.2.1": 1000}
+    assert list(rig.traffic._logged) == [("192.0.2.1", "4000")]
+    rig.now += traffic.SEEN_SECONDS
+    rig.logged("192.0.2.1", 4001, 10)
+    assert rig.read() == {"192.0.2.1": 10}
+    assert list(rig.traffic._logged) == [("192.0.2.1", "4001")]
+
+
 def test_the_last_second_of_a_connection_comes_from_the_log_when_it_says_more(
     tmp_path: Path,
 ) -> None:
