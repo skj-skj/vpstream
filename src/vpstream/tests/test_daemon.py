@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import __version__, api, cli, client, config, daemon, firewall, state
+from vpstream import __version__, api, cli, client, config, daemon, firewall, show, state
 from vpstream.tests.fakes import (
     NAME,
     EventFirewall,
@@ -233,7 +233,7 @@ def test_status_says_when_the_dashboard_is_not_published(
 ) -> None:
     dash = _dash(tmp_path, tailnet)
     assert dash["url"] is None and "sudo vpstream init" in str(dash["problem"])
-    text = cli.format_status({"dashboard": dash, "version": "1"}, "1")
+    text = show.format_status({"dashboard": dash, "version": "1"}, "1")
     assert "http://127.0.0.1:1338/ on this host only; not published" in text
 
     publish(tailnet, 1338, target="http://127.0.0.1:3000")  # the port serves something else
@@ -326,7 +326,7 @@ def test_a_firewall_failure_is_reported_not_hidden(tmp_path: Path) -> None:
     assert info["stream_port_state"] == "unknown"
     assert "password is required" in info["firewall_problem"]
     assert log[0].startswith("WARNING: could not close")
-    assert "WARNING: could not close" in cli.format_status(info, info["version"])
+    assert "WARNING: could not close" in show.format_status(info, info["version"])
 
 
 def test_serving_reconciles_first(short_tmp: Path, tailnet: FakeRunner) -> None:

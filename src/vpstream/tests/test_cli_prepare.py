@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import api, cli, client, probe
+from vpstream import api, cli, client, probe, show
 from vpstream.tests.test_probe import SAMPLE
 
 PLAN = {
@@ -310,7 +310,7 @@ def test_when_the_access_is_kept_the_command_says_how_to_take_it_back(
 
 def test_status_shows_the_prepares(monkeypatch: pytest.MonkeyPatch) -> None:
     info = {"version": "x", "prepare": [job(1, "running", 0.5), job(2, "queued"), job(3, "done")]}
-    text = cli.format_status(info, "x")
+    text = show.format_status(info, "x")
     assert "Preparing:    film.mkv: base version (copy): 50%, about 1m 00s left" in text
     assert "and 1 more queued" in text
 
@@ -439,7 +439,7 @@ def test_track_info_of_a_file_ffprobe_cannot_read(
     ],
 )  # fmt: skip
 def test_format_job(item: dict[str, Any], shown: str) -> None:
-    assert cli.format_job(item) == shown
+    assert show.format_job(item) == shown
 
 
 @pytest.mark.parametrize(
@@ -454,7 +454,7 @@ def test_format_job(item: dict[str, Any], shown: str) -> None:
     ],
 )
 def test_video_states(video: dict[str, Any], mark: str) -> None:
-    assert cli._video_state(video) == mark
+    assert show._video_state(video) == mark
 
 
 def test_start_waits_long_enough_for_a_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
