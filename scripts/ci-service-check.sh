@@ -4,7 +4,7 @@
 # rules, so it refuses to run anywhere but CI. The machine is on no tailnet, so `tailscale` is
 # scripts/ci-fake-tailscale there; the real `tailscale serve` is checked on a real host.
 set -euo pipefail
-[ "${CI:-}" = "true" ] || { echo "this script is for CI machines only" >&2; exit 2; }
+. "$(dirname "$0")/ci-lib.sh"
 
 BIN=$(dirname "$(readlink -f "$(command -v vpstream)")")
 FW="$BIN/vpstream-fw"
@@ -12,8 +12,6 @@ rules() { sudo ufw show added; }
 # Through a file, so a grep that stops reading early cannot fail the pipe.
 has_rule() { rules > /tmp/ufw-now.txt; grep -q -- "$1" /tmp/ufw-now.txt; }
 as_group() { sg vpstream -c "$*"; }  # this login got the group after it started
-step() { echo; echo "== $*"; }
-no() { if "$@"; then echo "!! expected to fail: $*" >&2; exit 1; fi; }
 
 step "before"
 rules > /tmp/ufw-before.txt

@@ -67,6 +67,33 @@ class Layout:
     install_dir: Path = Path("/opt/vpstream-ffmpeg")
     bin_dir: Path = Path("/usr/local/bin")
 
+    @property
+    def staging_dir(self) -> Path:
+        """Where a new build is copied before it takes the place of the old one."""
+        return self.install_dir.with_name(self.install_dir.name + ".new")
+
+    def owns(self, path: Path | str) -> bool:
+        """Whether `path` leads into install_dir, so it is a program vpstream installed. Both
+        sides are resolved (/opt may be a link to another disk), but an install_dir that is
+        itself a link owns nothing: it could make any folder look like vpstream's."""
+        if self.install_dir.is_symlink():
+            return False
+        home = Path(os.path.realpath(self.install_dir))
+        return Path(os.path.realpath(path)).is_relative_to(home)
+
+    def links(self) -> list[Path]:
+        """The programs in bin_dir that are links into install_dir: what vpstream put there."""
+        found = (self.bin_dir / prog for prog in PROGRAMS)
+        return [link for link in found if link.is_symlink() and self.owns(link)]
+
+    @classmethod
+    def under(cls, root: Path) -> Layout:
+        default = cls()
+        return cls(
+            install_dir=root / default.install_dir.relative_to("/"),
+            bin_dir=root / default.bin_dir.relative_to("/"),
+        )
+
 
 def version_key(version: str) -> tuple[int, ...] | None:
     """(major, minor, patch, commits since the tag) from a version such as n9.0.2-48-g1a2b."""
@@ -191,7 +218,7 @@ def find_existing(runner: Runner, layout: Layout) -> list[Existing]:
         if not path:
             continue
         real = os.path.realpath(path)
-        if Path(real).is_relative_to(layout.install_dir):
+        if layout.owns(path):
             version = str(read_marker(layout).get("version") or "")
             found.append(Existing(prog, path, "vpstream", version=version))
             continue
@@ -309,13 +336,11 @@ class Setup:
         """Refuse to overwrite a program in bin_dir that is not our link."""
         for prog in PROGRAMS:
             link = self.layout.bin_dir / prog
-            if link.exists() or link.is_symlink():
-                target = Path(os.path.realpath(link))
-                if not target.is_relative_to(self.layout.install_dir):
-                    raise SetupError(
-                        f"{link} exists and was not installed by vpstream: remove it yourself, "
-                        "then run this again"
-                    )
+            if (link.exists() or link.is_symlink()) and not self.layout.owns(link):
+                raise SetupError(
+                    f"{link} exists and was not installed by vpstream: remove it yourself, "
+                    "then run this again"
+                )
 
     def _removals(self, existing: Sequence[Existing]) -> list[str]:
         packages = list(dict.fromkeys(e.package for e in existing if e.owner == "apt"))
@@ -436,7 +461,7 @@ class Setup:
 
     def _place(self, staged: Path) -> None:
         target = self.layout.install_dir
-        new = target.with_name(target.name + ".new")
+        new = self.layout.staging_dir
         self.progress(f"installing to {target}")
         self._system("mkdir", "-p", target.parent, what="creating the install folder")
         self._system("rm", "-rf", new, what="clearing an old partial install")

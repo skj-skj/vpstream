@@ -4,51 +4,107 @@ On-demand video streaming from a VPS. The public port is open only while a strea
 everything is controlled over SSH or a dashboard on your tailnet (or, if you choose, a public
 dashboard over HTTPS behind a password).
 
-Status: early development. Streams a file or a folder as it is, for players such as VLC and
-mpv (direct mode), or as prepared HLS versions with a player page for TV browsers (browser
-mode).
+Streams a file or a folder as it is, for players such as VLC and mpv (direct mode), or as
+prepared HLS versions with a player page for TV browsers (browser mode), over plain HTTP or
+HTTPS with a Let's Encrypt certificate for the address. Tested on Ubuntu Server 24.04.
 
 ## Install
 
-Needs Linux, Python 3.12+, Caddy (2.10 or newer for HTTPS streams: `vpstream install caddy`),
-ufw, systemd, and Tailscale with HTTPS certificates (not needed for a public dashboard).
-ffmpeg is used by browser mode, `bench` and `caps`; mkvtoolnix and the `acl` package are
-optional (see below). `vpstream doctor` checks all of it and prints the fix for anything missing.
+Needs Linux with systemd, Python 3.12+, ufw, Caddy (2.10 or newer for HTTPS streams), and
+Tailscale with HTTPS certificates (not needed for a public dashboard). ffmpeg is used by
+browser mode, `bench` and `caps`; mkvtoolnix and the `acl` package are optional (see
+Streaming). `vpstream doctor` checks all of it and prints the fix for anything missing.
 
 ```text
+sudo apt install pipx ufw acl mkvtoolnix
 sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "vpstream[dev]"
+vpstream --version
+vpstream doctor                 # what is missing, and the fix for each
+vpstream install caddy          # the current Caddy (Ubuntu's 2.6.2 serves plain HTTP only)
+vpstream install ffmpeg         # a current static ffmpeg, for browser mode
+sudo vpstream init              # the service, its user, the firewall helper, the dashboard
+# log out and in again: init added you to the vpstream group
 vpstream doctor
-sudo vpstream init
+vpstream selftest --integration
+vpstream start --file /srv/media/film.mkv
 ```
 
-The install must be system-wide (the service runs as its own user). Upgrade with the same
-prefix and `pipx upgrade vpstream`, then `sudo vpstream init` again.
+The install must be system-wide: the service runs as its own user, and sudo runs the
+firewall helper from that folder. The commands talk to the service through a socket that
+only the `vpstream` group may use, which `init` adds you to; a login gets it only when it
+starts (until then: `newgrp vpstream`).
+
+`vpstream install caddy` and `vpstream install ffmpeg` ask first (`--yes` does not), and
+`--tmp DIR` puts the download on another disk; `vpstream update ffmpeg` takes the same
+`--yes` and `--tmp`.
+
+## Upgrade
+
+```text
+vpstream stop
+sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade vpstream
+sudo vpstream init
+vpstream --version
+vpstream doctor
+```
+
+`init` restarts the service on the new version, which ends a running stream: stop it first.
+Everything is carried over: the configuration (`init` changes only the switches you give
+it), the dashboard's password and its certificate authority (the phone keeps trusting it),
+the stream's HTTPS certificate, and the prepared videos. The unit and the sudoers rule are
+written again for the new version. Going back to an older version is not supported: a newer
+one may write settings an older one rejects.
+
+## Uninstall
+
+```text
+vpstream stop
+vpstream revoke                 # file access a stream that ended by itself left behind
+sudo vpstream uninstall --purge
+sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx uninstall vpstream
+```
+
+`uninstall` stops and removes the service, its user and group (and your membership), the
+sudoers rule, the `tailscale serve` port it published, the ufw rules it opened, and
+`/etc/vpstream` and `/var/lib/vpstream`, including the dashboard's password and the
+stream's HTTPS certificate (a new one counts towards Let's Encrypt's 5 a week for the
+address). It asks first (`--yes` does not). Without `--purge` the prepared videos in
+`/var/cache/vpstream` stay; `--purge` removes them, and the ffmpeg `vpstream install ffmpeg`
+put in `/opt/vpstream-ffmpeg` (an apt or snap ffmpeg it replaced is not put back:
+`sudo apt install ffmpeg`). Left on the host: the apt packages you or `vpstream install` added (Caddy
+and its repository, `/etc/apt/sources.list.d/caddy-stable.list` and
+`/usr/share/keyrings/caddy-stable-archive-keyring.gpg`, the fonts), your videos, and any rule
+in your provider's firewall. `pipx uninstall` removes vpstream's own
+folder; pipx's (`/opt/pipx`, shared by everything installed this way) and root's pip cache
+stay.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `vpstream start --file F` / `--dir D` | Starts a stream of one video, or of a folder's videos |
+| `vpstream start --file F`, `vpstream start --dir D` | Starts a stream of one video, or of a folder's videos (`--mode`, `--alias`, `--ttl`, `--policy`, `--audio`, `--sub`, `--http`, `--yes`; see Streaming) |
 | `vpstream ls [FOLDER]` | Lists a folder's videos (default `[media] folder`, `/srv/media`), their tracks and what is prepared |
-| `vpstream track-info FILE` | Lists a file's tracks with the numbers `--sub` and `--audio` take |
-| `vpstream prepare --file F` / `--dir D` | Makes the versions browser mode plays (`--sub 1,3`, `eng`, `none`) |
+| `vpstream track-info FILE` | Lists a file's tracks with the numbers `vpstream prepare --sub` and `vpstream start --audio` take |
+| `vpstream prepare --file F`, `vpstream prepare --dir D` | Makes the versions browser mode plays (`--sub 1,3`, `eng`, `none`; `--yes`; `--no-wait` queues it and returns) |
 | `vpstream prepared [rm PATH \| --stale \| --all \| cancel [PATH]]` | Lists, removes or cancels prepared versions |
-| `vpstream stop` / `status` | Stops the stream, or shows its addresses and state |
+| `vpstream stop` | Stops the stream and closes its port |
+| `vpstream status [--json]` | Shows the stream's addresses and state, the dashboard's address and the certificate |
 | `vpstream devices [enable\|disable DEVICE \| lock \| unlock]` | Who asked for the stream, and who gets in (a device is an address, or a browser's id) |
-| `vpstream clients [set DEVICE... \| --all]` | Browser mode: where each browser is, and `--audio`, `--sub`, `--seek`, `--start-at`, `--name` for them |
+| `vpstream clients [set DEVICE... \| --all]` | Browser mode: where each browser is, and `--audio`, `--sub`, `--seek`, `--start-at` (with `--video` in a folder), `--name` for them |
 | `vpstream alias NAME` | Changes the short name in the address |
 | `vpstream revoke` | Takes back file access a stream that ended by itself left behind |
 | `vpstream doctor` | Checks this host |
-| `sudo vpstream init` / `uninstall` | Sets the service up, or removes it (`--purge` also the cache) |
-| `sudo vpstream init --no-tailscale` / `--tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
-| `sudo vpstream init --https` / `--no-https` | Serves streams over HTTPS with a Let's Encrypt certificate for the address, or over plain HTTP again |
-| `sudo vpstream dash-pass` | Sets a new password for the public dashboard (logs every browser out; a stream goes on) |
+| `sudo vpstream init` | Sets the service up, or again after an upgrade or a change of the configuration |
+| `sudo vpstream uninstall [--purge] [--yes]` | Removes it (see Uninstall) |
+| `sudo vpstream init --no-tailscale`, `sudo vpstream init --tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
+| `sudo vpstream init --https`, `sudo vpstream init --no-https` | Serves streams over HTTPS with a Let's Encrypt certificate for the address, or over plain HTTP again |
+| `sudo vpstream dash-pass [--dash-pass-file FILE]` | Sets a new password for the public dashboard (logs every browser out; a stream goes on) |
 | `vpstream dash-unblock` | Forgets the public dashboard's failed logins, to log in from a new browser |
 | `vpstream dashboard-cert` | Prints the public dashboard's certificate authority, to install on your phone |
-| `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles |
-| `vpstream caps` | Serves a page that tests what a TV browser can play |
-| `vpstream install ffmpeg` / `update ffmpeg` | Installs or updates a current static ffmpeg build |
-| `vpstream install caddy` / `update caddy` | Installs or updates the newest Caddy from Caddy's own apt repository (Debian, Ubuntu, Raspbian) |
+| `vpstream bench FILE` | Measures how fast this host copies, transcodes and burns in subtitles (`--sample`, `--presets`, `--sub`, `--json`, `--tmp`, `--no-nice`) |
+| `vpstream caps` | Serves a page that tests what a TV browser can play (`--host`, `--port`, `--ttl`, `--out`, `--clips`, `--regen`) |
+| `vpstream install ffmpeg`, `vpstream update ffmpeg` | Installs or updates a current static ffmpeg build |
+| `vpstream install caddy`, `vpstream update caddy` | Installs or updates the newest Caddy from Caddy's own apt repository (Debian, Ubuntu, Raspbian) |
 | `vpstream selftest [--integration]` | Runs the tests shipped with the package |
 
 ## Streaming
@@ -76,7 +132,8 @@ vpstream stop
   mkvtoolnix the file is served as it is.
 - **Safety:** Caddy runs only while a stream does and asks the daemon about every request.
   Stop, the time limit and stopping the service close the port; after a crash the stream is
-  taken up again, never after a reboot. The stream is plain HTTP.
+  taken up again, never after a reboot. The stream is plain HTTP unless HTTPS is on (see
+  HTTPS for streams).
 
 ## Browser mode
 
@@ -114,11 +171,21 @@ vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
 
 ## Configuration
 
-`/etc/vpstream/config.toml`: `port` (1337) and `host` (the address shown in URLs) under
-`[stream]`, `port` (1338) under `[dashboard]`, and `copy_speed` and `encode_speed` under
-`[prepare]` for the time estimates (`vpstream bench FILE` prints the values for this host), and
-`folder` under `[media]`, the folder `vpstream ls` lists by default (`/srv/media`).
-Restart the service after a change.
+`/etc/vpstream/config.toml`, written by `init` with every setting explained:
+
+- `[stream]`: `port` (1337), `host` (the address shown in URLs; found by itself when left
+  out) and `https` (false; set by `init --https` and `--no-https`).
+- `[dashboard]`: `port` (1338) and `public` (false; set by `init --no-tailscale` and
+  `--tailscale`).
+- `[prepare]`: `copy_speed` and `encode_speed`, for the time estimates (`vpstream bench FILE`
+  prints the values for this host).
+- `[media]`: `folder`, what `vpstream ls` lists by default (`/srv/media`).
+- `[acme]`: `ca`, `ca_root` and `port`, another certificate authority for trying HTTPS out
+  (see HTTPS for streams).
+
+An unknown setting or a wrong value is an error that names it; `vpstream doctor` shows it.
+Restart the service after a change (`sudo systemctl restart vpstream`); after changing the
+dashboard port, run `sudo vpstream init`, which publishes the new one.
 
 The dashboard listens on `127.0.0.1` and `init` publishes it with `tailscale serve` at
 `https://<tailnet name>:1338/`. The stream port is opened and closed by a small root helper,
@@ -174,6 +241,31 @@ newer, for ACME profiles; Ubuntu 24.04 has 2.6.2, so run `vpstream install caddy
 - **Cookie:** over HTTPS the approval cookie is `Secure`.
 - **Trying it out:** `[acme] ca` sets another authority, such as Let's Encrypt's staging
   server or a local Pebble (with `ca_root` and `port`), so no real limit is spent.
+
+## Troubleshooting
+
+- **First look:** `vpstream doctor` (each problem with its fix), `vpstream status`, and
+  `sudo journalctl -u vpstream -n 50 --no-pager`.
+- **`no permission to use /run/vpstream/daemon.sock`:** log out and in again after the
+  first `init`, which added you to the `vpstream` group.
+- **`the vpstream daemon is not running`:** `systemctl status vpstream` and the journal say
+  why; `sudo vpstream init` sets it up again.
+- **`init` refuses the install:** a per-user `pipx install` cannot be used by the service;
+  install it system-wide as shown in Install.
+- **A stream starts but nobody gets in from outside:** open the stream port (1337/tcp) in
+  your provider's firewall too; ufw is opened by vpstream only while a stream runs.
+- **`start` cannot read a video:** it says who can give the service access and how
+  (`setfacl`); a stream that ended on its own leaves that access behind until
+  `vpstream revoke`.
+- **HTTPS: `no HTTPS certificate for the stream`:** most often port 80 is blocked in the
+  provider's firewall, or Let's Encrypt's limit is reached (5 certificates a week for an
+  address, 5 failed checks an hour). The request's log is
+  `/var/lib/vpstream/caddy/certificate/caddy.log`. `vpstream start --http` meanwhile.
+- **`GitHub's API limit for this IP is used up`** (`vpstream install ffmpeg`): wait an hour,
+  or set `GITHUB_TOKEN` to a GitHub token, which is sent to GitHub's API only.
+- **Public dashboard, logins wait:** `vpstream dash-unblock` forgets the failed logins.
+- **Port 1337 still open after something went wrong:** `sudo systemctl restart vpstream`
+  closes it; the service also closes it after a crash or a reboot.
 
 ## Development
 
