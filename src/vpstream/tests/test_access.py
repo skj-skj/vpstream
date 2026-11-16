@@ -403,6 +403,7 @@ def test_entries_ask_getfacl_once_and_agree_with_entry(library: Path, real: Any)
     with_gone = [files[0], library / "nope", files[1]]
     assert access.entries(counting, with_gone, ME) == [4, None, None]
     assert sum(c[0] == "getfacl" for c in calls) == 4
+    assert access.entries(FakeRunner(()), files, ME) == [None] * 3  # no getfacl: nothing known
 
 
 def test_entry_reads_what_getfacl_prints() -> None:
