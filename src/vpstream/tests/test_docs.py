@@ -44,16 +44,16 @@ def subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentP
 
 
 def options(parser: argparse.ArgumentParser) -> set[str]:
-    return {o for a in parser._actions for o in a.option_strings if o.startswith("--")} - {
-        "--help"
-    }
+    return {o for a in parser._actions for o in a.option_strings if o.startswith("--")} - {"--help"}
 
 
 def choices(parser: argparse.ArgumentParser) -> set[str]:
     """The words the first positional argument takes, when it has a fixed list."""
     for action in parser._actions:
-        if not action.option_strings and action.choices and not isinstance(
-            action, argparse._SubParsersAction
+        if (
+            not action.option_strings
+            and action.choices
+            and not isinstance(action, argparse._SubParsersAction)
         ):
             return {str(c) for c in action.choices}
     return set()
@@ -67,6 +67,8 @@ def problems(text: str, parser: argparse.ArgumentParser) -> list[str]:
     shown_commands: set[str] = set()
     shown_options: set[str] = set()
     for snippet in code_snippets(text):
+        if not (_COMMAND.search(snippet) or snippet.lstrip().startswith("--")):
+            continue  # another program's command, such as journalctl's --no-pager
         shown_options.update(_OPTION.findall(snippet))
         for option in _OPTION.findall(snippet):
             if option not in every_option:
@@ -82,13 +84,13 @@ def problems(text: str, parser: argparse.ArgumentParser) -> list[str]:
             for option in _OPTION.findall(rest):
                 if option not in options(sub) | options(parser):
                     found.append(f"{snippet!r}: `vpstream {name}` has no {option}")
-            words = [w for w in re.split(r"[\s|\[\]]+", rest) if w]
+            first = next((w for w in re.split(r"[\s|\[\]]+", rest) if w), "")
             allowed = choices(sub)
-            if allowed and words and not (
-                words[0].startswith(("-", "/", "<")) or _PLACEHOLDER.fullmatch(words[0])
-            ):
-                if words[0] not in allowed:
-                    found.append(f"{snippet!r}: `vpstream {name}` takes no {words[0]!r}")
+            literal = first and not (
+                first.startswith(("-", "/", "<")) or _PLACEHOLDER.fullmatch(first)
+            )
+            if allowed and literal and first not in allowed:
+                found.append(f"{snippet!r}: `vpstream {name}` takes no {first!r}")
     for name in sorted(set(commands) - shown_commands - UNDOCUMENTED):
         found.append(f"the command `vpstream {name}` is not shown")
     for name, sub in sorted(commands.items()):
@@ -126,6 +128,7 @@ GOOD = """\
 ```text
 vpstream start --file /srv/film.mkv   # --nothing in a comment
 vpstream --version
+sudo journalctl -u vpstream --no-pager
 ```
 """
 
@@ -139,10 +142,14 @@ def test_a_readme_that_matches_has_no_problems() -> None:
     [
         (("--ttl MINUTES", "--tll MINUTES"), "no command has --tll"),
         (("start --file F", "start --file F --version --ttl"), None),
+        (("journalctl -u vpstream --no-pager", "vpstream doctor --no-pager"), "no command"),
         (("vpstream start --file F", "vpstream stat --file F"), "there is no command 'stat'"),
         (("devices [enable", "devices [enabel"), "takes no 'enabel'"),
         (("`--ttl MINUTES`", "`x`"), "`vpstream start --ttl` is not shown"),
-        (("`vpstream start --file F`", "`vpstream devices --file F`"), "`vpstream devices` has no --file"),
+        (
+            ("`vpstream start --file F`", "`vpstream devices --file F`"),
+            "`vpstream devices` has no --file",
+        ),
         (("| `vpstream devices [enable DEVICE \\| lock]` | who gets in |\n", ""), "devices"),
     ],
 )

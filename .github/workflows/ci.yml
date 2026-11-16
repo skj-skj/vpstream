@@ -122,31 +122,39 @@ jobs:
           cd /tmp && /tmp/venv/bin/vpstream --version && /tmp/venv/bin/vpstream selftest
 
   service:
-    # The real init and uninstall, on this throwaway machine: user, sudoers, systemd and ufw.
-    runs-on: ubuntu-latest
+    # A clean install on this throwaway machine, from nothing to a stream and back to nothing:
+    # pipx, doctor, install caddy and ffmpeg, selftest, the real init and uninstall (user,
+    # sudoers, systemd and ufw), uninstall --purge and pipx uninstall. 24.04 is what servers
+    # run; ubuntu-latest is the next release.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install build && python -m build --wheel
-      - name: Install ufw, pipx, Caddy and the ACL tools
+      - name: The prerequisites from apt, as in the README (Caddy and ffmpeg come later)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ufw pipx caddy acl
+          # The fonts are what `vpstream install ffmpeg` would add; apt packages stay after an
+          # uninstall, so they are part of the host before vpstream.
+          sudo apt-get install -y --no-install-recommends ufw pipx caddy acl mkvtoolnix \
+            fontconfig fonts-dejavu-core fonts-liberation fonts-noto-cjk
           sudo systemctl disable --now caddy   # the package's own web server is not used
-      - name: Install vpstream for the whole system
+      - name: Make the image's own sudoers files valid (24.04's has bad permissions for visudo)
         run: |
-          # Not under /opt as on a normal host: the runner's /opt carries a default ACL that
-          # makes everything in it writable by every user, and init rightly refuses that.
-          wheel="$(ls "$PWD"/dist/*.whl)"
-          sudo PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
-            /usr/bin/pipx install --python /usr/bin/python3 "${wheel}[dev]"
-          vpstream --version
+          sudo chmod 0440 /etc/sudoers.d/*
+          sudo visudo -c
       - name: Stand in for Tailscale (the runner is on no tailnet)
         run: sudo install -m 0755 scripts/ci-fake-tailscale /usr/local/bin/tailscale
-      - name: init, a stream, helper, restart, crash, uninstall
-        run: scripts/ci-service-check.sh
+      - name: From nothing to a stream and back to nothing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}   # GitHub's API limit, for install ffmpeg
+        run: scripts/ci-clean-install.sh "$(ls "$PWD"/dist/*.whl)"
 
   pr-title:
     if: github.event_name == 'pull_request'

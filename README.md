@@ -67,7 +67,9 @@ address). It asks first (`--yes` does not). Without `--purge` the prepared video
 `/var/cache/vpstream` stay; `--purge` removes them, and the ffmpeg `vpstream install ffmpeg`
 put in `/opt/vpstream-ffmpeg`. Left on the host: the apt packages you or `vpstream install`
 added (Caddy and its repository, `/etc/apt/sources.list.d/caddy-stable.list`, the fonts), your
-videos, and any rule in your provider's firewall.
+videos, and any rule in your provider's firewall. `pipx uninstall` removes vpstream's own
+folder; pipx's (`/opt/pipx`, shared by everything installed this way) and root's pip cache
+stay.
 
 ## Commands
 
