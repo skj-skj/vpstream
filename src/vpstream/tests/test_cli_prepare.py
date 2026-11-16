@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from vpstream import api, cli, client, probe, show
+from vpstream.tests.fakes import FakeDaemon
 from vpstream.tests.test_probe import SAMPLE
 
 PLAN = {
@@ -28,30 +29,6 @@ def job(id: int, state: str, progress: float = 0.0, error: str = "", **kw: Any) 
             "error": error, **kw}  # fmt: skip
 
 
-class Daemon:
-    """Answers each route from a script: a list of answers per route, the last one repeated.
-    An answer that is an exception is raised."""
-
-    def __init__(self, **routes: list[Any]) -> None:
-        self.routes = {"status": [{"stream": None, "prepare": []}], **routes}
-        self.calls: list[tuple[str, Any]] = []
-        self.timeouts: dict[str, Any] = {}
-
-    def __call__(
-        self, socket: Path, method: str, route: str, payload: Any = None, timeout: Any = None
-    ) -> Any:
-        self.calls.append((route, payload))
-        self.timeouts[route] = timeout
-        answers = self.routes[route]
-        answer = answers.pop(0) if len(answers) > 1 else answers[0]
-        if isinstance(answer, Exception):
-            raise answer
-        return answer(payload) if callable(answer) else answer
-
-    def posts(self, route: str) -> list[Any]:
-        return [p for r, p in self.calls if r == route]
-
-
 def confirm_first() -> client.DaemonRefused:
     data = {"error": "preparing takes longer than the film", "code": api.CONFIRM, "plans": [PLAN]}
     return client.DaemonRefused("the daemon refused: it takes long", data)
@@ -67,7 +44,7 @@ def quiet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     return revoked
 
 
-def use(monkeypatch: pytest.MonkeyPatch, daemon: Daemon) -> Daemon:
+def use(monkeypatch: pytest.MonkeyPatch, daemon: FakeDaemon) -> FakeDaemon:
     monkeypatch.setattr(client, "call", daemon)
     return daemon
 
@@ -86,7 +63,7 @@ def test_a_long_prepare_is_shown_and_asked_about(
 ) -> None:
     film = tmp_path / "film.mkv"
     done = {"plans": [{**PLAN, "longer_than_film": False}], "jobs": [4]}
-    d = use(monkeypatch, Daemon(
+    d = use(monkeypatch, FakeDaemon(
         prepare=[confirm_first(), done],
         status=[{"prepare": []}, {"prepare": [job(4, "running", 0.5)]},
                 {"prepare": [job(4, "done", 1.0)]}],
@@ -105,26 +82,26 @@ def test_a_long_prepare_is_shown_and_asked_about(
 def test_without_a_terminal_a_long_prepare_needs_yes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    d = use(monkeypatch, Daemon(prepare=[confirm_first()]))
+    d = use(monkeypatch, FakeDaemon(prepare=[confirm_first()]))
     tty(monkeypatch, None)
     assert cli.main(["prepare", "--file", "/m/film.mkv"]) == 1
     assert len(d.posts("prepare")) == 1
     captured = capsys.readouterr()
     assert "pass --yes" in captured.err and "Cancelled; nothing was changed." in captured.out
-    d = use(monkeypatch, Daemon(prepare=[confirm_first(), {"plans": [PLAN], "jobs": []}]))
+    d = use(monkeypatch, FakeDaemon(prepare=[confirm_first(), {"plans": [PLAN], "jobs": []}]))
     assert cli.main(["prepare", "--file", "/m/film.mkv", "--yes"]) == 0
     assert d.posts("prepare")[1]["confirmed"] is True
 
 
 def test_a_no_is_a_no(monkeypatch: pytest.MonkeyPatch) -> None:
-    d = use(monkeypatch, Daemon(prepare=[confirm_first()]))
+    d = use(monkeypatch, FakeDaemon(prepare=[confirm_first()]))
     tty(monkeypatch, "n")
     assert cli.main(["prepare", "--dir", "/m/show"]) == 1
     assert len(d.posts("prepare")) == 1
 
 
 def test_the_daemon_is_asked_only_once_more(monkeypatch: pytest.MonkeyPatch) -> None:
-    d = use(monkeypatch, Daemon(prepare=[confirm_first()]))  # refuses every time
+    d = use(monkeypatch, FakeDaemon(prepare=[confirm_first()]))  # refuses every time
     assert cli.main(["prepare", "--file", "/m/f.mkv", "--yes"]) == 1
     assert len(d.posts("prepare")) == 2
 
@@ -132,14 +109,14 @@ def test_the_daemon_is_asked_only_once_more(monkeypatch: pytest.MonkeyPatch) -> 
 def test_nothing_to_make(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    use(monkeypatch, Daemon(prepare=[{"plans": [{**PLAN, "tasks": []}], "jobs": []}]))
+    use(monkeypatch, FakeDaemon(prepare=[{"plans": [{**PLAN, "tasks": []}], "jobs": []}]))
     assert cli.main(["prepare", "--file", "/m/f.mkv"]) == 0
     out = capsys.readouterr().out
     assert "film.mkv (2h 00m): nothing to make" in out and "Nothing to make" in out
 
 
 def test_no_wait(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    d = use(monkeypatch, Daemon(prepare=[{"plans": [PLAN], "jobs": [1]}]))
+    d = use(monkeypatch, FakeDaemon(prepare=[{"plans": [PLAN], "jobs": [1]}]))
     assert cli.main(["prepare", "--file", "/m/f.mkv", "--no-wait"]) == 0
     assert "Queued" in capsys.readouterr().out
     assert [r for r, _ in d.calls].count("status") == 1  # the look before, none after
@@ -148,7 +125,7 @@ def test_no_wait(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[
 def test_a_failed_prepare_says_why_and_fails(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quiet: list[str]
 ) -> None:
-    use(monkeypatch, Daemon(
+    use(monkeypatch, FakeDaemon(
         prepare=[{"plans": [PLAN], "jobs": [1, 2]}],
         status=[{"prepare": []}, {"prepare": [job(2, "queued"), job(1, "failed", error="no room")]},
                 {"prepare": [job(2, "done"), job(1, "failed", error="no room")]}],
@@ -165,7 +142,7 @@ def test_ctrl_c_stops_the_showing_not_the_preparing(
     def interrupt(payload: Any) -> Any:
         raise KeyboardInterrupt
 
-    use(monkeypatch, Daemon(
+    use(monkeypatch, FakeDaemon(
         prepare=[{"plans": [PLAN], "jobs": [1]}],
         status=[{"prepare": []}, interrupt],
     ))  # fmt: skip
@@ -176,7 +153,7 @@ def test_ctrl_c_stops_the_showing_not_the_preparing(
 
 def test_relative_paths_are_made_whole(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
-    d = use(monkeypatch, Daemon(prepare=[{"plans": [], "jobs": []}]))
+    d = use(monkeypatch, FakeDaemon(prepare=[{"plans": [], "jobs": []}]))
     cli.main(["prepare", "--dir", "show"])
     assert d.posts("prepare")[0] == {"dir": str(tmp_path / "show")}
 
@@ -192,9 +169,9 @@ def test_stop_keeps_the_access_while_prepares_run(
     monkeypatch: pytest.MonkeyPatch, quiet: list[str]
 ) -> None:
     stopped = {**busy_status(), "stream_port": 1337, "stream_port_state": "closed"}
-    use(monkeypatch, Daemon(**{"stream/stop": [stopped]}))
+    use(monkeypatch, FakeDaemon(**{"stream/stop": [stopped]}))
     assert cli.main(["stop"]) == 0 and quiet == []
-    use(monkeypatch, Daemon(**{"stream/stop": [{**stopped, "prepare": [job(1, "done")]}]}))
+    use(monkeypatch, FakeDaemon(**{"stream/stop": [{**stopped, "prepare": [job(1, "done")]}]}))
     assert cli.main(["stop"]) == 0 and quiet == ["revoke"]
 
 
@@ -202,7 +179,7 @@ def test_stop_without_a_stream_still_looks_at_the_prepares(
     monkeypatch: pytest.MonkeyPatch, quiet: list[str]
 ) -> None:
     refused = client.DaemonRefused("the daemon refused: no stream is running", {})
-    use(monkeypatch, Daemon(**{"stream/stop": [refused]}, status=[busy_status()]))
+    use(monkeypatch, FakeDaemon(**{"stream/stop": [refused]}, status=[busy_status()]))
     cli.main(["stop"])
     assert quiet == []
 
@@ -210,7 +187,7 @@ def test_stop_without_a_stream_still_looks_at_the_prepares(
 def test_revoke_waits_for_the_prepares(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quiet: list[str]
 ) -> None:
-    use(monkeypatch, Daemon(status=[busy_status()]))
+    use(monkeypatch, FakeDaemon(status=[busy_status()]))
     assert cli.main(["revoke"]) == 1 and quiet == []
     assert "being prepared" in capsys.readouterr().err
 
@@ -219,7 +196,7 @@ def test_start_does_not_take_back_what_a_prepare_reads(
     monkeypatch: pytest.MonkeyPatch, quiet: list[str]
 ) -> None:
     started = {"stream": {"alias": "aaa", "videos": [], "url": "u"}, "prepare": [], "dashboard": {}}
-    use(monkeypatch, Daemon(status=[busy_status()], **{"stream/start": [started]}))
+    use(monkeypatch, FakeDaemon(status=[busy_status()], **{"stream/start": [started]}))
     assert cli.main(["start", "--file", "/m/film.mkv"]) == 0 and quiet == []
 
 
@@ -237,7 +214,7 @@ def test_a_browser_start_that_must_transcode_asks_and_shows_the_copy(
               "url": "http://h/aaa", "videos": [video]}  # fmt: skip
     started = {"stream": stream, "prepare": [job(3, "running", 0.25)], "dashboard": {},
                "jobs": [3]}  # fmt: skip
-    d = use(monkeypatch, Daemon(
+    d = use(monkeypatch, FakeDaemon(
         **{"stream/start": [confirm_first(), started]},
         status=[{"stream": None, "prepare": []}, {"prepare": [job(3, "done", 1.0)]}],
     ))  # fmt: skip
@@ -256,7 +233,7 @@ def test_a_browser_start_that_must_transcode_asks_and_shows_the_copy(
 
 
 def follow(monkeypatch: pytest.MonkeyPatch, ids: list[int], *statuses: dict[str, Any]) -> int:
-    use(monkeypatch, Daemon(
+    use(monkeypatch, FakeDaemon(
         prepare=[{"plans": [], "jobs": ids, "prepare_run": "r1"}],
         status=[{"prepare": [], "prepare_run": "r1"}, *statuses],
     ))  # fmt: skip
@@ -299,11 +276,11 @@ def test_a_cancelled_job_is_not_a_success(monkeypatch: pytest.MonkeyPatch) -> No
 def test_when_the_access_is_kept_the_command_says_how_to_take_it_back(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    use(monkeypatch, Daemon(prepare=[{"plans": [PLAN], "jobs": [1]}]))
+    use(monkeypatch, FakeDaemon(prepare=[{"plans": [PLAN], "jobs": [1]}]))
     cli.main(["prepare", "--file", "/m/f.mkv", "--no-wait"])
     assert "vpstream revoke" in capsys.readouterr().out
     stopped = {**busy_status(), "stream_port": 1337, "stream_port_state": "closed"}
-    use(monkeypatch, Daemon(**{"stream/stop": [stopped]}))
+    use(monkeypatch, FakeDaemon(**{"stream/stop": [stopped]}))
     cli.main(["stop"])
     assert "vpstream revoke" in capsys.readouterr().out
 
@@ -330,7 +307,7 @@ def test_prepared_lists_the_cache_and_the_prepares(
          "base": "copy", "soft": [], "burn": [], "bytes": 1e6, "in_use": False, "busy": False},
     ]  # fmt: skip
     jobs = [job(1, "failed", error="x"), job(2, "done")]
-    use(monkeypatch, Daemon(prepared=[{"prepared": rows}], status=[{"prepare": jobs}]))
+    use(monkeypatch, FakeDaemon(prepared=[{"prepared": rows}], status=[{"prepare": jobs}]))
     assert cli.main(["prepared"]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].split() == ["BASE", "SOFT", "BURNED", "IN", "SIZE", "SOURCE"]
@@ -345,7 +322,7 @@ def test_prepared_lists_the_cache_and_the_prepares(
 def test_nothing_prepared(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    use(monkeypatch, Daemon(prepared=[{"prepared": []}]))
+    use(monkeypatch, FakeDaemon(prepared=[{"prepared": []}]))
     assert cli.main(["prepared", "list"]) == 0
     assert capsys.readouterr().out.strip() == "Nothing is prepared."
 
@@ -360,7 +337,7 @@ def test_nothing_prepared(
 def test_prepared_rm(
     monkeypatch: pytest.MonkeyPatch, argv: list[str], payload: dict[str, Any]
 ) -> None:
-    d = use(monkeypatch, Daemon(**{"prepared/rm": [{"removed": 2, "kept": ["/m/a.mkv"]}]}))
+    d = use(monkeypatch, FakeDaemon(**{"prepared/rm": [{"removed": 2, "kept": ["/m/a.mkv"]}]}))
     assert cli.main(["prepared", *argv]) == 0
     assert d.posts("prepared/rm") == [payload]
 
@@ -371,7 +348,7 @@ def test_prepared_rm_of_a_path_follows_links_like_the_daemon_did(
     real = tmp_path / "real"
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    d = use(monkeypatch, Daemon(**{"prepared/rm": [{"removed": 1, "kept": ["/m/x.mkv"]}]}))
+    d = use(monkeypatch, FakeDaemon(**{"prepared/rm": [{"removed": 1, "kept": ["/m/x.mkv"]}]}))
     assert cli.main(["prepared", "rm", str(tmp_path / "link")]) == 0
     assert d.posts("prepared/rm") == [{"path": str(real)}]
     out = capsys.readouterr().out
@@ -380,12 +357,12 @@ def test_prepared_rm_of_a_path_follows_links_like_the_daemon_did(
 
 @pytest.mark.parametrize("argv", [["rm"], ["rm", "--stale", "--all"]])
 def test_prepared_rm_needs_one_choice(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
-    d = use(monkeypatch, Daemon())
+    d = use(monkeypatch, FakeDaemon())
     assert cli.main(["prepared", *argv]) == 2 and d.calls == []
 
 
 def test_prepared_rm_all_asks_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    d = use(monkeypatch, Daemon())
+    d = use(monkeypatch, FakeDaemon())
     tty(monkeypatch, "n")
     assert cli.main(["prepared", "rm", "--all"]) == 1 and d.calls == []
 
@@ -393,7 +370,7 @@ def test_prepared_rm_all_asks_first(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_prepared_cancel(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    d = use(monkeypatch, Daemon(**{"prepare/cancel": [{"cancelled": 3}]}))
+    d = use(monkeypatch, FakeDaemon(**{"prepare/cancel": [{"cancelled": 3}]}))
     assert cli.main(["prepared", "cancel"]) == 0
     assert d.posts("prepare/cancel") == [{"path": None}]
     assert "Cancelled 3 prepares." in capsys.readouterr().out
@@ -460,9 +437,9 @@ def test_video_states(video: dict[str, Any], mark: str) -> None:
 def test_start_waits_long_enough_for_a_certificate(monkeypatch: pytest.MonkeyPatch) -> None:
     from vpstream import client
 
-    d = use(monkeypatch, Daemon(prepare=[{"plans": [], "jobs": []}]))
+    d = use(monkeypatch, FakeDaemon(prepare=[{"plans": [], "jobs": []}]))
     cli.main(["prepare", "--file", "/m/f.mkv"])
     assert d.timeouts["prepare"] is None  # the usual wait
-    d = use(monkeypatch, Daemon(**{"stream/start": [{"stream": None}]}, status=[{}]))
+    d = use(monkeypatch, FakeDaemon(**{"stream/start": [{"stream": None}]}, status=[{}]))
     cli.main(["start", "--file", "/m/f.mkv"])
     assert d.timeouts["stream/start"] == client.START_TIMEOUT
