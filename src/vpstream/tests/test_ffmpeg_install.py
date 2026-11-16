@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tarfile
+import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -547,3 +548,26 @@ def test_real_ffmpeg_install(tmp_path: Path) -> None:
     assert setup.run(update=True) == f"ffmpeg {version} is already the newest stable build"
     # Installed as root: a normal user cannot change it.
     assert (layout.install_dir / "bin" / "ffmpeg").stat().st_uid == 0
+
+
+@pytest.mark.parametrize(
+    ("url", "sent"),
+    [
+        ("https://api.github.com/repos/x/y/releases", True),
+        ("https://github.com/x/y/releases/download/a/b.tar.xz", False),
+        ("https://api.github.com.example/x", False),
+    ],
+)
+def test_a_github_token_goes_to_the_api_only(
+    monkeypatch: pytest.MonkeyPatch, url: str, sent: bool
+) -> None:
+    seen: list[urllib.request.Request] = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: seen.append(req))
+    monkeypatch.setenv(si.TOKEN_ENV, "secret")
+    si.UrlHttp()._open(url)
+    (req,) = seen
+    assert req.unredirected_hdrs.get("Authorization") == ("Bearer secret" if sent else None)
+    assert "Authorization" not in req.headers  # never passed on to a redirect
+    monkeypatch.delenv(si.TOKEN_ENV)
+    si.UrlHttp()._open(url)
+    assert "Authorization" not in seen[1].unredirected_hdrs

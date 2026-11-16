@@ -908,7 +908,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     from vpstream import service
 
     what = "the vpstream service, its user, configuration and state"
-    what += ", and every prepared video" if args.purge else ""
+    what += ", every prepared video and the ffmpeg it installed" if args.purge else ""
     if os.geteuid() == 0 and not args.yes:
         if not sys.stdin.isatty():
             return _error("no terminal to ask on; pass --yes to proceed", 2)
@@ -1032,7 +1032,11 @@ def build_parser() -> argparse.ArgumentParser:
         "dash-unblock", help="forget the public dashboard's failed logins, to log in again"
     ).set_defaults(func=cmd_dash_unblock)
     un = sub.add_parser("uninstall", help="remove what init created (as root)")
-    un.add_argument("--purge", action="store_true", help="also remove the prepared videos")
+    un.add_argument(
+        "--purge",
+        action="store_true",
+        help="also remove the prepared videos and the ffmpeg `vpstream install ffmpeg` put in",
+    )
     un.add_argument("--yes", action="store_true", help="do not ask first")
     un.set_defaults(func=cmd_uninstall)
 

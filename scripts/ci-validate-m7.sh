@@ -29,10 +29,23 @@ sudo install -m 0755 scripts/ci-fake-tailscale /usr/local/bin/tailscale
 snap /tmp/snap-0.txt
 wc -l /tmp/snap-0.txt
 
+step "pipx: which one, and what sudo passes on"
+ls -la /usr/bin/pipx /usr/local/bin/pipx; /usr/bin/pipx --version; head -5 /usr/local/bin/pipx
+env | grep -i pipx; grep -i pipx /etc/environment /etc/profile.d/* 2>/dev/null
+sudo PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin env | grep -i pipx
+sudo grep -rh -i -E "env_keep|secure_path|setenv" /etc/sudoers /etc/sudoers.d 2>/dev/null
+sudo PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin /usr/bin/pipx environment 2>&1 | head -20
+
 step "pipx install for the whole system"
 wheel="$(ls "$PWD"/dist/*.whl)"
 sudo PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
   /usr/bin/pipx install --python /usr/bin/python3 "${wheel}[dev]"
+if ! [ -e /usr/local/bin/vpstream ]; then
+  echo "!! PIPX_HOME was not used; again with env, after removing that install"
+  sudo /usr/bin/pipx uninstall vpstream
+  sudo env PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin \
+    /usr/bin/pipx install --python /usr/bin/python3 "${wheel}[dev]"
+fi
 vpstream --version
 ls -la /usr/local/bin
 snap /tmp/snap-1.txt; diff /tmp/snap-0.txt /tmp/snap-1.txt | grep -v '/srv/vpstream-pipx/' | head -40
@@ -55,7 +68,7 @@ sg vpstream -c "vpstream stop"
 sudo rm -r /srv/m7
 
 step "vpstream install ffmpeg (the real build)"
-vpstream install ffmpeg --yes; echo "install exit $?"
+GITHUB_TOKEN="$GH_TOKEN" vpstream install ffmpeg --yes; echo "install exit $?"
 ls -la /usr/local/bin /opt/vpstream-ffmpeg /opt/vpstream-ffmpeg/bin
 cat /opt/vpstream-ffmpeg/vpstream-build.json
 command -v ffmpeg; readlink -f "$(command -v ffmpeg)"
@@ -73,7 +86,7 @@ done
 sudo rm -rf /opt/vpstream-ffmpeg
 
 step "pipx uninstall"
-sudo PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin /usr/bin/pipx uninstall vpstream
+sudo env PIPX_HOME=/srv/vpstream-pipx PIPX_BIN_DIR=/usr/local/bin /usr/bin/pipx uninstall vpstream
 echo "pipx uninstall exit $?"
 sudo find /srv/vpstream-pipx 2>/dev/null | head -20
 snap /tmp/snap-4.txt

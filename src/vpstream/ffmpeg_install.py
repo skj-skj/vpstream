@@ -67,6 +67,28 @@ class Layout:
     install_dir: Path = Path("/opt/vpstream-ffmpeg")
     bin_dir: Path = Path("/usr/local/bin")
 
+    @property
+    def staging_dir(self) -> Path:
+        """Where a new build is copied before it takes the place of the old one."""
+        return self.install_dir.with_name(self.install_dir.name + ".new")
+
+    def links(self) -> list[Path]:
+        """The programs in bin_dir that are links into install_dir: what vpstream put there."""
+        home = Path(os.path.realpath(self.install_dir))
+        return [
+            link
+            for link in (self.bin_dir / prog for prog in PROGRAMS)
+            if link.is_symlink() and Path(os.path.realpath(link)).is_relative_to(home)
+        ]
+
+    @classmethod
+    def under(cls, root: Path) -> Layout:
+        default = cls()
+        return cls(
+            install_dir=root / default.install_dir.relative_to("/"),
+            bin_dir=root / default.bin_dir.relative_to("/"),
+        )
+
 
 def version_key(version: str) -> tuple[int, ...] | None:
     """(major, minor, patch, commits since the tag) from a version such as n9.0.2-48-g1a2b."""
@@ -436,7 +458,7 @@ class Setup:
 
     def _place(self, staged: Path) -> None:
         target = self.layout.install_dir
-        new = target.with_name(target.name + ".new")
+        new = self.layout.staging_dir
         self.progress(f"installing to {target}")
         self._system("mkdir", "-p", target.parent, what="creating the install folder")
         self._system("rm", "-rf", new, what="clearing an old partial install")

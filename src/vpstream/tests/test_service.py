@@ -370,6 +370,44 @@ def test_uninstall_keeps_prepared_videos_unless_purged(setup: Setup) -> None:
     assert setup.files() == [] and not setup.layout.paths.cache_dir.exists()
 
 
+def _installed_ffmpeg(setup: Setup) -> tuple[Path, Path]:
+    """What `vpstream install ffmpeg` leaves: its folder, a partial new build, two links."""
+    ff = setup.layout.ffmpeg
+    for folder in (ff.install_dir, ff.staging_dir):
+        (folder / "bin").mkdir(parents=True)
+        (folder / "bin" / "ffmpeg").write_text("elf")
+    (ff.install_dir / "bin" / "ffprobe").write_text("elf")
+    ff.bin_dir.mkdir(parents=True)
+    for prog in ("ffmpeg", "ffprobe"):
+        (ff.bin_dir / prog).symlink_to(ff.install_dir / "bin" / prog)
+    return ff.install_dir, ff.bin_dir
+
+
+def test_uninstall_purge_removes_the_ffmpeg_vpstream_installed(setup: Setup) -> None:
+    folder, bin_dir = _installed_ffmpeg(setup)
+    (bin_dir / "caddy").write_text("someone else's")  # never ours
+    setup.service().init()
+    setup.service().uninstall()
+    assert (bin_dir / "ffmpeg").is_symlink() and folder.is_dir()  # kept without --purge
+    setup.service().uninstall(purge=True)
+    assert not folder.exists() and not setup.layout.ffmpeg.staging_dir.exists()
+    assert sorted(p.name for p in bin_dir.iterdir()) == ["caddy"]
+    assert f"{bin_dir / 'ffprobe'}: removed" in setup.said
+
+
+def test_uninstall_purge_leaves_an_ffmpeg_that_is_not_vpstreams(setup: Setup) -> None:
+    other = setup.root / "usr/bin"
+    other.mkdir(parents=True)
+    (other / "ffmpeg").write_text("apt's")
+    bin_dir = setup.layout.ffmpeg.bin_dir
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "ffmpeg").symlink_to(other / "ffmpeg")
+    (bin_dir / "ffprobe").write_text("built by hand")
+    setup.service().uninstall(purge=True)
+    assert (bin_dir / "ffmpeg").is_symlink() and (other / "ffmpeg").read_text() == "apt's"
+    assert (bin_dir / "ffprobe").read_text() == "built by hand"
+
+
 def test_a_changed_dashboard_port_moves_the_published_port(setup: Setup) -> None:
     setup.service().init()
     setup.layout.paths.config_file.write_text("[dashboard]\nport = 4000\n")

@@ -28,7 +28,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from vpstream import caddy, certificate, client, config, doctor, firewall, login, net, tailscale
+from vpstream import (
+    caddy,
+    certificate,
+    client,
+    config,
+    doctor,
+    ffmpeg_install,
+    firewall,
+    login,
+    net,
+    tailscale,
+)
 from vpstream.files import write_atomic
 from vpstream.tools import Result, Runner, tail
 
@@ -65,6 +76,7 @@ class Layout:
     paths: config.Paths = field(default_factory=config.Paths)
     unit_file: Path = Path("/etc/systemd/system") / UNIT
     sudoers_file: Path = Path("/etc/sudoers.d/vpstream")
+    ffmpeg: ffmpeg_install.Layout = field(default_factory=ffmpeg_install.Layout)
 
     @property
     def etc_dir(self) -> Path:
@@ -81,6 +93,7 @@ class Layout:
             paths=config.Paths.under(root),
             unit_file=root / default.unit_file.relative_to("/"),
             sudoers_file=root / default.sudoers_file.relative_to("/"),
+            ffmpeg=ffmpeg_install.Layout.under(root),
         )
 
 
@@ -700,7 +713,21 @@ class Service:
             self.say(
                 f"{cache}: kept (prepared videos). Remove it with: sudo vpstream uninstall --purge"
             )
+        if purge:
+            self._remove_ffmpeg()
         self.say("vpstream is removed from this host.")
+
+    def _remove_ffmpeg(self) -> None:
+        """The ffmpeg `vpstream install ffmpeg` put in: its links and its folder. The apt
+        packages it added (fonts) or replaced stay, as they may serve other programs."""
+        ff = self.layout.ffmpeg
+        for link in ff.links():
+            link.unlink()
+            self.say(f"{link}: removed")
+        for folder in (ff.install_dir, ff.staging_dir):
+            if folder.exists() or folder.is_symlink():
+                _remove_tree(folder)
+                self.say(f"{folder}: removed (the ffmpeg vpstream installed)")
 
 
 def _remove_tree(path: Path) -> None:
