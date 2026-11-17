@@ -141,6 +141,8 @@ def _make_server(
     device every thread."""
     from werkzeug.serving import WSGIRequestHandler, make_server
 
+    deadlines = _Deadlines(REQUEST_SECONDS) if exposed else None
+
     class Handler(WSGIRequestHandler):
         timeout = REQUEST_SECONDS if exposed else None
 
@@ -148,12 +150,64 @@ def _make_server(
             if self.command not in ("GET", "HEAD"):
                 super().log_request(code, size)
 
+        def handle_one_request(self) -> None:
+            # The request line and the headers must come within one deadline, however
+            # slowly they trickle in: the socket's timeout starts again with every byte.
+            if deadlines is not None:
+                deadlines.arm(self.connection)
+            super().handle_one_request()
+
+        def parse_request(self) -> bool:
+            done = super().parse_request()
+            if deadlines is not None:
+                deadlines.disarm(self.connection)
+            return done
+
+        def finish(self) -> None:
+            if deadlines is not None:
+                deadlines.disarm(self.connection)
+            super().finish()
+
     server = make_server(
         host, port, app, threaded=True, request_handler=Handler, fd=listener.fileno()
     )
     if exposed:
         _bound_threads(server, EXPOSED_THREADS, PER_ADDRESS)
     return server
+
+
+class _Deadlines:
+    """Connections whose request must be read by a time; one thread closes those that are
+    not, so a client that sends a byte now and then cannot keep its slot."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._due: dict[socket.socket, float] = {}
+        self._lock = threading.Lock()
+        self._watcher: threading.Thread | None = None
+
+    def arm(self, conn: socket.socket) -> None:
+        with self._lock:
+            self._due[conn] = time.monotonic() + self.seconds
+            if self._watcher is None:
+                self._watcher = threading.Thread(target=self._watch, daemon=True)
+                self._watcher.start()
+
+    def disarm(self, conn: socket.socket) -> None:
+        with self._lock:
+            self._due.pop(conn, None)
+
+    def _watch(self) -> None:
+        while True:
+            time.sleep(min(1.0, self.seconds / 4))
+            now = time.monotonic()
+            with self._lock:
+                late = [conn for conn, due in self._due.items() if due <= now]
+                for conn in late:
+                    del self._due[conn]
+            for conn in late:  # the read it waits in ends, and so does its thread
+                with contextlib.suppress(OSError):
+                    conn.shutdown(socket.SHUT_RDWR)
 
 
 BUSY = b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 0\r\n" + (

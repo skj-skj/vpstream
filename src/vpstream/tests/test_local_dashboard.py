@@ -266,7 +266,7 @@ def test_held_connections_cannot_take_every_thread(
             conn.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")  # and never the end of it
             held.append(conn)
         time.sleep(0.3)
-        assert threading.active_count() - before <= daemon.PER_ADDRESS + 1
+        assert threading.active_count() - before <= daemon.PER_ADDRESS + 2  # and the watcher
         held[-1].settimeout(5)
         assert held[-1].recv(64).startswith(b"HTTP/1.1 503")
         time.sleep(1.5)  # the held ones time out
@@ -293,4 +293,37 @@ def test_the_dashboard_serves_an_ipv6_local_address(
         assert run.daemon.status()["dashboard"]["url"] == f"http://[::1]:{port}/"
         assert _get("::1", port, "/api/v1/status")[0] == 401
     finally:
+        run.close()
+
+
+def test_a_request_that_trickles_in_is_closed_all_the_same(
+    short_tmp: Path, here: Here, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The socket's timeout starts again with every byte: a client that sends one now and
+    then would keep its slot without end. The request must be read within one deadline."""
+    import socket
+
+    from vpstream import daemon
+
+    monkeypatch.setattr(daemon, "REQUEST_SECONDS", 1.0)
+    run = _running(short_tmp).start()
+    try:
+        port = run.daemon.config.dashboard_port
+        _wait(lambda: run.daemon.lan_address, "lan up", run)
+        conn = socket.create_connection((LAN, port), timeout=5)
+        started = time.monotonic()
+        closed = False
+        try:
+            for byte in b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: " + b"a" * 40:
+                conn.sendall(bytes([byte]))
+                time.sleep(0.3)  # well inside the socket's timeout each time
+        except OSError:
+            closed = True
+        if not closed:
+            conn.settimeout(3)
+            closed = conn.recv(64) == b""
+        assert closed and time.monotonic() - started < 5
+        assert _get(LAN, port, "/api/v1/status")[0] == 401  # and the others are served
+    finally:
+        conn.close()
         run.close()

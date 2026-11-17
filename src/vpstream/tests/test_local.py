@@ -90,6 +90,36 @@ def test_the_wifi_is_found_when_a_vpn_or_mobile_data_has_the_route(
         local.find()
 
 
+@pytest.mark.parametrize(
+    ("outgoing", "found"),
+    [
+        ("100.101.102.103", [("tun0", "100.101.102.103"), ("rmnet_data0", "10.45.3.2")]),
+        ("", [("tun0", "10.8.0.6")]),  # no route; an OpenVPN tunnel's 10.x
+        ("10.45.3.2", [("rmnet_data0", "10.45.3.2")]),  # the carrier hands out a 10.x itself
+        ("10.45.3.2", [("ccmni0", "10.45.3.2"), ("wwan0", "10.1.1.1")]),
+    ],
+)
+def test_a_carrier_or_vpn_private_address_is_no_local_network(
+    monkeypatch: pytest.MonkeyPatch, outgoing: str, found: list[tuple[str, str]]
+) -> None:
+    monkeypatch.setattr(local.net, "outgoing_address", lambda: outgoing)
+    monkeypatch.setattr(local, "is_mine", lambda address: True)
+    monkeypatch.setattr(local, "interface_addresses", lambda: found)
+    with pytest.raises(local.LocalError):
+        local.find()
+
+
+def test_a_private_address_on_wifi_wire_or_bridge_is_taken(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local, "is_mine", lambda address: True)
+    for name in ("wlan0", "wlp3s0", "eth0", "enp2s0", "br0"):
+        monkeypatch.setattr(local.net, "outgoing_address", lambda: "10.0.0.7")
+        monkeypatch.setattr(local, "interface_addresses", lambda n=name: [(n, "10.0.0.7")])
+        assert local.find() == "10.0.0.7", name
+    monkeypatch.setattr(local, "interface_addresses", lambda: [])  # where they cannot be told
+    assert local.find() == "10.0.0.7"
+    assert local.find("10.45.3.2") == "10.45.3.2"  # one set by hand is the owner's choice
+
+
 def test_interface_addresses_of_this_host() -> None:
     found = dict(local.interface_addresses())
     assert found.get("lo") == "127.0.0.1"  # SIOCGIFCONF works here, without root

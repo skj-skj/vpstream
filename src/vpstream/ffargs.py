@@ -119,13 +119,13 @@ def keyframe_args() -> list[str]:
 
 
 def thread_args(s: EncodeSettings) -> list[str]:
-    """With a bound (`threads`): the global options that hold the first input's decoder and
-    the filters to it, as the encoder is (see h264_video_args). Go right after the
-    program."""
+    """With a bound (`threads`): what holds the first input's decoder and a filter_complex
+    (burned-in subtitles) to it. Go right after the program. A -vf filter is bounded among
+    the output's options, where ffmpeg 7 and later read -filter_threads (h264_video_args)."""
     if not s.threads:
         return []
     n = str(s.threads)
-    return ["-threads", n, "-filter_threads", n, "-filter_complex_threads", n]
+    return ["-threads", n, "-filter_complex_threads", n]
 
 
 def h264_video_args(s: EncodeSettings) -> list[str]:
@@ -145,7 +145,7 @@ def h264_video_args(s: EncodeSettings) -> list[str]:
         "-pix_fmt",
         "yuv420p",
         *keyframe_args(),
-        *(["-threads", str(s.threads)] if s.threads else []),
+        *(["-threads", str(s.threads), "-filter_threads", str(s.threads)] if s.threads else []),
     ]
 
 

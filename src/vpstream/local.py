@@ -91,7 +91,9 @@ def is_mine(address: str) -> bool:
 
 _IFREQ = 40 if struct.calcsize("P") == 8 else 32  # struct ifreq: a name and a union
 _SIOCGIFCONF = 0x8912
-_LOCAL_FIRST = ("wlan", "eth", "en", "wl")  # Wi-Fi and wired before anything else
+# Wi-Fi, wired and bridges: the interfaces of a local network. A carrier's (rmnet, wwan,
+# ccmni) or a VPN's (tun, wg) may have a private 10.x address too, and are never one.
+_LOCAL_KINDS = ("wlan", "wl", "eth", "en", "br")
 
 
 def interface_addresses() -> list[tuple[str, str]]:
@@ -113,21 +115,40 @@ def interface_addresses() -> list[tuple[str, str]]:
     return found
 
 
-def _local_interface() -> str:
-    """A private address of a Wi-Fi or wired interface, for when the way to the internet is
-    elsewhere (a VPN such as Tailscale, or mobile data while the Wi-Fi has no internet)."""
-    private = [(n, a) for n, a in interface_addresses() if private_problem(a) is None]
-    private.sort(key=lambda found: not found[0].startswith(_LOCAL_FIRST))
-    return private[0][1] if private else ""
+def _usable(address: str, interfaces: list[tuple[str, str]]) -> bool:
+    """Whether a found address is a local network's: private, and, where the interfaces can
+    be told, on a Wi-Fi, wired or bridge one."""
+    if not address or private_problem(address) is not None:
+        return False
+    names = [name for name, found in interfaces if found == address]
+    return not names or any(name.startswith(_LOCAL_KINDS) for name in names)
+
+
+def _local_interface(interfaces: list[tuple[str, str]]) -> str:
+    """A private address of a Wi-Fi, wired or bridge interface, for when the way to the
+    internet is elsewhere (a VPN such as Tailscale, or mobile data while the Wi-Fi has no
+    internet)."""
+    for name, address in interfaces:
+        if name.startswith(_LOCAL_KINDS) and private_problem(address) is None:
+            return address
+    return ""
 
 
 def find(configured: str = "") -> str:
     """The address to serve on: the configured one, or the one this host reaches the
     network from, or else a private address of its Wi-Fi. Raises LocalError unless it is
     private and this host has it."""
-    address = net.normal_ip(configured) if configured else net.outgoing_address()
-    if not configured and (not address or private_problem(address)):
-        address = _local_interface() or address
+    address = (net.normal_ip(configured) or "") if configured else net.outgoing_address()
+    if not configured:
+        interfaces = interface_addresses()
+        if not _usable(address, interfaces):
+            address = _local_interface(interfaces) or address
+            if address and private_problem(address) is None and not _usable(address, interfaces):
+                raise LocalError(
+                    f"{address} is the address of a mobile or VPN connection, not of a local "
+                    "network; connect to the Wi-Fi, or set its address as [network] address "
+                    "(Termux) or --address"
+                )
     if not address:
         raise LocalError(
             f"{configured!r} is not an IP address"

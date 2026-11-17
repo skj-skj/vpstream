@@ -60,7 +60,8 @@ def test_caddy_gets_go_bounds_only_when_set(tmp_path: Path) -> None:
 def test_ffmpeg_threads_only_when_set() -> None:
     assert "-threads" not in ffargs.h264_video_args(ffargs.DEFAULT_SETTINGS)
     args = ffargs.h264_video_args(ffargs.EncodeSettings(threads=4))
-    assert args[-2:] == ["-threads", "4"]
+    # Among the output's options, where ffmpeg 7 and later read -filter_threads.
+    assert args[-4:] == ["-threads", "4", "-filter_threads", "4"]
 
 
 def test_the_daemon_passes_the_bounds_on(tmp_path: Path) -> None:
@@ -78,7 +79,7 @@ def test_the_bound_holds_the_decoder_and_the_filters_too() -> None:
     graph (the HDR tone mapping) start a thread per core unless told before it."""
     assert ffargs.thread_args(ffargs.DEFAULT_SETTINGS) == []
     assert ffargs.thread_args(ffargs.EncodeSettings(threads=4)) == [
-        "-threads", "4", "-filter_threads", "4", "-filter_complex_threads", "4",
+        "-threads", "4", "-filter_complex_threads", "4",
     ]  # fmt: skip
 
 
@@ -99,4 +100,6 @@ def test_a_prepare_runs_ffmpeg_with_the_bound_first(
         preparer._ffmpeg(job, ["ffmpeg", "-i", "in.mkv", "out"])  # type: ignore[arg-type]
     plain, bounded = ran
     assert "-threads" not in plain  # as before, where there is no bound
-    assert bounded.index("-threads") < bounded.index("-filter_threads") < bounded.index("-i")
+    assert (
+        bounded.index("-threads") < bounded.index("-filter_complex_threads") < bounded.index("-i")
+    )
