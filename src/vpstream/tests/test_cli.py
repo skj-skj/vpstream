@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import cli, net, selftest
+from vpstream import cli, selftest
 
 
 def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -14,7 +14,7 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_bench_missing_file(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["bench", "/no/such/file.mkv"]) == 2
-    assert "not a file" in capsys.readouterr().err
+    assert capsys.readouterr().err == "error: not a file: /no/such/file.mkv\n"
 
 
 def test_selftest_args() -> None:
@@ -71,15 +71,7 @@ def test_caps_checks_the_results_path(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "does not exist" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("host", "shown"),
-    [("0.0.0.0", "<server-ip>"), ("::", "<server-ip>"), ("::1", "[::1]"), ("10.0.0.2", "10.0.0.2")],
-)
-def test_url_host(host: str, shown: str) -> None:
-    assert net.url_host(host) == shown
-
-
-# --- the public dashboard's password and status
+# --- the public dashboard's password
 
 
 def _args(**over: object) -> object:
@@ -160,7 +152,7 @@ def test_init_takes_the_mode_and_the_password(
             calls.append((public, password))
             schemes.append(https)
 
-    monkeypatch.setattr(cli, "_service", lambda args: Svc())
+    monkeypatch.setattr(cli, "_service", lambda: Svc())
     path = tmp_path / "pw"
     path.write_text("from the file\n")
     assert cli.main(["init", "--no-tailscale", "--dash-pass-file", str(path)]) == 0
@@ -195,48 +187,6 @@ def test_dash_pass_without_a_terminal_needs_a_file(
     assert "--dash-pass-file" in capsys.readouterr().err
 
 
-def test_status_says_where_the_dashboard_is_and_how_it_stands() -> None:
-    from vpstream import cli
-
-    public = {
-        "mode": "public",
-        "url": "https://203.0.113.5:1338/",
-        "port_state": "open",
-        "certificate": "AB:CD",
-        "password": True,
-    }
-    line = cli._dashboard_line(public)
-    assert line.startswith("https://203.0.113.5:1338/ (public, port open)")
-    assert "certificate authority SHA-256 AB:CD" in line
-    down = {
-        **public,
-        "url": None,
-        "problem": "Caddy failed",
-        "password": False,
-        "certificate": None,
-    }
-    line = cli._dashboard_line(down)
-    assert "Caddy failed" in line and "NO PASSWORD" in line and "SHA-256" not in line
-    tailnet = {"mode": "tailnet", "url": "https://host.ts.net:1338/"}
-    assert cli._dashboard_line(tailnet) == "https://host.ts.net:1338/ (Tailscale only)"
-
-
-def test_status_tells_https_and_its_certificate() -> None:
-    import time
-
-    from vpstream import cli
-
-    assert cli._https_line({"enabled": False}) is None
-    assert "no certificate yet" in str(cli._https_line({"enabled": True, "certificate": None}))
-    soon = {"host": "203.0.113.5", "expires": time.time() + 2 * 3600 + 30}
-    line = str(cli._https_line({"enabled": True, "certificate": soon}))
-    assert "certificate for 203.0.113.5 until" in line and "2h" in line and "left" in line
-    old = {"host": "203.0.113.5", "expires": 1.0}
-    assert "expired" in str(cli._https_line({"enabled": True, "certificate": old}))
-    info = {"version": "1", "https": {"enabled": True, "certificate": None}, "dashboard": {}}
-    assert "HTTPS:        on; no certificate yet" in cli.format_status(info, "1")
-
-
 def test_dashboard_cert_prints_the_authority_to_install(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -249,19 +199,29 @@ def test_dashboard_cert_prints_the_authority_to_install(
     assert out.out == pem + "\n" and "SHA-256 AB:CD" in out.err
 
 
-def test_a_user_agent_cannot_write_control_characters_to_the_terminal() -> None:
-    device = {
-        "id": "192.0.2.1",
-        "ip": "192.0.2.1",
-        "kind": "player",
-        "allowed": None,
-        "user_agent": "VLC\u009b2J\x1b[31m/3.0",
-        "requests": 1,
-        "blocked": 0,
-        "bytes": 0,
-        "last_seen": 1.0,
-        "passes": True,
-    }
-    out = cli.format_devices({"devices": [device]}, 2.0)
-    assert "\u009b" not in out and "\x1b" not in out
-    assert "VLC?2J?[31m/3.0" in out
+# --- the clients command
+
+
+def test_clients_command_refusals(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["clients", "set", "--seek", "10"]) == 2
+    assert "--all" in capsys.readouterr().err
+    assert cli.main(["clients", "set", "b-000001", "--all", "--seek", "10"]) == 2
+    capsys.readouterr()
+    assert cli.main(["clients", "set", "b-000001"]) == 2
+    assert "say what to change" in capsys.readouterr().err
+    assert cli.main(["clients", "list", "b-000001"]) == 2
+
+
+def test_clients_command_sends_the_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[object] = []
+    monkeypatch.setattr(cli, "_daemon", lambda route, payload=None: sent.append((route, payload)))
+    cli.main(
+        ["clients", "set", "b-1", "b-2", "--start-at", "10:10", "--video", "2", "--sub", "off"]
+    )
+    cli.main(["clients", "set", "--all", "--name", "TV"])
+    cli.main(["clients"])
+    assert sent == [
+        ("clients", {"sub": "off", "start_at": "10:10", "video": 2, "devices": ["b-1", "b-2"]}),
+        ("clients", {"name": "TV", "all": True}),
+        ("status", None),
+    ]

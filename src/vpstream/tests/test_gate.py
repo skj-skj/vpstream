@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import gate, media, net
+from vpstream import gate, media
 from vpstream.gate import APPROVAL, LOCKED, OPEN, Devices
 
 
@@ -137,29 +137,7 @@ def test_rows_survive_a_round_trip_and_bad_rows_are_skipped() -> None:
     assert Devices.from_rows("not a list").rows() == []
 
 
-# --- addresses and files
-
-
-@pytest.mark.parametrize(
-    ("text", "ip"),
-    [
-        ("192.0.2.1", "192.0.2.1"),
-        (" 192.0.2.1 ", "192.0.2.1"),
-        ("::ffff:192.0.2.1", "192.0.2.1"),
-        ("2001:DB8::1", "2001:db8::1"),
-        ("fe80::1%eth0", "fe80::1"),
-        ("", None),
-        (None, None),
-        ("192.0.2.1:80", None),
-    ],
-)
-def test_normal_ip(text: str | None, ip: str | None) -> None:
-    assert net.normal_ip(text) == ip
-
-
-def test_outgoing_address_is_an_address_or_nothing() -> None:
-    found = net.outgoing_address()
-    assert found == "" or net.normal_ip(found) == found
+# --- files
 
 
 def test_natural_order(tmp_path) -> None:  # type: ignore[no-untyped-def]

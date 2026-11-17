@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import __version__, api, cli, client, config, daemon, firewall, state
+from vpstream import __version__, api, cli, client, config, daemon, firewall, show, state
 from vpstream.tests.fakes import (
     NAME,
     EventFirewall,
@@ -21,6 +21,7 @@ from vpstream.tests.fakes import (
     FakeFirewall,
     FakeRunner,
     FakeServer,
+    free_port,
     node_status,
     serve_status,
 )
@@ -31,12 +32,6 @@ def no_host_ipv6(monkeypatch: pytest.MonkeyPatch) -> None:
     """The public dashboard also serves this host's global IPv6 address, when it has one
     (a VPS does; a phone or a CI runner often not). The tests must not depend on that."""
     monkeypatch.setattr(daemon.net, "outgoing_address6", lambda: "")
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 class Running:
@@ -93,26 +88,10 @@ def tailnet() -> FakeRunner:
 
 @pytest.fixture
 def running(short_tmp: Path, tailnet: FakeRunner) -> Iterator[Running]:
-    cfg = config.Config(stream_port=_free_port(), dashboard_port=_free_port())
+    cfg = config.Config(stream_port=free_port(), dashboard_port=free_port())
     run = Running(short_tmp, tailnet, cfg).start()
     yield run
     run.close()
-
-
-# --- the API
-
-
-def test_status_route() -> None:
-    app = api.create_app(lambda: {"version": "1.2.3", "stream": None})
-    http = app.test_client()
-    assert http.get("/api/v1/status").get_json() == {"version": "1.2.3", "stream": None}
-
-
-def test_errors_are_json() -> None:
-    http = api.create_app(dict).test_client()
-    answer = http.get("/api/v1/nope")
-    assert answer.status_code == 404 and "error" in answer.get_json()
-    assert http.post("/api/v1/status").status_code == 405
 
 
 # --- the socket and the CLI
@@ -132,7 +111,7 @@ def test_socket_is_for_the_owner_and_group_only(running: Running) -> None:
 
 
 def test_socket_file_is_removed_on_stop(short_tmp: Path, tailnet: FakeRunner) -> None:
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     assert run.paths.socket.exists()
     run.close()
     assert not run.paths.socket.exists()
@@ -145,7 +124,7 @@ def test_a_leftover_socket_file_is_replaced(short_tmp: Path, tailnet: FakeRunner
     stale = socket.socket(socket.AF_UNIX)
     stale.bind(str(paths.socket))
     stale.close()  # the file stays, as after a crash
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     try:
         assert client.call(paths.socket, "GET", "status")["pid"]
     finally:
@@ -206,20 +185,6 @@ def test_cli_status_without_a_daemon(
     assert "not running" in capsys.readouterr().err
 
 
-def test_status_notes_a_version_mismatch() -> None:
-    info = {"version": "0.3.0", "uptime_seconds": 3725, "pid": 7, "stream_port": 1337}
-    info["dashboard"] = {
-        "address": None,
-        "url": None,
-        "problem": "the dashboard is not available: x",
-    }
-    text = cli.format_status(info, "0.4.0")
-    assert "up 1h 02m (pid 7)" in text
-    assert "Dashboard:    the dashboard is not available: x" in text
-    assert "sudo systemctl restart vpstream" in text
-    assert "restart" not in cli.format_status(info, "0.3.0")
-
-
 # --- the dashboard port
 
 
@@ -241,7 +206,7 @@ def test_dashboard_is_never_bound_to_every_interface(
         return real(host, port)
 
     monkeypatch.setattr(daemon, "bind_tcp", spy)
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     try:
         run.wait_for_dashboard()
     finally:
@@ -268,7 +233,7 @@ def test_status_says_when_the_dashboard_is_not_published(
 ) -> None:
     dash = _dash(tmp_path, tailnet)
     assert dash["url"] is None and "sudo vpstream init" in str(dash["problem"])
-    text = cli.format_status({"dashboard": dash, "version": "1"}, "1")
+    text = show.format_status({"dashboard": dash, "version": "1"}, "1")
     assert "http://127.0.0.1:1338/ on this host only; not published" in text
 
     publish(tailnet, 1338, target="http://127.0.0.1:3000")  # the port serves something else
@@ -361,12 +326,12 @@ def test_a_firewall_failure_is_reported_not_hidden(tmp_path: Path) -> None:
     assert info["stream_port_state"] == "unknown"
     assert "password is required" in info["firewall_problem"]
     assert log[0].startswith("WARNING: could not close")
-    assert "WARNING: could not close" in cli.format_status(info, info["version"])
+    assert "WARNING: could not close" in show.format_status(info, info["version"])
 
 
 def test_serving_reconciles_first(short_tmp: Path, tailnet: FakeRunner) -> None:
     fw = FakeFirewall()
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()), fw).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()), fw).start()
     try:
         assert fw.calls == ["close"]
         assert client.call(run.paths.socket, "GET", "status")["stream_port_state"] == "closed"
@@ -375,7 +340,7 @@ def test_serving_reconciles_first(short_tmp: Path, tailnet: FakeRunner) -> None:
     assert fw.calls == ["close"]  # stopping is the service's job (ExecStopPost), not the daemon's
 
 
-# --- found in the review before milestone 2
+# --- a second daemon, a slow or stopped Tailscale, a trial run
 
 
 def test_a_second_daemon_does_not_take_over_a_socket_that_is_in_use(running: Running) -> None:
@@ -453,7 +418,7 @@ def _gate(path: Path, target: str, ip: str = "192.0.2.1") -> tuple[int, dict[str
 def streaming(
     short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Running]:
-    cfg = config.Config(dashboard_port=_free_port(), stream_host="192.0.2.9")
+    cfg = config.Config(dashboard_port=free_port(), stream_host="192.0.2.9")
     run = Running(short_tmp, tailnet, cfg, FakeFirewall(), FakeServer()).start()
     monkeypatch.setenv(config.ROOT_ENV, str(short_tmp))
     yield run
@@ -547,7 +512,7 @@ def test_an_empty_path_is_refused_without_a_traceback(
 def test_a_daemon_that_fails_while_starting_leaves_no_socket_behind(
     short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()))
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()))
     monkeypatch.setattr(
         run.daemon.control, "reconcile", lambda: (_ for _ in ()).throw(OSError("no disk"))
     )
@@ -559,7 +524,7 @@ def test_a_daemon_that_fails_while_starting_leaves_no_socket_behind(
 def test_a_stream_that_will_not_stop_does_not_keep_the_sockets(
     short_tmp: Path, tailnet: FakeRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port())).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port())).start()
     monkeypatch.setattr(
         run.daemon.control, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("stuck"))
     )
@@ -594,9 +559,7 @@ def test_stopping_the_daemon_stops_the_stream_and_removes_both_sockets(
     short_tmp: Path, tailnet: FakeRunner, tmp_path: Path
 ) -> None:
     fw, server = FakeFirewall(), FakeServer()
-    run = Running(
-        short_tmp, tailnet, config.Config(dashboard_port=_free_port()), fw, server
-    ).start()
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()), fw, server).start()
     film = tmp_path / "film.mkv"
     film.write_bytes(b"x")
     client.call(run.paths.socket, "POST", "stream/start", {"file": str(film)})
@@ -611,7 +574,7 @@ def test_the_daemon_ends_a_stream_when_its_time_is_over(
 ) -> None:
     monkeypatch.setattr(daemon, "TICK_SECONDS", 0.05)
     fw = FakeFirewall()
-    run = Running(short_tmp, tailnet, config.Config(dashboard_port=_free_port()), fw, FakeServer())
+    run = Running(short_tmp, tailnet, config.Config(dashboard_port=free_port()), fw, FakeServer())
     run.start()
     try:
         film = tmp_path / "film.mkv"
@@ -649,213 +612,6 @@ def test_a_second_daemon_leaves_the_first_ones_stream_and_firewall_alone(
     assert streaming.paths.gate_socket.exists()
 
 
-def test_format_devices_and_states() -> None:
-    stream = {
-        "devices": [
-            {
-                "ip": "192.0.2.1",
-                "allowed": None,
-                "passes": True,
-                "wl": False,
-                "requests": 3,
-                "blocked": 0,
-                "bytes": 1_500_000,
-                "last_seen": 90.0,
-                "user_agent": "VLC/3.0.20",
-            },
-            {
-                "ip": "2001:db8::1",
-                "allowed": None,
-                "passes": False,
-                "wl": True,
-                "requests": 2,
-                "blocked": 2,
-                "bytes": 0,
-                "last_seen": 0,
-                "user_agent": "",
-                "code": "0420",
-            },
-            {"ip": "192.0.2.3", "allowed": True, "passes": True, "wl": True},
-            {"ip": "192.0.2.4", "allowed": False, "passes": False, "wl": False},
-            {
-                "id": "b-0a1b2c",
-                "kind": "browser",
-                "ip": "192.0.2.5",
-                "name": "Living-room TV",
-                "allowed": True,
-                "passes": True,
-                "user_agent": "JioSphere",
-            },
-        ]
-    }
-    lines = cli.format_devices(stream, 100.0).splitlines()
-    assert lines[0].split() == [
-        "DEVICE",
-        "ADDRESS",
-        "STATE",
-        "CODE",
-        "REQUESTS",
-        "BLOCKED",
-        "SENT",
-        "LAST",
-        "SEEN",
-        "PLAYER",
-    ]
-    assert lines[1].split() == [
-        "192.0.2.1",
-        "192.0.2.1",
-        "allowed",
-        "-",
-        "3",
-        "0",
-        "1.5",
-        "MB",
-        "10s",
-        "ago",
-        "VLC/3.0.20",
-    ]
-    assert lines[2].split() == [
-        "2001:db8::1",
-        "2001:db8::1",
-        "waiting",
-        "WL",
-        "0420",
-        "2",
-        "2",
-        "0",
-        "B",
-        "never",
-        "-",
-    ]
-    assert "enabled WL" in lines[3] and "disabled" in lines[4]
-    # A browser is listed by its id, and by the name the owner gave it.
-    assert lines[5].split()[:3] == ["b-0a1b2c", "192.0.2.5", "enabled"]
-    assert lines[5].endswith("Living-room TV")
-    assert "No device" in cli.format_devices({"devices": []}, 1.0)
-
-
-def test_format_stream_of_one_file() -> None:
-    text = cli.format_stream(
-        {
-            "alias": "aaa",
-            "mode": "direct",
-            "policy": "locked",
-            "seconds_left": None,
-            "source": "/srv/film.mkv",
-            "kind": "file",
-            "url": "http://192.0.2.9:1337/aaa",
-            "videos": [{"number": 1, "name": "film.mkv", "url": "http://192.0.2.9:1337/aaa/1"}],
-        }
-    )
-    assert text.splitlines() == [
-        "Stream:       /aaa (direct, policy locked, no time limit)",
-        "Source:       /srv/film.mkv",
-        "Address:      http://192.0.2.9:1337/aaa",
-    ]
-
-
-def test_format_stream_shows_what_is_being_prepared() -> None:
-    url = "http://192.0.2.9:1337/aaa"
-    stream = {
-        "alias": "aaa",
-        "mode": "direct",
-        "policy": "open",
-        "seconds_left": None,
-        "source": "/srv/show",
-        "kind": "dir",
-        "url": url,
-        "videos": [
-            {"number": 1, "name": "e1.mkv", "url": f"{url}/1", "preparing": True, "note": None},
-            {
-                "number": 2,
-                "name": "e2.mkv",
-                "url": f"{url}/2",
-                "preparing": False,
-                "note": "its seek index has no audio entries, so VLC resumes it slowly",
-            },
-        ],
-    }
-    lines = cli.format_stream(stream).splitlines()
-    assert lines[3] == f"  1  {url}/1  e1.mkv  [preparing]"
-    assert lines[4] == f"  2  {url}/2  e2.mkv"
-    assert lines[5].startswith("Preparing:    1 MKV file gets a full seek index")
-    assert (
-        lines[6] == "note: video 2: its seek index has no audio entries, so VLC resumes it slowly"
-    )
-
-
-def test_format_clients() -> None:
-    menu = {
-        "audio": [{"value": "1", "label": "English"}, {"value": "2", "label": "Japanese"}],
-        "subs": [{"value": "3-burn", "label": "Signs (burned in)"}],
-    }
-    client = {"video": 1, "position": 610, "duration": 5400, "paused": False, "audio": 2}
-    stream = {
-        "videos": [{"number": 1, "menu": menu}],
-        "devices": [
-            {"id": "192.0.2.2", "kind": "player", "passes": True},
-            {
-                "id": "b-000001",
-                "kind": "browser",
-                "passes": True,
-                "name": "Living-room TV",
-                "client": {
-                    **client,
-                    "sub": "3-burn",
-                    "reported": 99,
-                    "active": True,
-                    "pending": {"seek": 3723},
-                    "start_at": [1, 65],
-                },
-            },
-            {
-                "id": "b-000002",
-                "kind": "browser",
-                "passes": True,
-                "user_agent": "Chrome",
-                "client": {**client, "reported": 10, "paused": True, "sub": "off"},
-            },
-            {"id": "b-000003", "kind": "browser", "passes": True, "client": None},
-            {"id": "b-000004", "kind": "browser", "passes": False, "allowed": None, "wl": True},
-        ],
-    }
-    lines = cli.format_clients(stream, 100.0).splitlines()
-    assert lines[0].split()[:3] == ["DEVICE", "STATE", "VIDEO"] and len(lines) == 5
-    tv = lines[1]
-    assert tv.startswith("b-000001") and "playing" in tv and "10:10 / 1:30:00" in tv
-    assert "Japanese" in tv and "Signs (burned in)" in tv and "Living-room TV" in tv
-    assert "seek 3723, start 1 at 1:05" in tv
-    assert "gone 1m 30s ago" in lines[2] and "off" in lines[2] and lines[2].endswith("Chrome")
-    assert "not playing yet" in lines[3]
-    assert "waiting WL" in lines[4]
-    assert "No browser" in cli.format_clients({"devices": stream["devices"][:1]}, 1.0)
-
-
-def test_clients_command_refusals(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["clients", "set", "--seek", "10"]) == 2
-    assert "--all" in capsys.readouterr().err
-    assert cli.main(["clients", "set", "b-000001", "--all", "--seek", "10"]) == 2
-    capsys.readouterr()
-    assert cli.main(["clients", "set", "b-000001"]) == 2
-    assert "say what to change" in capsys.readouterr().err
-    assert cli.main(["clients", "list", "b-000001"]) == 2
-
-
-def test_clients_command_sends_the_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    sent: list[object] = []
-    monkeypatch.setattr(cli, "_daemon", lambda route, payload=None: sent.append((route, payload)))
-    cli.main(
-        ["clients", "set", "b-1", "b-2", "--start-at", "10:10", "--video", "2", "--sub", "off"]
-    )
-    cli.main(["clients", "set", "--all", "--name", "TV"])
-    cli.main(["clients"])
-    assert sent == [
-        ("clients", {"sub": "off", "start_at": "10:10", "video": 2, "devices": ["b-1", "b-2"]}),
-        ("clients", {"name": "TV", "all": True}),
-        ("status", None),
-    ]
-
-
 # --- the public dashboard (its real Caddy: test_dashboard_integration)
 
 
@@ -873,8 +629,8 @@ class PublicRun(Running):
         from vpstream.tests.test_login import verifier
 
         cfg = config.Config(
-            stream_port=_free_port(),
-            dashboard_port=_free_port(),
+            stream_port=free_port(),
+            dashboard_port=free_port(),
             dashboard_public=True,
             stream_host=host,
         )

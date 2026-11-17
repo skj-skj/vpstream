@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 SPARE_BYTES = 512 * 1024 * 1024  # left free on a disk after vpstream writes to it
 
@@ -16,6 +18,24 @@ def write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def read_json_object(path: Path) -> dict[str, Any] | None:
+    """The JSON object in `path`, or None when the file is missing, unreadable or holds
+    anything else."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def remove_path(path: Path) -> None:
+    """Remove whatever is at `path`. A link is removed as a link, never followed."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
 
 
 def source_key(source: str | Path) -> str:

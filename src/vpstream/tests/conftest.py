@@ -4,6 +4,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,6 +29,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def quick_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The daemon's servers in a test notice a shutdown within 0.05 s, where werkzeug looks
+    every 0.5 s: a test daemon then stops in a moment, not in about a second."""
+    from vpstream import daemon
+
+    make = daemon._make_server
+
+    def quick(*args: Any) -> Any:
+        server = make(*args)
+        serve = server.serve_forever
+        server.serve_forever = lambda poll_interval=0.05: serve(poll_interval)
+        return server
+
+    monkeypatch.setattr(daemon, "_make_server", quick)
 
 
 @pytest.fixture

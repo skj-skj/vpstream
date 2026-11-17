@@ -177,7 +177,8 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Setup:
 
 
 def test_unit_text() -> None:
-    text = service.unit_text(Path("/opt/v/bin/vpstream"), Path("/opt/v/bin/vpstream-fw"))
+    args = (Path("/opt/v/bin/vpstream"), Path("/opt/v/bin/vpstream-fw"))
+    text = service.unit_text(*args)
     assert "User=vpstream\nGroup=vpstream\n" in text
     assert "RuntimeDirectory=vpstream\nRuntimeDirectoryMode=0750\n" in text
     assert "ExecStart=/opt/v/bin/vpstream daemon\n" in text
@@ -185,7 +186,16 @@ def test_unit_text() -> None:
     assert "ExecStopPost=+/opt/v/bin/vpstream-fw close\n" in text
     assert "After=network-online.target tailscaled.service\n" in text
     assert "WantedBy=multi-user.target\n" in text
-    assert "NoNewPrivileges" not in text  # it would stop the daemon's sudo call
+    # The service may bind port 80 only with HTTPS, where Let's Encrypt checks.
+    assert "CAP_NET_BIND_SERVICE" not in text
+    https = service.unit_text(*args, https=True)
+    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" in https
+    # A bounding set would hold sudo, which runs the firewall helper, to that one capability.
+    assert "CapabilityBoundingSet" not in https
+    for unit in (text, https):
+        # Whatever the mode, a stop closes what the helper opened.
+        assert "ExecStopPost=+/opt/v/bin/vpstream-fw acme-close\n" in unit
+        assert "NoNewPrivileges" not in unit  # it would stop the daemon's sudo call
 
 
 def test_sudoers_rule_allows_exactly_the_helper_actions() -> None:
@@ -551,7 +561,7 @@ def test_cli_init_and_uninstall_need_root(capsys: pytest.CaptureFixture[str]) ->
     assert "sudo vpstream uninstall" in capsys.readouterr().err
 
 
-# --- found in the review before milestone 2
+# --- interrupted inits, busy ports and a helper others can change
 
 
 def test_uninstall_on_a_host_that_was_never_set_up_touches_no_ufw_rule(setup: Setup) -> None:
@@ -680,7 +690,7 @@ def test_init_no_tailscale_makes_the_dashboard_public_with_only_a_verifier(
 def test_init_prints_the_authority_the_browser_must_trust(setup: Setup) -> None:
     from vpstream import caddy
 
-    cert = caddy.dashboard_root_cert(setup.layout.paths)
+    cert = setup.layout.paths.dashboard_ca_cert
     cert.parent.mkdir(parents=True)
     pem = (Path(__file__).parent / "data" / "caddy-root.crt").read_text()
     cert.write_text(pem)
@@ -903,19 +913,6 @@ def test_lets_encrypt_needs_a_public_address(setup: Setup) -> None:
     with pytest.raises(service.ServiceError, match=r"203\.0\.113\.5 is not a public address"):
         setup.service().init(https=True)
     assert setup.files() == [], "refused before anything changed"
-
-
-def test_the_unit_may_bind_port_80_only_with_https() -> None:
-    args = (Path("/opt/v/bin/vpstream"), Path("/opt/v/bin/vpstream-fw"))
-    plain = service.unit_text(*args)
-    assert "CAP_NET_BIND_SERVICE" not in plain
-    https = service.unit_text(*args, https=True)
-    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" in https
-    # A bounding set would hold sudo, which runs the firewall helper, to that one capability.
-    assert "CapabilityBoundingSet" not in https
-    for text in (plain, https):  # whatever the mode, a stop closes what the helper opened
-        assert "ExecStopPost=+/opt/v/bin/vpstream-fw acme-close\n" in text
-    assert "NoNewPrivileges" not in https
 
 
 def _acme_opened(setup: Setup) -> None:

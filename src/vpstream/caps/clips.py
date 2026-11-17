@@ -11,7 +11,7 @@ from pathlib import Path
 
 from vpstream import __version__
 from vpstream.ffargs import aac_args, base_args, hls_output_args
-from vpstream.files import write_atomic
+from vpstream.files import read_json_object, write_atomic
 from vpstream.tools import Result, Runner, ffmpeg_names, low_priority_prefix, require, tail
 
 CODEC_SECONDS = 4
@@ -209,19 +209,12 @@ class ClipDirError(ValueError):
 
 
 def _read_manifest(path: Path) -> dict[str, object] | None:
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    return read_json_object(path)
 
 
 def made_by_vpstream(out: Path) -> bool:
-    """The marker file, or a clip manifest from a build that predates the marker."""
-    if (out / MARKER).is_file():
-        return True
-    manifest = _read_manifest(out / "clips.json")
-    return manifest is not None and {"version", "clips", "extras"} <= manifest.keys()
+    """Whether vpstream made the folder: it holds the marker file."""
+    return (out / MARKER).is_file()
 
 
 def _has_clips(manifest: dict[str, object]) -> bool:

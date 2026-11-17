@@ -15,9 +15,9 @@ from flask.testing import FlaskClient
 
 from vpstream import api, config, gate, login, public
 from vpstream.control import Control
-from vpstream.tests.fakes import FakeFirewall, FakeServer
+from vpstream.tests.fakes import Clock, FakeFirewall, FakeServer
 from vpstream.tests.test_control_clients import Viewers
-from vpstream.tests.test_login import PASSWORD, Clock, answer, verifier
+from vpstream.tests.test_login import NOW, PASSWORD, answer, verifier
 
 BASE = "https://203.0.113.5:1338"
 IP = {"X-Vpstream-Ip": "198.51.100.20"}
@@ -36,7 +36,7 @@ def control(tmp_path: Path) -> Control:
 
 @pytest.fixture
 def auth() -> login.Login:
-    return login.Login(verifier(), login.Limiter(None, clock=Clock(), log=lambda m: None))
+    return login.Login(verifier(), login.Limiter(None, clock=Clock(NOW), log=lambda m: None))
 
 
 @pytest.fixture
@@ -242,7 +242,7 @@ def test_logout_needs_the_token_and_ends_the_session(web: FlaskClient, auth: Any
 
 
 def test_an_expired_session_is_sent_back_to_the_login(control: Control) -> None:
-    mono = Clock()
+    mono = Clock(NOW)
     auth = login.Login(verifier(), login.Limiter(None, log=lambda m: None), clock=mono)
     web = api.create_app(control.status, control, auth).test_client()
     log_in(web)

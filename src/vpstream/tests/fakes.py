@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,23 @@ from vpstream.firewall import FirewallError
 from vpstream.tools import Result, SystemRunner
 
 NAME = "host.example.ts.net"  # the fake host's name on its tailnet
+
+
+def free_port(host: str = "127.0.0.1") -> int:
+    """A TCP port nothing listens on now, for a test server."""
+    with socket.socket() as s:
+        s.bind((host, 0))
+        return int(s.getsockname()[1])
+
+
+class Clock:
+    """A clock a test sets by hand: call it for the time, change `now` to move it."""
+
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
 
 
 def node_status(https: bool = True, state: str = "Running") -> dict[str, Any]:
@@ -373,3 +391,27 @@ class FakeIssuer:
         now = self.clock()
         store_certificate(self.store, self.ca, host, now - 3600, now - 3600 + self.lifetime)
         assert done()
+
+
+class FakeDaemon:
+    """Stands in for `client.call`. Each route answers from a list, the last answer repeated;
+    an answer that is an exception is raised, and one that is callable gets the payload."""
+
+    def __init__(self, **routes: list[Any]) -> None:
+        self.routes = {"status": [{"stream": None, "prepare": []}], **routes}
+        self.calls: list[tuple[str, Any]] = []
+        self.timeouts: dict[str, Any] = {}
+
+    def __call__(
+        self, socket: Path, method: str, route: str, payload: Any = None, timeout: Any = None
+    ) -> Any:
+        self.calls.append((route, payload))
+        self.timeouts[route] = timeout
+        answers = self.routes[route]
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer(payload) if callable(answer) else answer
+
+    def posts(self, route: str) -> list[Any]:
+        return [p for r, p in self.calls if r == route]

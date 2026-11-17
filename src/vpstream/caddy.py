@@ -11,10 +11,9 @@ over HTTPS with a certificate from its own local authority (`tls internal`). The
 The stream's Caddy hands every request to the daemon's gate over a unix socket. The gate
 answers either with the page itself (an index, a playlist, a refusal) or with the number of
 a video, which Caddy then sends, with range requests, from a folder that holds one link per
-video. A number needs no encoding, which
-Caddy versions do differently for a path. Nothing about a stream is in Caddy's
-configuration, and a change of alias, policy or device applies on the next request without
-a reload.
+video. A number needs no encoding, which Caddy versions do differently for a path.
+Nothing about a stream is in Caddy's configuration, and a change of alias, policy or device
+applies on the next request without a reload.
 """
 
 from __future__ import annotations
@@ -400,12 +399,14 @@ class CaddyProcess:
     def error_log(self) -> Path:
         return self.work_dir / "caddy.log"
 
-    def _why(self) -> str:
+    def _log_text(self) -> str:
         try:
-            text = self.error_log.read_text(encoding="utf-8", errors="replace").strip()
+            return self.error_log.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ""
-        return text[-600:]
+
+    def _why(self) -> str:
+        return self._log_text().strip()[-600:]
 
     def start(self) -> None:
         if self.running():
@@ -492,12 +493,6 @@ class CaddyServer(CaddyProcess):
         self.access_log.unlink(missing_ok=True)
 
 
-def dashboard_root_cert(paths: Paths) -> Path:
-    """The public dashboard's authority certificate, made by `init` (see `dashboard_ca`).
-    Only this is stable: what Caddy serves lasts 12 hours, its intermediate 7 days."""
-    return paths.dashboard_ca_cert
-
-
 class DashboardCaddy(CaddyProcess):
     """The public dashboard's Caddy: HTTPS on the dashboard port, for the addresses `hosts`."""
 
@@ -508,7 +503,9 @@ class DashboardCaddy(CaddyProcess):
         self.hosts = hosts  # the daemon sets them before each start
         self.socket_path = paths.dashboard_socket
         self.paths = paths
-        self.root_cert = dashboard_root_cert(paths)
+        # The authority `init` made (see `dashboard_ca`). Only this is stable: what Caddy
+        # serves lasts 12 hours, its intermediate 7 days.
+        self.root_cert = paths.dashboard_ca_cert
 
     def config(self) -> dict[str, Any]:
         return dashboard_config(
@@ -618,12 +615,6 @@ class CertificateCaddy(CaddyProcess):
                 time.sleep(0.2)
         finally:
             self.stop()
-
-    def _log_text(self) -> str:
-        try:
-            return self.error_log.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
 
 
 def obtain_failure(log: str) -> str | None:

@@ -280,8 +280,8 @@ class Devices:
                 if not allowed or browser.allowed is None:
                     browser.allowed = allowed
         if allowed:
-            for key, _ in _miss_keys(row.ip):
-                self._misses.pop(key, None)
+            for miss_key, _ in _miss_keys(row.ip):
+                self._misses.pop(miss_key, None)
         return row
 
     # --- viewers that try addresses until one works
@@ -335,8 +335,7 @@ class Devices:
         normal = normal_ip(ip) or ""
         row = self._rows.get(normal)
         if row is None:
-            from_there = [d for d in self.browsers() if d.ip == normal]
-            row = max(from_there, key=lambda d: d.last_seen, default=None)
+            row = max(self._at(normal), key=lambda d: d.last_seen, default=None)
         if row is not None:
             row.bytes += count
 
@@ -381,7 +380,7 @@ def _row(data: dict[str, Any], videos: int) -> Device | None:
             return None
         row = Device(ip, id=key, kind=BROWSER, token=token, confirmed=data.get("confirmed") is True)
         row.client = Client.from_dict(data.get("client"), videos)
-    elif data.get("id", ip) == ip:  # a row recorded before 0.11 has no id
+    elif data.get("id", ip) == ip:  # a player's id is its address, and may be left out
         row = Device(ip)
     else:
         return None

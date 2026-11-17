@@ -9,9 +9,12 @@ is proper here when every video and audio track is in it.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
+
+from vpstream.tools import Runner, tail
 
 EBML = 0x1A45DFA3
 SEGMENT = 0x18538067
@@ -22,6 +25,7 @@ CLUSTER = 0x1F43B675
 KINDS = {1: "video", 2: "audio"}  # the track types that must be in the index
 MAX_ELEMENT = 64 * 1024 * 1024  # Tracks and Cues are read whole; real ones are a few MB
 MAX_TOP_LEVEL = 256
+IDENTIFY_TIMEOUT = 120
 
 
 class MkvError(ValueError):
@@ -143,6 +147,20 @@ def indexed_tracks(data: bytes) -> set[int]:
             if child == CUE_TRACK_POSITIONS:
                 tracks.update(_uint(v) for e, v in _children(positions) if e == CUE_TRACK)
     return tracks
+
+
+def identify(runner: Runner, path: str) -> tuple[dict[str, Any] | None, str]:
+    """What `mkvmerge -J` says about a file's tracks, or None and why mkvmerge could not
+    read it (its own errors when it lists them)."""
+    res = runner.run(["mkvmerge", "-J", path], timeout=IDENTIFY_TIMEOUT)
+    try:
+        data = json.loads(res.stdout)
+    except ValueError:
+        data = None
+    if res.returncode == 0 and isinstance(data, dict):
+        return data, ""
+    errors = data.get("errors") if isinstance(data, dict) else None
+    return None, " ".join(errors).strip() if errors else tail(res, stdout=True)
 
 
 def is_matroska(path: str | Path) -> bool:

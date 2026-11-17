@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
 from typing import Any
 
-from vpstream import probe
+from vpstream import mkv, probe
 from vpstream.ffargs import base_args, escape_filter_path
 from vpstream.probe import MKVEXTRACT, SubtitleTrack
 from vpstream.tools import Runner, require, tail
 
 EXTRACT_TIMEOUT = 1800  # the whole file is read; a long film on a slow disk takes a while
-IDENTIFY_TIMEOUT = 120
 MKV_WEBVTT = "S_TEXT/WEBVTT"
 
 
@@ -56,14 +54,8 @@ def mkvextract_track_id(identify: dict[str, Any], track: SubtitleTrack) -> int:
 
 
 def _identify_mkv(runner: Runner, src: str, track: SubtitleTrack) -> dict[str, Any]:
-    res = runner.run(["mkvmerge", "-J", src], timeout=IDENTIFY_TIMEOUT)
-    try:
-        identify = json.loads(res.stdout)
-    except json.JSONDecodeError:
-        identify = None
-    if res.returncode != 0 or not isinstance(identify, dict):
-        errors = identify.get("errors") if isinstance(identify, dict) else None
-        why = " ".join(errors).strip() if errors else tail(res, stdout=True)
+    identify, why = mkv.identify(runner, src)
+    if identify is None:
         raise SubtitleError(f"subtitle {track.number}: mkvmerge cannot read the file: {why}")
     return identify
 

@@ -9,7 +9,7 @@ import pytest
 
 from vpstream import cli, client, listing
 from vpstream.files import source_key
-from vpstream.tests.fakes import FakeRunner
+from vpstream.tests.fakes import FakeDaemon, FakeRunner
 from vpstream.tests.test_probe import SAMPLE
 
 
@@ -98,14 +98,11 @@ def test_an_empty_folder(tmp_path: Path) -> None:
 # --- the command
 
 
-def daemon(rows: list[dict[str, Any]] | None) -> Any:
-    def call(socket: Path, method: str, route: str, payload: Any = None) -> Any:
-        if rows is None:
-            raise client.DaemonUnavailable("no daemon")
-        assert route == "prepared"
-        return {"prepared": rows}
-
-    return call
+def daemon(rows: list[dict[str, Any]] | None) -> FakeDaemon:
+    """A daemon that lists `rows` as its cache, or none that answers."""
+    if rows is None:
+        return FakeDaemon(prepared=[client.DaemonUnavailable("no daemon")])
+    return FakeDaemon(prepared=[{"prepared": rows}])
 
 
 def test_ls_lists_the_configured_folder_by_default(

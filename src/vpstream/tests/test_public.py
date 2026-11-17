@@ -153,6 +153,19 @@ def test_a_failure_does_not_show_its_insides(
 # --- the API
 
 
+def test_status_route() -> None:
+    app = api.create_app(lambda: {"version": "1.2.3", "stream": None})
+    http = app.test_client()
+    assert http.get("/api/v1/status").get_json() == {"version": "1.2.3", "stream": None}
+
+
+def test_errors_are_json() -> None:
+    http = api.create_app(dict).test_client()
+    answer = http.get("/api/v1/nope")
+    assert answer.status_code == 404 and "error" in answer.get_json()
+    assert http.post("/api/v1/status").status_code == 405
+
+
 def test_start_change_and_stop_through_the_api(
     control: Control, dash: FlaskClient, show: Path
 ) -> None:
@@ -276,7 +289,7 @@ def test_dashboard_script_never_builds_html_from_server_text(dash: FlaskClient) 
     assert "http://" not in page and "https://" not in page  # nothing loads from elsewhere
 
 
-# --- found in the review of milestone 2
+# --- odd file names, swapped files, guessers, and what the dashboard may start
 
 
 def test_a_file_name_that_is_not_utf8_is_listed_and_served(

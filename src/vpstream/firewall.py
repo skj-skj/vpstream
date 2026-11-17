@@ -321,6 +321,16 @@ class Firewall(Protocol):
     def close(self) -> None: ...
 
 
+def switch(fw: Firewall, action: str) -> str:
+    """Open or close the port (`action` "open" or "close"); returns its state now, "open"
+    or "closed". Raises FirewallError, after which the state is not known."""
+    if action == "open":
+        fw.open()
+        return "open"
+    fw.close()
+    return "closed"
+
+
 STREAM, DASHBOARD, ACME = "stream", "dashboard", "certificate check"
 _PORT_ACTIONS = {STREAM: STREAM_ACTIONS, DASHBOARD: DASHBOARD_ACTIONS, ACME: ACME_ACTIONS}
 

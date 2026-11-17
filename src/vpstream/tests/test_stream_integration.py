@@ -19,6 +19,7 @@ from urllib.parse import quote
 import pytest
 
 from vpstream import caddy, client, config, daemon
+from vpstream.tests.fakes import free_port
 from vpstream.tools import SystemRunner
 
 pytestmark = pytest.mark.integration
@@ -27,19 +28,13 @@ BODY = bytes(range(256)) * 40  # 10240 bytes, every position different from its 
 ODD_NAME = "e2 100%? #1 {http.request.host} é.mkv"
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 class Live:
     """`tls`: the stream is HTTPS, and this is what the viewer trusts. `settings` go in the
     configuration, as for HTTPS through a test authority."""
 
     def __init__(self, root: Path, tls: ssl.SSLContext | None = None, **settings: Any) -> None:
         self.paths = config.Paths.under(root)
-        self.cfg = config.Config(stream_port=_free_port(), dashboard_port=_free_port(), **settings)
+        self.cfg = config.Config(stream_port=free_port(), dashboard_port=free_port(), **settings)
         self.log: list[str] = []
         self.tls = tls
         runner = SystemRunner()

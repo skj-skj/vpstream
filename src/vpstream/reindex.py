@@ -7,7 +7,6 @@ size and change time, so it is made once and found again by the next stream of t
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 from pathlib import Path
@@ -15,11 +14,10 @@ from typing import Any
 
 from vpstream import mkv
 from vpstream.files import has_room, source_key
-from vpstream.tools import Cancelled, Runner, low_priority_prefix, require, run_cancellable, tail
+from vpstream.tools import Cancelled, Runner, low_priority_prefix, require, run_cancellable
 
 TOOL = "mkvmerge"
 FOLDER = "index"  # under the cache folder
-IDENTIFY_TIMEOUT = 120
 
 __all__ = ["Cancelled", "ReindexError", "copy_path", "make", "ready"]
 
@@ -57,13 +55,9 @@ def mkvmerge_args(source: str, out: Path, ids: list[int]) -> list[str]:
 
 
 def _identify(runner: Runner, source: str) -> dict[str, Any]:
-    res = runner.run([TOOL, "-J", source], timeout=IDENTIFY_TIMEOUT)
-    try:
-        data = json.loads(res.stdout)
-    except ValueError:
-        data = None
-    if res.returncode != 0 or not isinstance(data, dict):
-        raise ReindexError(f"mkvmerge cannot read it: {tail(res, stdout=True)}")
+    data, why = mkv.identify(runner, source)
+    if data is None:
+        raise ReindexError(f"mkvmerge cannot read it: {why}")
     return data
 
 

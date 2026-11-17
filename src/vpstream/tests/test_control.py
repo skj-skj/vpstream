@@ -11,15 +11,7 @@ from vpstream import config, mkv, state
 from vpstream.control import Control, ControlError
 from vpstream.stream import StreamError
 from vpstream.tests import mkvdata
-from vpstream.tests.fakes import FakeFirewall, FakeMkvmerge, FakeRunner, FakeServer
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = 1000.0
-
-    def __call__(self) -> float:
-        return self.now
+from vpstream.tests.fakes import Clock, FakeFirewall, FakeMkvmerge, FakeRunner, FakeServer
 
 
 class Rig:
@@ -335,7 +327,7 @@ def test_shutdown_stops_the_stream(rig: Rig) -> None:
     assert rig.recorded() is None and "the daemon is stopping" in rig.log[-1]
 
 
-# --- found in the review of milestone 2
+# --- slow helpers, a second start, and failures that must not leave the port open
 
 
 def test_status_and_viewers_do_not_wait_for_a_slow_firewall_or_caddy(rig: Rig) -> None:

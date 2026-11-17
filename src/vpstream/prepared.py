@@ -16,6 +16,7 @@ without that suffix is always whole.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import posixpath
@@ -28,7 +29,7 @@ from typing import Any
 
 from vpstream import ffargs, media, tracks
 from vpstream.checks import is_whole
-from vpstream.files import dir_size, source_key, write_atomic
+from vpstream.files import dir_size, read_json_object, remove_path, source_key, write_atomic
 from vpstream.probe import MediaInfo
 
 FOLDER = "prepared"  # under the cache folder
@@ -116,11 +117,8 @@ def write_meta(entry: Path, meta: dict[str, Any]) -> None:
 
 def read_meta(entry: Path) -> dict[str, Any] | None:
     """The recorded meta.json, or None when there is none or it is not usable."""
-    try:
-        data = json.loads((entry / META).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict) or not isinstance(data.get("source"), str):
+    data = read_json_object(entry / META)
+    if data is None or not isinstance(data.get("source"), str):
         return None
     for key in ("audio", "subtitles"):
         listed = data.get(key)
@@ -138,11 +136,13 @@ class Track:
     default: bool = False
 
 
-def meta_tracks(entry: Path, kind: str) -> list[Track]:
+def meta_tracks(entry: Path, kind: str, meta: dict[str, Any] | None = None) -> list[Track]:
     """The "audio" or "subtitles" tracks meta.json lists, in track order. Entries that do
-    not fit are left out."""
+    not fit are left out. `meta` is meta.json read already, so it is not read again."""
+    if meta is None:
+        meta = read_meta(entry) or {}
     found = []
-    for raw in (read_meta(entry) or {}).get(kind) or []:
+    for raw in meta.get(kind) or []:
         number = raw.get("number")
         if is_whole(number) and number > 0:
             language = str(raw.get("language") or "und")
@@ -356,9 +356,7 @@ def sweep(cache_dir: Path) -> int:
         *root(cache_dir).glob(f"*/{WORK}*"),
         *root(cache_dir).glob(f"{TRASH}*"),  # a remove that was cut off
     ]:
-        if leftover.is_dir() and not leftover.is_symlink():
-            shutil.rmtree(leftover, ignore_errors=True)
-        else:
-            leftover.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):  # gone meanwhile, or in use
+            remove_path(leftover)
         removed += 1
     return removed

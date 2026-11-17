@@ -10,7 +10,7 @@ import pytest
 
 from vpstream import caddy, config
 from vpstream.certificate import Certificate
-from vpstream.tests.fakes import FakeRunner
+from vpstream.tests.fakes import FakeRunner, free_port
 from vpstream.tools import ToolMissing
 
 # A stand-in for the caddy program: it listens where the configuration says, as Caddy does.
@@ -60,12 +60,6 @@ class Which(FakeRunner):
         return str(self.program) if self.program and name == "caddy" else None
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 @pytest.fixture
 def program(tmp_path: Path) -> Path:
     path = tmp_path / "bin" / "caddy"
@@ -77,13 +71,13 @@ def program(tmp_path: Path) -> Path:
 
 
 def _server(tmp_path: Path, program: Path | None) -> caddy.CaddyServer:
-    return caddy.CaddyServer(Which(program), _free_port(), config.Paths.under(tmp_path))
+    return caddy.CaddyServer(Which(program), free_port(), config.Paths.under(tmp_path))
 
 
 # --- the configuration
 
 
-def test_config_is_json_and_never_opens_an_admin_port() -> None:
+def test_config_is_json_plain_http_and_never_opens_an_admin_port() -> None:
     cfg = caddy.config(
         1337, Path("/run/vpstream/gate.sock"), Path("/var/lib/x/access.log"), Path("/v")
     )
@@ -91,7 +85,9 @@ def test_config_is_json_and_never_opens_an_admin_port() -> None:
     assert cfg["admin"] == {"disabled": True, "config": {"persist": False}}
     server = cfg["apps"]["http"]["servers"]["vpstream"]
     assert server["listen"] == [":1337"]
+    # Without a certificate: plain HTTP, and Caddy never asks for one.
     assert server["automatic_https"] == {"disable": True}
+    assert "tls" not in cfg["apps"] and "tls_connection_policies" not in server
 
 
 def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
@@ -381,7 +377,7 @@ def test_the_dashboard_caddy_keeps_its_files_apart_from_the_streams(tmp_path: Pa
     dash = caddy.DashboardCaddy(FakeRunner(), 1338, ["203.0.113.5"], paths)
     stream = caddy.CaddyServer(FakeRunner(), 1337, paths)
     assert dash.work_dir != stream.work_dir
-    assert dash.root_cert == caddy.dashboard_root_cert(paths) == paths.dashboard_ca_cert
+    assert dash.root_cert == paths.dashboard_ca_cert
     assert dash.config() == caddy.dashboard_config(
         1338,
         ["203.0.113.5"],
@@ -413,14 +409,6 @@ def test_each_address_gets_a_listener_whose_certificate_is_its_own(tmp_path: Pat
 
 def _cert(tmp_path: Path) -> Certificate:
     return Certificate("203.0.113.5", tmp_path / "c.crt", tmp_path / "c.key", 0.0, 1.0)
-
-
-def test_the_stream_is_plain_http_without_a_certificate(tmp_path: Path) -> None:
-    cfg = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v")
-    assert "tls" not in cfg["apps"]
-    server = cfg["apps"]["http"]["servers"]["vpstream"]
-    assert "tls_connection_policies" not in server
-    assert server["automatic_https"] == {"disable": True}
 
 
 def test_the_stream_serves_its_certificate_from_files_and_never_asks(tmp_path: Path) -> None:
@@ -559,7 +547,7 @@ def test_without_caddy_there_is_no_version() -> None:
 def _requester(program: Path, tmp_path: Path) -> tuple[caddy.CertificateCaddy, config.Paths]:
     paths = config.Paths.under(tmp_path / "root")
     settings = config.Config(
-        stream_https=True, acme_ca="https://ca.test/dir", acme_port=_free_port()
+        stream_https=True, acme_ca="https://ca.test/dir", acme_port=free_port()
     )
     requester = caddy.CertificateCaddy(Which(program), settings, paths)
     requester.timeout = 3
@@ -582,7 +570,7 @@ def _gone(program: Path) -> bool:
     [
         ("issue", None),
         ("refuse", "refused: HTTP 429 rateLimited"),
-        ("quiet", "no certificate after 3"),
+        ("quiet", "no certificate after 1 seconds"),
     ],
 )
 def test_the_requesting_caddy_is_stopped_however_it_ends(
@@ -592,6 +580,8 @@ def test_the_requesting_caddy_is_stopped_however_it_ends(
 
     Path(f"{program}.mode").write_text(mode)
     requester, paths = _requester(program, tmp_path)
+    if mode == "quiet":
+        requester.timeout = 1  # it waits all of it out
     store = paths.certificate_dir / "data" / "caddy"
     done = lambda: stored(store, "https://ca.test/dir", "203.0.113.5") is not None  # noqa: E731
     if error is None:
@@ -625,7 +615,7 @@ def test_caddy_going_on_past_a_busy_port_is_a_failure() -> None:
 
 def test_a_busy_check_port_is_seen_before_port_80_is_opened(tmp_path: Path) -> None:
     """problem() runs before the firewall opens the port, so a busy one opens nothing."""
-    port = _free_port()
+    port = free_port()
     settings = config.Config(stream_https=True, acme_ca="https://ca.test/dir", acme_port=port)
     requester = caddy.CertificateCaddy(Which(None), settings, config.Paths.under(tmp_path))
     assert requester.problem() is None

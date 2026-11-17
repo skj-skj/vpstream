@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream import ffargs, media, prepared, probe, subtitles, tracks
-from vpstream.files import has_room, source_key, under, write_atomic
+from vpstream.files import has_room, remove_path, source_key, under, write_atomic
 from vpstream.probe import MKVEXTRACT, MediaInfo, ProbeError, SubtitleTrack
 from vpstream.tools import (
     Cancelled,
@@ -299,9 +299,7 @@ class Job:
 
 def _fresh(folder: Path) -> None:
     """An empty folder, whatever was there (a part left by a run that was cut off)."""
-    if folder.is_symlink() or folder.is_file():
-        folder.unlink()
-    shutil.rmtree(folder, ignore_errors=True)
+    remove_path(folder)
     folder.mkdir(mode=0o750, parents=True)
 
 

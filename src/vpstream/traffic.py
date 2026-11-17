@@ -67,7 +67,8 @@ class Traffic:
         self.clock = clock
         self._acked: dict[Connection, int] = {}  # open connections, as at the last look
         self._seen: dict[Connection, float] = {}  # connections the kernel counts
-        self._logged: dict[Connection, int] = {}  # counted from the log before they were seen
+        # Counted from the log before the kernel saw them, and when they were last logged.
+        self._logged: dict[Connection, tuple[int, float]] = {}
         self._counted: dict[Connection, int] = {}  # counted in all, for the ones seen
         self._in_log: dict[Connection, int] = {}  # what the log says, for the ones seen
         self.kernel = bool(runner.which(TOOL))
@@ -89,7 +90,7 @@ class Traffic:
                 if conn in self._acked and acked >= self._acked[conn]:
                     sent = acked - self._acked[conn]
                 else:  # new, or a new connection on a port used before: all of it is new
-                    logged = self._logged.pop(conn, 0)
+                    logged = self._logged.pop(conn, (0, 0.0))[0]
                     sent = acked - logged
                     self._counted[conn], self._in_log[conn] = logged, logged
                 if sent > 0:
@@ -112,5 +113,10 @@ class Traffic:
                     self._counted[conn] = self._counted.get(conn, 0) + more
                     yield ip, more
                 continue
-            self._logged[conn] = self._logged.get(conn, 0) + size
+            self._logged[conn] = (self._logged.get(conn, (0, 0.0))[0] + size, now)
             yield ip, size
+        # A connection logged but not seen since is closed, or the kernel cannot be asked: what
+        # was counted for it is not needed any more, and would only pile up over a long stream.
+        for conn, (_, when) in list(self._logged.items()):
+            if now - when > SEEN_SECONDS:
+                del self._logged[conn]

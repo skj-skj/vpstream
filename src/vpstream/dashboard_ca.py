@@ -19,12 +19,11 @@ import ipaddress
 import json
 import os
 import re
-import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from vpstream.config import Paths
-from vpstream.files import write_atomic
+from vpstream.files import read_json_object, remove_path, write_atomic
 from vpstream.net import normal_ip
 from vpstream.tools import Runner, tail
 
@@ -86,11 +85,7 @@ def covered(paths: Paths) -> list[str] | None:
     """The hosts the authority was made for, or None when there is no usable one."""
     if not (paths.dashboard_ca_cert.is_file() and paths.dashboard_ca_key.is_file()):
         return None
-    try:
-        data = json.loads(paths.dashboard_ca_hosts.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    hosts = data.get("hosts") if isinstance(data, dict) else None
+    hosts = (read_json_object(paths.dashboard_ca_hosts) or {}).get("hosts")
     if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
         return None
     return hosts
@@ -108,7 +103,7 @@ def make(
     if not hosts:
         raise AuthorityError("no address to make the dashboard's authority for")
     work = paths.dashboard_ca_cert.with_name("dashboard-ca.new")
-    _remove(work)
+    remove_path(work)
     work.mkdir(mode=0o700)
     try:
         conf, key, cert = work / "openssl.cnf", work / "ca.key", work / "ca.crt"
@@ -132,7 +127,7 @@ def make(
         write_atomic(paths.dashboard_ca_hosts, json.dumps({"hosts": list(hosts)}) + "\n")
         paths.dashboard_ca_hosts.chmod(0o644)
     finally:
-        _remove(work)
+        remove_path(work)
 
 
 def remove(paths: Paths) -> list[Path]:
@@ -143,10 +138,3 @@ def remove(paths: Paths) -> list[Path]:
             path.unlink()
             gone.append(path)
     return gone
-
-
-def _remove(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.exists():
-        shutil.rmtree(path)

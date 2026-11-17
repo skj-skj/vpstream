@@ -24,8 +24,8 @@ import pytest
 
 from vpstream import caddy, certificate, config
 from vpstream.certificate import CertificateError, Certificates
-from vpstream.tests.fakes import store_certificate
-from vpstream.tests.test_stream_integration import BODY, HTML, Live, _cookie, _free_port
+from vpstream.tests.fakes import free_port, store_certificate
+from vpstream.tests.test_stream_integration import BODY, HTML, Live, _cookie
 from vpstream.tools import SystemRunner
 
 pytestmark = pytest.mark.integration
@@ -160,7 +160,7 @@ class Pebble:
 
     def __init__(self, binary: str, folder: Path) -> None:
         self.cert, key = _self_signed(folder / "listener")
-        self.port, self.manage, self.http_port = _free_port(), _free_port(), _free_port()
+        self.port, self.manage, self.http_port = free_port(), free_port(), free_port()
         config = {
             "pebble": {
                 "listenAddress": f"{HOST}:{self.port}",
@@ -168,7 +168,7 @@ class Pebble:
                 "certificate": str(self.cert),
                 "privateKey": str(key),
                 "httpPort": self.http_port,
-                "tlsPort": _free_port(),
+                "tlsPort": free_port(),
                 "ocspResponderURL": "",
                 "externalAccountBindingRequired": False,
                 "retryAfter": {"authz": 1, "order": 1},
@@ -269,7 +269,7 @@ def test_a_refused_request_starts_nothing_and_plain_http_still_can(
     video = tmp_path / "film.mp4"
     video.write_bytes(BODY)
     # Caddy answers the check on a port Pebble does not look at: as with port 80 blocked.
-    live = _issued(pebble, short_tmp, port=_free_port())
+    live = _issued(pebble, short_tmp, port=free_port())
     try:
         started = time.monotonic()
         with pytest.raises(Exception, match=r"refused.*--http") as failure:

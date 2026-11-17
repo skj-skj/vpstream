@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from vpstream import caddy, client, config, daemon, dashboard_ca, login
-from vpstream.tests.fakes import FakeFirewall
+from vpstream.tests.fakes import FakeFirewall, free_port
 from vpstream.tests.test_login import PASSWORD, answer, verifier
 from vpstream.tools import SystemRunner
 
@@ -38,12 +38,6 @@ def _has_ipv6_loopback() -> bool:
 HOSTS = [HOST, "::1"] if _has_ipv6_loopback() else [HOST]
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind((HOST, 0))
-        return int(s.getsockname()[1])
-
-
 def wait_for(what: Callable[[], Any], seconds: float = 20.0) -> Any:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -57,8 +51,8 @@ class Public:
     def __init__(self, root: Path) -> None:
         self.paths = config.Paths.under(root)
         self.cfg = config.Config(
-            stream_port=_free_port(),
-            dashboard_port=_free_port(),
+            stream_port=free_port(HOST),
+            dashboard_port=free_port(HOST),
             dashboard_public=True,
         )
         self.paths.config_file.parent.mkdir(parents=True)

@@ -196,6 +196,10 @@ def videos_of(kind: str, path: Path, needs_read: Callable[[str], bool] = _always
     return [str(video) for video in found]
 
 
+def _full_paths(values: list[Any]) -> bool:
+    return all(isinstance(v, str) and v.startswith("/") for v in values)
+
+
 def _ttl_seconds(value: Any, https: bool = False) -> float | None:
     if value is None:
         value = DEFAULT_TTL_MINUTES
@@ -538,17 +542,15 @@ class Stream:
                 or data["mode"] not in MODES
                 or not isinstance(videos, list)
                 or not videos
-                or not all(isinstance(v, str) and v.startswith("/") for v in videos)
+                or not _full_paths(videos)
                 or not (expires is None or isinstance(expires, int | float))
                 or data["unlocked_policy"] == gate.LOCKED
             ):
                 raise StreamError("the recorded stream is not usable")
             count = len(videos)
-            served = data.get("served", videos)  # a stream recorded before 0.9 has none
-            indexing = data.get("indexing", [])
-            notes = data.get("notes", {})
-            entries = data.get("entries", [])
-            https = data.get("https", False)  # a stream recorded before 0.14 is plain HTTP
+            # Every key is required: a record from before 0.14 is not taken up again.
+            served, indexing, notes = data["served"], data["indexing"], data["notes"]
+            entries, https = data["entries"], data["https"]
             if not isinstance(https, bool) or (
                 https
                 and (expires is None or expires - float(data["started"]) > LONGEST_STREAM_SECONDS)
@@ -557,11 +559,11 @@ class Stream:
             if (
                 not isinstance(served, list)
                 or len(served) != count
-                or not all(isinstance(v, str) and v.startswith("/") for v in served)
+                or not _full_paths(served)
                 or not all(isinstance(n, int) and 0 < n <= count for n in indexing)
                 or not isinstance(notes, dict)
                 or not isinstance(entries, list)
-                or not all(isinstance(e, str) and e.startswith("/") for e in entries)
+                or not _full_paths(entries)
                 or len(entries) != (count if data["mode"] == BROWSER else 0)
             ):
                 raise StreamError("the recorded stream is not usable")

@@ -19,11 +19,12 @@ import os
 import pwd
 import re
 import shlex
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from vpstream import media
-from vpstream.files import write_atomic
+from vpstream.files import read_json_object, write_atomic
 from vpstream.tools import Runner, require, tail
 
 TOOL = "setfacl"
@@ -63,15 +64,50 @@ def _acl(runner: Runner, path: Path | str) -> list[str] | None:
 _BASE = ("user::", "group::", "other::")
 
 
-def entry(runner: Runner, path: Path | str, uid: int) -> int | None:
-    """The permission bits of the ACL entry for the user `uid` on a file, or None when it
-    has none. Asked from `getfacl`, with numbers for users, so no name needs reading."""
-    for line in _acl(runner, path) or []:
+def _batches[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
+    """BATCH items at a time, for one call of setfacl or getfacl each."""
+    for start in range(0, len(items), BATCH):
+        yield items[start : start + BATCH]
+
+
+def _acls(runner: Runner, paths: Sequence[Path | str]) -> list[list[str] | None]:
+    """The ACLs of many files, in their order, asked from `getfacl` a batch at a time. It
+    prints one block per file, each ended by an empty line. When a file cannot be read it is
+    left out and getfacl fails, so then that batch is asked again one file at a time."""
+    if not runner.which(READ_TOOL):
+        return [None] * len(paths)
+    found: list[list[str] | None] = []
+    for batch in _batches([str(path) for path in paths]):
+        res = runner.run([READ_TOOL, "-c", "-n", "-p", "--", *batch], timeout=30)
+        printed = res.stdout.strip("\n")
+        blocks = [block.splitlines() for block in printed.split("\n\n")] if printed else []
+        if res.returncode == 0 and len(blocks) == len(batch):
+            found += blocks
+        else:
+            found += [_acl(runner, path) for path in batch]
+    return found
+
+
+def _bits(lines: list[str] | None, uid: int) -> int | None:
+    """The permission bits of the ACL entry for the user `uid` in an ACL as `getfacl -n`
+    prints it, or None when it has none."""
+    for line in lines or []:
         kind, _, rest = line.partition(":")
         owner, _, perms = rest.partition(":")
         if kind == "user" and owner == str(uid):
             return sum(bit for letter, bit in _BITS.items() if letter in perms[:3])
     return None
+
+
+def entry(runner: Runner, path: Path | str, uid: int) -> int | None:
+    """The permission bits of the ACL entry for the user `uid` on a file, or None when it
+    has none. Asked from `getfacl`, with numbers for users, so no name needs reading."""
+    return _bits(_acl(runner, path), uid)
+
+
+def entries(runner: Runner, paths: Sequence[Path | str], uid: int) -> list[int | None]:
+    """`entry` for many files, with one getfacl call per batch."""
+    return [_bits(lines, uid) for lines in _acls(runner, paths)]
 
 
 def record_file() -> Path:
@@ -82,12 +118,7 @@ def record_file() -> Path:
 
 def recorded(path: Path) -> dict[str, list[str]]:
     """Service user -> paths, as written down. An unusable file counts as empty."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    data = read_json_object(path) or {}
     return {
         user: [p for p in paths if isinstance(p, str)]
         for user, paths in data.items()
@@ -115,26 +146,27 @@ class Plan:
     grants: dict[str, list[Path]] = field(default_factory=dict)  # "r", "rx" or "x" -> paths
     not_mine: list[Path] = field(default_factory=list)  # lacking, and not the caller's to change
 
-    service_uid: int | None = None  # whose entries to look for; None when it is not known
-    runner: Runner | None = None  # how to look for them
 
-    def add(self, path: Path, perms: str, uid: int) -> None:
-        need = sum(_BITS[letter] for letter in perms)
+def _wanted(kind: str, source: Path) -> list[tuple[Path, str]]:
+    """Each path the service must use, with what it needs there: read on every video, read
+    and enter on a streamed folder, enter on the folders above."""
+    wanted: list[tuple[Path, str]] = []
+    if kind == "dir":
+        wanted.append((source, "rx"))
         try:
-            st = path.stat()
+            videos = media.scan(source)
         except OSError:
-            return  # not there, or not the caller's to look at: the daemon says so
-        if st.st_mode & need == need:
-            return  # open to every user already
-        has = None
-        if self.service_uid is not None and self.runner is not None:
-            has = entry(self.runner, path, self.service_uid)
-        if has is not None and has & need == need:
-            return  # given before, by hand or by an earlier start
-        if st.st_uid == uid:
-            self.grants.setdefault(perms, []).append(path)
-        else:
-            self.not_mine.append(path)
+            videos = []
+    else:
+        videos = [source]
+    # The daemon follows a link once and reads what it names, so that is what is opened.
+    files = list(dict.fromkeys(video.resolve() for video in videos))
+    wanted += [(file, "r") for file in files]
+    above = dict.fromkeys(
+        parent for path in (source.absolute(), *files) for parent in reversed(path.parents)
+    )
+    wanted += [(folder, "x") for folder in above if folder != source]
+    return wanted
 
 
 def plan(
@@ -144,26 +176,30 @@ def plan(
     service_uid: int | None = None,
     runner: Runner | None = None,
 ) -> Plan:
-    """Read on every video, read and enter on a streamed folder, enter on the folders above."""
-    found = Plan(service_uid=service_uid, runner=runner)
-    if kind == "dir":
-        found.add(source, "rx", uid)
+    """What to grant so the service can use a stream's source (see `_wanted`). The service's
+    own entries are looked for (with `service_uid` and `runner`) only on what other users
+    cannot use already."""
+    lacking: list[tuple[Path, str, int, int]] = []  # path, perms, their bits, its owner
+    for path, perms in _wanted(kind, source):
+        need = sum(_BITS[letter] for letter in perms)
         try:
-            videos = media.scan(source)
+            st = path.stat()
         except OSError:
-            videos = []
+            continue  # not there, or not the caller's to look at: the daemon says so
+        if st.st_mode & need != need:  # else open to every user already
+            lacking.append((path, perms, need, st.st_uid))
+    if service_uid is not None and runner is not None:
+        given = entries(runner, [path for path, *_ in lacking], service_uid)
     else:
-        videos = [source]
-    # The daemon follows a link once and reads what it names, so that is what is opened.
-    files = list(dict.fromkeys(video.resolve() for video in videos))
-    for file in files:
-        found.add(file, "r", uid)
-    above = dict.fromkeys(
-        parent for path in (source.absolute(), *files) for parent in reversed(path.parents)
-    )
-    for folder in above:
-        if folder != source:
-            found.add(folder, "x", uid)
+        given = [None] * len(lacking)
+    found = Plan()
+    for (path, perms, need, owner), has in zip(lacking, given, strict=True):
+        if has is not None and has & need == need:
+            continue  # given before, by hand or by an earlier start
+        if owner == uid:
+            found.grants.setdefault(perms, []).append(path)
+        else:
+            found.not_mine.append(path)
     return found
 
 
@@ -171,9 +207,8 @@ def commands(user: str, grants: dict[str, list[Path]]) -> list[list[str]]:
     """The setfacl calls that carry out a plan."""
     calls = []
     for perms, paths in grants.items():
-        for start in range(0, len(paths), BATCH):
-            batch = [str(p) for p in paths[start : start + BATCH]]
-            calls.append([TOOL, "-m", f"u:{user}:{perms}", "--", *batch])
+        for batch in _batches(paths):
+            calls.append([TOOL, "-m", f"u:{user}:{perms}", "--", *map(str, batch)])
     return calls
 
 
@@ -221,9 +256,9 @@ def grant(
     return sum(len(paths) for paths in todo.grants.values())
 
 
-def _mine(runner: Runner, path: str, service_uid: int, me: int) -> bool:
+def _owned(path: str, me: int) -> bool:
     try:
-        return os.stat(path).st_uid == me and entry(runner, path, service_uid) is not None
+        return os.stat(path).st_uid == me
     except OSError:
         return False
 
@@ -233,8 +268,7 @@ def _drop_bare_masks(runner: Runner, paths: list[str]) -> None:
     as it was (`ls -l` shows no `+`). Only where nothing else is left: `setfacl -x` has just
     made the mask equal to the group's own bits, so removing it changes no access."""
     bare = []
-    for path in paths:
-        lines = _acl(runner, path)
+    for path, lines in zip(paths, _acls(runner, paths), strict=True):
         if (
             lines
             and any(line.startswith("mask::") for line in lines)
@@ -259,15 +293,18 @@ def revoke(runner: Runner, record: Path | None = None, uid: int | None = None) -
     for user, paths in known.items():
         service_uid = _uid(user)
         # Only what is still there, still the caller's, and still carries the entry.
-        there = [p for p in paths if service_uid is not None and _mine(runner, p, service_uid, me)]
+        owned = [p for p in paths if service_uid is not None and _owned(p, me)]
+        there = []
+        if service_uid is not None:
+            given = entries(runner, owned, service_uid)
+            there = [p for p, has in zip(owned, given, strict=True) if has is not None]
         if there:
             require(runner, TOOL, "taking back the vpstream service's access to your videos")
-        for start in range(0, len(there), BATCH):
-            batch = there[start : start + BATCH]
+        for batch in _batches(there):
             res = runner.run([TOOL, "-x", f"u:{user}", "--", *batch], timeout=60)
             if res.returncode == 0:
                 removed += len(batch)
-                _drop_bare_masks(runner, batch)
+                _drop_bare_masks(runner, list(batch))
             else:
                 left.setdefault(user, []).extend(batch)
                 problem = tail(res, stdout=True)
