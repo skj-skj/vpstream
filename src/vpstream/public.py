@@ -170,7 +170,7 @@ def create_app(control: Control) -> Flask:
         wants_html = "text/html" in request.headers.get("Accept", "").lower()
         # What Caddy says the viewer came over; a viewer cannot set it (see `caddy`).
         https = request.headers.get(caddy.HEADER_SCHEME) == "https"
-        cookie = gate.cookie_name(https)
+        cookie = gate.cookie_name(https, control.config.local)
         answer = control.visit(
             path,
             ip,

@@ -519,3 +519,26 @@ def test_what_must_be_written_at_once_is_and_at_most_once_a_second(rig: Viewers)
     assert recorded() == before + 1, "the first is written at once, the rest wait"
     rig.control.tick()
     assert recorded() == before + 5
+
+
+def test_a_local_stream_has_a_cookie_name_of_its_own(
+    rig: Viewers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phone's Chrome held a Secure "vpstream" cookie for the address. It then refused the
+    plain one and sent none back, so each page of the TV was a new browser with a new code."""
+    from dataclasses import replace
+
+    rig.control.config = replace(rig.control.config, local=True)
+    monkeypatch.setattr(rig.control, "_local_address", lambda: "192.168.1.69")
+    rig.start_browser()
+    web = public.create_app(rig.control).test_client()
+    headers = {"X-Vpstream-Ip": TV, "Accept": "text/html"}
+    first = web.get("/aaa", headers=headers)
+    assert first.headers["Set-Cookie"].startswith(f"{gate.LOCAL_COOKIE}=")
+    # A browser that keeps it (as the test client does) is the same browser on every page.
+    assert "Set-Cookie" not in web.get("/aaa", headers=headers).headers
+    assert rig.control.stream is not None and len(rig.control.stream.devices.browsers()) == 1
+    # What a Secure cookie of the old name blocked does not matter to it.
+    web.set_cookie(gate.COOKIE, "something-else")
+    assert "Set-Cookie" not in web.get("/aaa", headers=headers).headers
+    assert gate.cookie_name(False) == "vpstream"  # Linux, public: as before

@@ -43,10 +43,17 @@ COOKIE = "vpstream"
 # on an HTTPS stream would get no cookie on a later plain one (`start --http`). __Host-: only
 # over HTTPS, for this host and path /, so a plain page cannot plant it either.
 SECURE_COOKIE = "__Host-vpstream"
+# Local mode's: a name of its own, for the same reason. A browser that holds a Secure
+# cookie named "vpstream" for the address (from wherever it came) keeps a plain page from
+# setting one of that name, and never sends it there: every page would be a new browser,
+# with a new code. Found on a phone's Chrome.
+LOCAL_COOKIE = "vpstream-local"
 
 
-def cookie_name(https: bool) -> str:
-    return SECURE_COOKIE if https else COOKIE
+def cookie_name(https: bool, local: bool = False) -> str:
+    if https:
+        return SECURE_COOKIE
+    return LOCAL_COOKIE if local else COOKIE
 
 
 _BROWSER_ID = re.compile(r"b-[0-9a-f]{6}")
