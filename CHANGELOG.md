@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.16.0 (2026-11-17)
+
+### Features
+
+- Local network mode and Termux support ([#29](https://github.com/skj-skj/vpstream/pull/29),
+  [`e8e27f3`](https://github.com/skj-skj/vpstream/commit/e8e27f31416b73ad23b5f3c240d8f8fa95c68ee8))
+
+
 ## v0.15.2 (2026-11-17)
 
 ### Performance Improvements
