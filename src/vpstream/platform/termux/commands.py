@@ -6,8 +6,14 @@ says what is still missing; `uninstall` removes vpstream's own folders.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import subprocess
+import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from vpstream import client, config, login
 from vpstream.files import remove_path
@@ -130,3 +136,101 @@ def install_refusal(program: str) -> str:
         f"vpstream does not install {program} on Termux; Termux's own package is the one to "
         f"use: {termux.HINTS.install(program)} (all of what vpstream needs: {termux.PACKAGES})"
     )
+
+
+LOG_NAME = "daemon.log"
+LOG_KEEP_BYTES = 5 * 1024 * 1024  # a longer log is moved aside to daemon.log.1 at `up`
+UP_SECONDS = 15.0
+DOWN_SECONDS = 20.0  # a stream and a prepare are stopped first
+
+
+def _answers(paths: config.Paths) -> dict[str, Any] | None:
+    try:
+        info: dict[str, Any] = client.call(paths.socket, "GET", "status", timeout=3)
+    except (client.DaemonUnavailable, client.DaemonRefused):
+        return None
+    return info
+
+
+def _wait(until: Callable[[], bool], seconds: float, sleep: Callable[[float], None]) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if until():
+            return True
+        sleep(0.2)
+    return until()
+
+
+def up(
+    runner: Runner,
+    paths: config.Paths,
+    say: Callable[[str], None] = print,
+    spawn: Callable[[list[str], Path], Any] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Start the daemon in the background, with the phone kept awake (termux-wake-lock),
+    and wait until it answers. Returns its status. A stream that ran when Android stopped
+    Termux is taken up again by the daemon itself (see `control.reconcile`)."""
+    if info := _answers(paths):
+        say(f"the daemon is already running (pid {info.get('pid')})")
+        return info
+    paths.state_dir.mkdir(mode=FOLDER_MODE, parents=True, exist_ok=True)
+    log = paths.state_dir / LOG_NAME
+    with contextlib.suppress(OSError):
+        if log.stat().st_size > LOG_KEEP_BYTES:
+            os.replace(log, log.with_name(LOG_NAME + ".1"))
+    # -P: the folder this is run from is never put on the module path, where a folder or
+    # file of the same name (vpstream's own platform/, a json.py) would shadow a module.
+    proc = (spawn or _spawn)([sys.executable, "-P", "-m", "vpstream", "daemon"], log)
+    if runner.which("termux-wake-lock"):
+        runner.run(["termux-wake-lock"], timeout=10)
+    else:
+        say("note: termux-wake-lock is missing; Android may pause vpstream with the screen off")
+    if not _wait(lambda: _answers(paths) is not None or proc.poll() is not None, UP_SECONDS, sleep):
+        raise CommandError(f"the daemon did not answer within {UP_SECONDS:g} seconds; see {log}")
+    info = _answers(paths)
+    if info is None:
+        raise CommandError(f"the daemon stopped at once:\n{_tail(log)}")
+    say(f"the daemon is running (pid {info.get('pid')}); its log is {log}")
+    return info
+
+
+def _spawn(argv: list[str], log: Path) -> subprocess.Popen[bytes]:
+    with log.open("ab") as out:
+        return subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # it outlives this command and the terminal
+            close_fds=True,
+            cwd=log.parent,  # not the folder this was run from, which may go
+        )
+
+
+def _tail(log: Path, lines: int = 15) -> str:
+    try:
+        return "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    except OSError as exc:
+        return f"(no log: {exc})"
+
+
+def down(
+    runner: Runner,
+    paths: config.Paths,
+    say: Callable[[str], None] = print,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Stop the daemon (it stops a running stream first) and let the phone sleep again."""
+    if _answers(paths) is None:
+        say("the daemon is not running")
+    else:
+        try:
+            client.call(paths.socket, "POST", "daemon/stop", {})
+        except (client.DaemonUnavailable, client.DaemonRefused) as exc:
+            raise CommandError(f"the daemon did not stop: {exc}") from exc
+        if not _wait(lambda: not paths.socket.exists(), DOWN_SECONDS, sleep):
+            raise CommandError(f"the daemon is still stopping after {DOWN_SECONDS:g} seconds")
+        say("the daemon is stopped")
+    if runner.which("termux-wake-unlock"):
+        runner.run(["termux-wake-unlock"], timeout=10)

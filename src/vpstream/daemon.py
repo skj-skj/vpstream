@@ -316,7 +316,7 @@ class Daemon:
         socket files are removed."""
         apps = {
             self.paths.socket: api.create_app(
-                self.status, self.control, None, self.certificate, self._admin()
+                self.status, self.control, None, self.certificate, self._admin(stop)
             ),
             self.paths.gate_socket: public.create_app(self.control),
         }
@@ -440,11 +440,21 @@ class Daemon:
             if lan and not stop.is_set():
                 self.log(f"the dashboard on {address} is closed: the address is gone")
 
-    def _admin(self) -> dict[str, Callable[[], Any]] | None:
-        """What only the command line's socket may ask for: the public dashboard's own."""
-        if self.login is None:
-            return None
-        return {"dashboard/reload": self.reload_password, "dashboard/unblock": self.unblock}
+    def _admin(self, stop: threading.Event) -> dict[str, Callable[[], Any]] | None:
+        """What only the command line's socket may ask for: the dashboard's password, and on
+        Termux, where no service manager stops the daemon, `vpstream down`."""
+        routes: dict[str, Callable[[], Any]] = {}
+        if self.login is not None:
+            routes |= {"dashboard/reload": self.reload_password, "dashboard/unblock": self.unblock}
+        if platform.is_termux():
+
+            def stop_daemon() -> dict[str, Any]:
+                self.log("asked to stop (vpstream down)")
+                stop.set()
+                return {"stopping": True}
+
+            routes["daemon/stop"] = stop_daemon
+        return routes or None
 
     def _dashboard_port(self, action: str) -> None:
         """Open or close the dashboard port. Without a helper (a trial run) nothing is done."""

@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -31,7 +32,7 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import dashboard_ca
+from vpstream import dashboard_ca, platform
 from vpstream.certificate import PROFILE, Certificate, CertificateError, first_der
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
@@ -383,6 +384,39 @@ class CaddyProcess:
         self.port = port
         self.work_dir = work_dir  # Caddy's own files and its error output
         self._proc: subprocess.Popen[bytes] | None = None
+        # On Termux nothing stops Caddy with a daemon that was killed (Android, kill -9): it
+        # is written down, and one left by an earlier daemon is stopped before a start. On
+        # Linux systemd stops every process of the service.
+        self.reap = platform.is_termux()
+
+    @property
+    def config_file(self) -> Path:
+        return self.work_dir / "caddy.json"
+
+    @property
+    def pid_file(self) -> Path:
+        return self.work_dir / "caddy.pid"
+
+    def _stop_left_over(self) -> None:
+        """Stop the Caddy an earlier daemon of this install left running, if any: only a
+        process whose command line names this Caddy's configuration file."""
+        try:
+            pid = int(self.pid_file.read_text(encoding="ascii").strip())
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except (OSError, ValueError):
+            self.pid_file.unlink(missing_ok=True)
+            return
+        if os.fsencode(self.config_file) not in argv:
+            self.pid_file.unlink(missing_ok=True)
+            return  # the number is another process's now
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + STOP_SECONDS
+        while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+            time.sleep(0.1)
+        if Path(f"/proc/{pid}").exists():
+            os.kill(pid, signal.SIGKILL)
+        self.pid_file.unlink(missing_ok=True)
 
     def config(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -414,10 +448,12 @@ class CaddyProcess:
         if self.running():
             return
         binary = require(self.runner, "caddy", self.needed_for)
+        if self.reap:
+            self._stop_left_over()
         if problem := self.port_problem():
             raise CaddyError(problem)
         self.work_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
-        config_file = self.work_dir / "caddy.json"
+        config_file = self.config_file
         write_atomic(config_file, json.dumps(self.config(), indent=1))
         # The service user has no home folder; Caddy keeps its files where it is told to.
         env = {
@@ -434,6 +470,8 @@ class CaddyProcess:
                 env=env,
                 cwd=str(self.work_dir),
             )
+        if self.reap:
+            write_atomic(self.pid_file, f"{proc.pid}\n")
         deadline = time.monotonic() + START_SECONDS
         while proc.poll() is None and time.monotonic() < deadline:
             if not self.listens or _accepts(self.port, self.probe_host):
@@ -455,6 +493,8 @@ class CaddyProcess:
         proc, self._proc = self._proc, None
         if proc is not None:
             _end(proc)
+            if self.reap:
+                self.pid_file.unlink(missing_ok=True)
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None

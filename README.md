@@ -96,6 +96,7 @@ stay.
 | `vpstream doctor` | Checks this host |
 | `sudo vpstream init` | Sets the service up, or again after an upgrade or a change of the configuration |
 | `sudo vpstream uninstall [--purge] [--yes]` | Removes it (see Uninstall) |
+| `vpstream up`, `vpstream down` | Termux: starts the daemon in the background and keeps the phone awake, or stops it (see Termux) |
 | `sudo vpstream init --no-tailscale`, `sudo vpstream init --tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
 | `sudo vpstream init --local [--address IP]` | Serves the local network only, at a private address, with the dashboard there behind a password (see Local network mode); plain `init` goes back to the default |
 | `sudo vpstream init --https`, `sudo vpstream init --no-https` | Serves streams over HTTPS with a Let's Encrypt certificate for the address, or over plain HTTP again |

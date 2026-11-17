@@ -569,6 +569,37 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         return _error(f"the daemon cannot start: {exc}")
 
 
+def cmd_up(args: argparse.Namespace) -> int:
+    return _up_down(up=True)
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    return _up_down(up=False)
+
+
+def _up_down(up: bool) -> int:
+    """Termux has no service manager: `up` and `down` start and stop the daemon."""
+    if not platform.is_termux():
+        what = "start" if up else "stop"
+        return _error(
+            f"on Linux the service runs the daemon: sudo systemctl {what} vpstream "
+            "(or vpstream daemon, in the foreground)"
+        )
+    from vpstream import config
+    from vpstream.platform.termux import commands
+    from vpstream.tools import SystemRunner
+
+    try:
+        if up:
+            info = commands.up(SystemRunner(), config.default_paths())
+            print("Dashboard:    " + dashboard_line(info.get("dashboard") or {}))
+        else:
+            commands.down(SystemRunner(), config.default_paths())
+    except (commands.CommandError, OSError) as exc:
+        return _error(str(exc))
+    return 0
+
+
 def _service() -> Any:
     from vpstream.platform.linux import service
     from vpstream.tools import SystemRunner
@@ -961,6 +992,12 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--name", help="what to call the device on the dashboard")
     cl.set_defaults(func=cmd_clients)
 
+    sub.add_parser(
+        "up", help="Termux: start the daemon in the background and keep the phone awake"
+    ).set_defaults(func=cmd_up)
+    sub.add_parser("down", help="Termux: stop the daemon and let the phone sleep").set_defaults(
+        func=cmd_down
+    )
     dm = sub.add_parser("daemon", help="run the daemon in the foreground (the service does this)")
     dm.add_argument(
         "--local",
