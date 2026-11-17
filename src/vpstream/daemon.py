@@ -11,6 +11,7 @@ dashboard port, over HTTPS. The port is opened in the firewall only while that C
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import secrets
 import socket
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import __version__, api, local, net, platform, prepare, public
+from vpstream import __version__, api, ffargs, local, net, platform, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
     CaddyError,
@@ -167,7 +168,12 @@ class Daemon:
                 device_secret=self._device_secret(),
             )
         speeds = prepare.Speeds(self.config.copy_speed, self.config.encode_speed)
-        preparer = prepare.Preparer(self.paths.cache_dir, self.runner, self.log, speeds=speeds)
+        settings = ffargs.DEFAULT_SETTINGS
+        if self.config.prepare_threads:
+            settings = dataclasses.replace(settings, threads=self.config.prepare_threads)
+        preparer = prepare.Preparer(
+            self.paths.cache_dir, self.runner, self.log, settings=settings, speeds=speeds
+        )
         self.control = Control(
             self.config,
             self.paths,
@@ -573,6 +579,8 @@ def run(
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
     server = CaddyServer(runner, config.stream_port, paths)
+    server.gate_connections = config.gate_connections
+    server.cpus, server.memory_mb = config.caddy_cpus, config.caddy_memory_mb
     log = lambda m: print(m, flush=True)  # noqa: E731
     certificates = stream_certificates(config, paths, runner, acme_firewall, log)
     daemon = Daemon(config, paths, runner, firewall, server, certificates, log=log)

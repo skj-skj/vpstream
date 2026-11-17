@@ -37,6 +37,7 @@ class EncodeSettings:
     bufsize: str = "16M"
     audio_bitrate: str = "160k"
     audio_channels: int = 2
+    threads: int = 0  # ffmpeg's threads for the encode; 0 leaves it to ffmpeg (see Limits)
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ def h264_video_args(s: EncodeSettings) -> list[str]:
         "-pix_fmt",
         "yuv420p",
         *keyframe_args(),
+        *(["-threads", str(s.threads)] if s.threads else []),
     ]
 
 

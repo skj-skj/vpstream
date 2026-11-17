@@ -87,11 +87,23 @@ def unlink_videos(folder: Path) -> None:
 _NO_ADMIN = {"disabled": True, "config": {"persist": False}}
 
 
-def _proxy_to(socket_path: Path) -> dict[str, Any]:
+def _proxy_to(socket_path: Path, connections: int = 0) -> dict[str, Any]:
     """Hand the request to the daemon on a unix socket, with the viewer's address in a
-    header Caddy sets itself, so whatever a viewer sends under that name is replaced."""
+    header Caddy sets itself, so whatever a viewer sends under that name is replaced. With
+    `connections`, at most that many at once: the others wait for one to be free, where
+    more would overflow the socket and be refused (see `Limits`)."""
+    transport: dict[str, Any] = {}
+    if connections:
+        transport = {
+            "transport": {
+                "protocol": "http",
+                "max_conns_per_host": connections,
+                "keep_alive": {"max_idle_conns_per_host": connections},
+            }
+        }
     return {
         "handler": "reverse_proxy",
+        **transport,
         "upstreams": [{"dial": f"unix/{socket_path}"}],
         "headers": {
             "request": {
@@ -112,6 +124,7 @@ def config(
     videos_dir: Path,
     certificate: Certificate | None = None,
     host: str = "",
+    gate_connections: int = 0,
 ) -> dict[str, Any]:
     """The stream's Caddy: its whole configuration, as its native JSON. With a
     `certificate` it serves HTTPS with it, loaded from its files: this Caddy never asks for
@@ -126,7 +139,7 @@ def config(
         {"handler": "file_server", "root": str(videos_dir)},
     ]
     ask_gate = {
-        **_proxy_to(gate_socket),
+        **_proxy_to(gate_socket, gate_connections),
         "handle_response": [
             {"match": {"headers": {HEADER_FILE: ["*"]}}, "routes": [{"handle": send_file}]}
         ],
@@ -421,6 +434,17 @@ class CaddyProcess:
     def config(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    cpus = 0  # GOMAXPROCS; 0 leaves it to Go
+    memory_mb = 0  # GOMEMLIMIT, where Go's collector works harder; 0 leaves it to Go
+
+    def limits_env(self) -> dict[str, str]:
+        env = {}
+        if self.cpus:
+            env["GOMAXPROCS"] = str(self.cpus)
+        if self.memory_mb:
+            env["GOMEMLIMIT"] = f"{self.memory_mb}MiB"
+        return env
+
     @property
     def probe_host(self) -> str:
         """Where to see that Caddy listens."""
@@ -460,6 +484,7 @@ class CaddyProcess:
             **os.environ,
             "XDG_DATA_HOME": str(self.data_dir),
             "XDG_CONFIG_HOME": str(self.work_dir / "config"),
+            **self.limits_env(),
         }
         with self.error_log.open("wb") as errors:
             proc = subprocess.Popen(
@@ -521,6 +546,7 @@ class CaddyServer(CaddyProcess):
         self.videos_dir = paths.videos_dir
         self.certificate: Certificate | None = None
         self.host = ""  # local mode: the one address to listen on; set before each start
+        self.gate_connections = 0  # at most this many requests to the gate at once
 
     def config(self) -> dict[str, Any]:
         return config(
@@ -530,6 +556,7 @@ class CaddyServer(CaddyProcess):
             self.videos_dir,
             self.certificate,
             self.host,
+            self.gate_connections,
         )
 
     @property

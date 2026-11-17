@@ -175,6 +175,13 @@ class Config:
     # which runs `vpstream daemon --local`, never from this file.
     local: bool = False
     local_address: str = ""  # with `local`: the address to serve on; "" means: find it
+    # How much the stream may take of the host, 0 for no bound (Linux; see TERMUX_LIMITS):
+    # requests Caddy asks the gate at once, Caddy's processors and memory (GOMAXPROCS,
+    # GOMEMLIMIT), and the threads of one ffmpeg that prepares.
+    gate_connections: int = 0
+    caddy_cpus: int = 0
+    caddy_memory_mb: int = 0
+    prepare_threads: int = 0
 
 
 # Section and key in the file -> field of Config.
@@ -195,6 +202,18 @@ _KEYS = {
 _LOCAL_KEYS = {
     ("network", "mode"): "local",
     ("network", "address"): "local_address",
+    ("limits", "gate_connections"): "gate_connections",
+    ("limits", "caddy_cpus"): "caddy_cpus",
+    ("limits", "caddy_memory_mb"): "caddy_memory_mb",
+    ("limits", "prepare_threads"): "prepare_threads",
+}
+# Termux's defaults: a phone serves one or two devices, and must not be killed for what it
+# takes. Measured with scripts/load-probe.py (see the README, Termux).
+TERMUX_LIMITS = {
+    "gate_connections": 8,
+    "caddy_cpus": 2,
+    "caddy_memory_mb": 192,
+    "prepare_threads": 4,
 }
 # What Termux cannot do: it has no public address, no firewall and no port 80.
 _NOT_LOCAL = {
@@ -279,6 +298,15 @@ port = 1338
 [media]
 # The folder `vpstream ls` lists when it is given none.
 # folder = "/storage/emulated/0/Movies"
+
+[limits]
+# What a stream may take of the phone; 0 for no bound. Requests Caddy hands the daemon at
+# once (more wait their turn instead of failing), Caddy's processors and memory, and the
+# threads of the one ffmpeg that prepares a video.
+# gate_connections = 8
+# caddy_cpus = 2
+# caddy_memory_mb = 192
+# prepare_threads = 4
 """
 
 
@@ -300,6 +328,12 @@ def _host_problem(name: str, value: Any) -> str | None:
 def _speed_problem(name: str, value: Any) -> str | None:
     if not is_number(value) or not 0.01 <= value <= 1000:
         return f"{name} must be a number from 0.01 to 1000 (times real time), not {value!r}"
+    return None
+
+
+def _limit_problem(name: str, value: Any) -> str | None:
+    if not is_whole(value) or not 0 <= value <= 4096:
+        return f"{name} must be a whole number from 0 (no bound) to 4096, not {value!r}"
     return None
 
 
@@ -355,6 +389,10 @@ _CHECKS = {
     "encode_speed": _speed_problem,
     "local": _mode_problem,
     "local_address": _host_problem,
+    "gate_connections": _limit_problem,
+    "caddy_cpus": _limit_problem,
+    "caddy_memory_mb": _limit_problem,
+    "prepare_threads": _limit_problem,
 }
 
 
@@ -380,7 +418,7 @@ def parse(text: str, local_keys: bool | None = None) -> Config:
             field = keys.get((section, key))
             name = f"{section}.{key}"
             if field is None:
-                local = (section, key) in _LOCAL_KEYS
+                local = section == "network" and (section, key) in _LOCAL_KEYS
                 hint = " (local mode on Linux: sudo vpstream init --local)" if local else ""
                 problems.append(f"unknown setting {name!r}{hint}")
             elif problem := _CHECKS.get(field, _port_problem)(name, value):
@@ -392,6 +430,7 @@ def parse(text: str, local_keys: bool | None = None) -> Config:
     if termux:
         values["local"] = True  # `mode` says so, or is left out
         values.setdefault("media_folder", TERMUX_MEDIA)
+        values = {**TERMUX_LIMITS, **values}
     config = Config(**values)
     if not problems:
         ports = {
