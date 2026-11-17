@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from vpstream.doctor import SYSTEM_INSTALL
+from vpstream.platform.linux.doctor import SYSTEM_INSTALL
 
 TESTS_DIR = Path(__file__).parent / "tests"
 

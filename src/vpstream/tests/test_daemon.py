@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from vpstream import __version__, api, cli, client, config, daemon, firewall, show, state
+from vpstream import __version__, api, cli, client, config, daemon, show, state
+from vpstream.platform.linux import firewall
 from vpstream.tests.fakes import (
     NAME,
     EventFirewall,

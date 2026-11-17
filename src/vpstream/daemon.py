@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import __version__, api, net, prepare, public, tailscale
+from vpstream import __version__, api, net, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
     CaddyError,
@@ -35,7 +35,8 @@ from vpstream.caddy import (
 from vpstream.certificate import Certificates
 from vpstream.config import Config, Paths
 from vpstream.control import Control
-from vpstream.firewall import Firewall, FirewallError, switch
+from vpstream.platform.common import Firewall, FirewallError, switch
+from vpstream.platform.linux import tailscale
 from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out

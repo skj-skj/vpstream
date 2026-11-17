@@ -28,8 +28,8 @@ from vpstream.certificate import Certificate, CertificateError, Certificates
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import under
-from vpstream.firewall import Firewall, FirewallError, switch
 from vpstream.media import shown
+from vpstream.platform.common import Firewall, FirewallError, switch
 from vpstream.stream import (
     BROWSER,
     DIRECT,

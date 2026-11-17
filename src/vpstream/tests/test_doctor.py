@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import cli, config, doctor, tailscale
+from vpstream import cli, config
+from vpstream.platform.linux import doctor, tailscale
 from vpstream.tests.fakes import NAME, FakeRunner, node_status, serve_status
 
 ALL_TOOLS = (*(t.name for t in doctor.TOOLS), "fc-list")

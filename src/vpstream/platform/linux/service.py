@@ -27,20 +27,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from vpstream import (
-    caddy,
-    certificate,
-    client,
-    config,
-    dashboard_ca,
-    doctor,
-    ffmpeg_install,
-    firewall,
-    login,
-    net,
-    tailscale,
-)
+from vpstream import caddy, certificate, client, config, dashboard_ca, login, net
 from vpstream.files import remove_path, write_atomic
+from vpstream.platform.linux import doctor, ffmpeg_install, firewall, tailscale
 from vpstream.tools import Result, Runner, tail
 
 USER = "vpstream"  # the service user, and its group
@@ -186,7 +175,7 @@ class Service:
     sudo_user: str | None = None
     bin_dir: Path = field(default_factory=lambda: Path(sys.executable).parent)
     install_problem: Callable[[], str | None] = lambda: doctor.install_problem(
-        Path(__file__).parent
+        Path(__file__).parents[2]
     )
     program_problem: Callable[[Path], str | None] = doctor.program_problem
     port_busy: Callable[[int], bool] = port_busy

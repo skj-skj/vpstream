@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import access, clients, gate, media, player, prepared, tracks
+from vpstream import clients, gate, media, player, prepared, tracks
 from vpstream.certificate import LONGEST_STREAM_SECONDS
 from vpstream.checks import is_number
+from vpstream.platform.linux import access
 
 DIRECT = "direct"  # the files as they are, for players such as VLC
 BROWSER = "browser"  # prepared HLS versions and a player page, for TV browsers

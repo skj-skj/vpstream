@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream.caddy import CaddyError
-from vpstream.firewall import FirewallError
+from vpstream.platform.common import FirewallError
 from vpstream.tools import Result, SystemRunner
 
 NAME = "host.example.ts.net"  # the fake host's name on its tailnet

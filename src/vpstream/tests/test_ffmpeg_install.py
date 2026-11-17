@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from vpstream import cli
-from vpstream import ffmpeg_install as fi
-from vpstream import system_install as si
+from vpstream.platform.linux import ffmpeg_install as fi
+from vpstream.platform.linux import system_install as si
 from vpstream.tools import Result, SystemRunner
 
 V9 = "n9.0.2-48-gd4070a14ce"

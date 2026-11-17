@@ -10,7 +10,7 @@ import pytest
 
 from vpstream import certificate, config
 from vpstream.certificate import CertificateError, Certificates
-from vpstream.firewall import FirewallError
+from vpstream.platform.common import FirewallError
 from vpstream.tests.fakes import (
     FakeFirewall,
     FakeIssuer,
@@ -307,6 +307,7 @@ def test_a_new_certificate_beats_one_left_aside(tmp_path: Path) -> None:
 
 
 def test_the_command_line_waits_longer_than_a_request_can_take() -> None:
-    from vpstream import caddy, client, firewall
+    from vpstream import caddy, client
+    from vpstream.platform.linux import firewall
 
     assert client.START_TIMEOUT > caddy.OBTAIN_SECONDS + 2 * firewall.TIMEOUT + 30

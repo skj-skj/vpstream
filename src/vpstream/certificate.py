@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vpstream.config import LETS_ENCRYPT, LETS_ENCRYPT_STAGING, Config, Paths
-from vpstream.firewall import Firewall, FirewallError
 from vpstream.net import is_ipv4
+from vpstream.platform.common import Firewall, FirewallError
 
 PROFILE = "shortlived"  # the only Let's Encrypt profile that allows an address
 # A certificate must last this much past the end of a stream, so a clock that is a little

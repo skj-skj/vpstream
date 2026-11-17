@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import cli, config, service, tailscale
+from vpstream import cli, config
+from vpstream.platform.linux import service, tailscale
 from vpstream.tests.fakes import NAME, node_status, serve_status
 from vpstream.tools import Result
 
@@ -644,7 +645,7 @@ GOOD = "a long enough password"
 
 
 def _dash_ports(setup: Setup) -> list[int]:
-    from vpstream import firewall
+    from vpstream.platform.linux import firewall
 
     return firewall.recorded_ports(setup.layout.paths.open_dashboard_ports_file, os.getuid())
 
@@ -1020,7 +1021,7 @@ def test_https_and_the_public_dashboard_go_together(setup: Setup) -> None:
 def test_a_port_80_rule_that_was_there_before_vpstream_stays(setup: Setup, theirs: str) -> None:
     """Opened by hand before vpstream came (a web server's `ufw allow 80/tcp`, or a rule just
     like vpstream's): requests, --no-https and uninstall all leave it."""
-    from vpstream import firewall
+    from vpstream.platform.linux import firewall
 
     setup.host.rules.add(theirs)
     _https_ready(setup).init(https=True)

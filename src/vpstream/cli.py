@@ -232,7 +232,8 @@ def _request(
     """Ask the daemon to start a stream or a prepare of a file or folder. When the service
     cannot read the videos, give it access (an ACL entry for its user alone) and ask once
     more; when it would take long, say what and ask whether to go ahead."""
-    from vpstream import access, client, config
+    from vpstream import client, config
+    from vpstream.platform.linux import access
     from vpstream.tools import SystemRunner, ToolMissing
 
     socket = config.default_paths().socket
@@ -451,7 +452,7 @@ def cmd_track_info(args: argparse.Namespace) -> int:
 
 def _revoke() -> int:
     """Take back the file access `start` gave the service. Says so when it did."""
-    from vpstream import access
+    from vpstream.platform.linux import access
     from vpstream.tools import SystemRunner, ToolMissing
 
     try:
@@ -527,7 +528,8 @@ def cmd_clients(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    from vpstream import config, daemon, firewall
+    from vpstream import config, daemon
+    from vpstream.platform.linux import firewall
     from vpstream.tools import SystemRunner
 
     paths = config.default_paths()
@@ -548,7 +550,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 
 def _service() -> Any:
-    from vpstream import service
+    from vpstream.platform.linux import service
     from vpstream.tools import SystemRunner
 
     return service.Service(SystemRunner(), sudo_user=os.environ.get("SUDO_USER"))
@@ -589,7 +591,7 @@ def _password(args: argparse.Namespace, ask: bool) -> str | None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    from vpstream import service
+    from vpstream.platform.linux import service
 
     svc = _service()
     try:
@@ -606,7 +608,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_dash_pass(args: argparse.Namespace) -> int:
-    from vpstream import service
+    from vpstream.platform.linux import service
 
     if os.geteuid() != 0:
         return _error("this needs root: sudo vpstream dash-pass")
@@ -637,7 +639,7 @@ def cmd_dashboard_cert(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    from vpstream import service
+    from vpstream.platform.linux import service
 
     what = "the vpstream service, its user, configuration and state"
     what += ", every prepared video and the ffmpeg it installed" if args.purge else ""
@@ -663,7 +665,7 @@ def _ask(question: str) -> bool:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    from vpstream import caddy_install, ffmpeg_install, system_install
+    from vpstream.platform.linux import caddy_install, ffmpeg_install, system_install
     from vpstream.tools import SystemRunner
 
     if args.tmp and not Path(args.tmp).is_dir():

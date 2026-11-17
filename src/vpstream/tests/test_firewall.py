@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import firewall, state
+from vpstream import state
+from vpstream.platform.linux import firewall
 from vpstream.tests.fakes import FakeRunner
 
 UFW = "/usr/sbin/ufw"
