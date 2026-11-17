@@ -11,6 +11,8 @@ dashboard port, over HTTPS. The port is opened in the firewall only while that C
 
 from __future__ import annotations
 
+import collections
+import contextlib
 import dataclasses
 import os
 import secrets
@@ -51,6 +53,10 @@ URL_SECONDS = 30.0  # how long the tailnet address is remembered between status 
 # "not published" instead of the daemon looking dead.
 TAILSCALE_SECONDS = 4.0
 PROBE_SECONDS = 2.0
+# Local mode's dashboard, with nothing in front of it (see _make_server).
+REQUEST_SECONDS = 15.0
+EXPOSED_THREADS = 16
+PER_ADDRESS = 6  # what a browser opens to one host at most
 
 
 class DaemonError(RuntimeError):
@@ -107,8 +113,10 @@ def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
 
 
 def bind_tcp(host: str, port: int) -> socket.socket:
-    """Listen on one address. Raises OSError when the address or port cannot be used."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    """Listen on one address (IPv4, or IPv6 in local mode). Raises OSError when the address
+    or port cannot be used."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
@@ -119,20 +127,71 @@ def bind_tcp(host: str, port: int) -> socket.socket:
     return sock
 
 
-def _make_server(host: str, port: int, app: Any, listener: socket.socket) -> Any:
+def _make_server(
+    host: str, port: int, app: Any, listener: socket.socket, exposed: bool = False
+) -> Any:
     """A threaded server on a socket that is already listening. Requests that only read (a
     viewer's, a status poll) are not logged one by one: there is one for every piece of a
-    video. Changes are."""
+    video. Changes are.
+
+    `exposed`: nothing is in front of it (local mode's dashboard, which the network reaches
+    directly). A connection that sends nothing for REQUEST_SECONDS is closed, and at most
+    EXPOSED_THREADS are served at once, PER_ADDRESS of them for one address: the others get
+    a 503 at once, so connections held open cannot take a thread each without end, nor one
+    device every thread."""
     from werkzeug.serving import WSGIRequestHandler, make_server
 
     class Handler(WSGIRequestHandler):
+        timeout = REQUEST_SECONDS if exposed else None
+
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
             if self.command not in ("GET", "HEAD"):
                 super().log_request(code, size)
 
-    return make_server(
+    server = make_server(
         host, port, app, threaded=True, request_handler=Handler, fd=listener.fileno()
     )
+    if exposed:
+        _bound_threads(server, EXPOSED_THREADS, PER_ADDRESS)
+    return server
+
+
+BUSY = b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 0\r\n" + (
+    b"Connection: close\r\n\r\n"
+)
+
+
+def _bound_threads(server: Any, most: int, per_address: int) -> None:
+    """Serve at most `most` connections at once, and `per_address` from one address; refuse
+    the others with a 503 at once."""
+    serve_one = server.process_request_thread
+    lock = threading.Lock()
+    busy: collections.Counter[str] = collections.Counter()
+
+    def process_request(request: socket.socket, client_address: Any) -> None:
+        who = str(client_address[0]) if isinstance(client_address, tuple) else ""
+        with lock:
+            room = sum(busy.values()) < most and busy[who] < per_address
+            if room:
+                busy[who] += 1
+        if not room:
+            with contextlib.suppress(OSError):
+                request.sendall(BUSY)
+            server.shutdown_request(request)
+            return
+
+        def run() -> None:
+            try:
+                serve_one(request, client_address)
+            finally:
+                with lock:
+                    busy[who] -= 1
+                    if not busy[who]:
+                        del busy[who]
+
+        threading.Thread(target=run, daemon=True).start()
+
+    server.process_request = process_request
 
 
 @dataclass
@@ -270,7 +329,7 @@ class Daemon:
             return self._local_status()
         public = self.config.dashboard_public
         info: dict[str, Any] = {
-            "mode": "local" if self.config.local else "public" if public else "tailnet",
+            "mode": "public" if public else "tailnet",
             "port": self.config.dashboard_port,
             "address": self.dashboard_address,
             "url": None,
@@ -286,8 +345,6 @@ class Daemon:
         elif public and self.dashboard_server is not None:
             hosts = self.dashboard_server.hosts
             info["url"] = net.url("https", hosts[0], self.config.dashboard_port) + "/"
-        elif self.config.local:
-            info["url"] = f"http://{self.dashboard_address}/"
         else:
             info["url"], info["problem"] = self.published()
         return info
@@ -418,8 +475,8 @@ class Daemon:
                 stop.wait(self.retry_seconds)
                 continue
             bound_port = listener.getsockname()[1]
-            server = _make_server(host, bound_port, app, listener)
-            address = f"{host}:{bound_port}"
+            server = _make_server(host, bound_port, app, listener, exposed=self.config.local)
+            address = net.url("http", host, bound_port).removeprefix("http://")
             if lan:
                 self.lan_address = address
                 self.log(f"dashboard on http://{address}/ (local network, behind the password)")

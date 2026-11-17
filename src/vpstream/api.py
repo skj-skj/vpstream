@@ -44,6 +44,9 @@ LOGIN_ASSETS = {
 # What the public dashboard serves without a session: the login page, what it loads, and its
 # two calls.
 LOGIN_ROUTES = {*LOGIN_ASSETS, "/assets/dashboard.css", f"{API}/login/challenge", f"{API}/login"}
+# Local mode, over plain HTTP: the session and the device as the page sends them (see _guard).
+SESSION_HEADER = "X-Vpstream-Session"
+DEVICE_HEADER = "X-Vpstream-Device"
 MAX_BODY = 64 * 1024  # on the public dashboard; every change sent there is small
 SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",  # no page of another site shows the dashboard in a frame
@@ -90,8 +93,9 @@ def create_app(
     `certificate` is the public dashboard's certificate authority, once there is one;
     `admin` are changes for the command line's socket only, such as a new password.
 
-    In local mode the login is served over plain HTTP (`secure` False), where a browser
-    keeps no Secure or __Host- cookie, and with no Caddy in front (`ip_header` False)."""
+    In local mode the login is served over plain HTTP (`secure` False), with the session in
+    a header instead of a cookie (see `_guard`), and with no Caddy in front (`ip_header`
+    False)."""
     app = Flask("vpstream", static_folder=None, template_folder=None)
     files = resources.files("vpstream.assets")
 
@@ -202,39 +206,49 @@ def create_app(
     return app
 
 
-def _private_cookie(
-    response: Response, name: str, value: str, seconds: int, secure: bool = True
-) -> None:
+def _private_cookie(response: Response, name: str, value: str, seconds: int) -> None:
     """__Host-, Secure and Path=/: sent over HTTPS only, so never to the plain-HTTP stream
     port on the same address, and never set by it. HttpOnly: no script reads it. Strict: no
-    other site's page makes the browser send it. In local mode (not `secure`) the same
-    without Secure, under a name of its own (see `login.LOCAL_COOKIE`)."""
+    other site's page makes the browser send it."""
     response.set_cookie(
         name,
         value,
         max_age=seconds,
         path="/",
-        secure=secure,
+        secure=True,
         httponly=True,
         samesite="Strict",
     )
 
 
 def _guard(app: Flask, login: auth.Login, secure: bool = True, ip_header: bool = True) -> None:
-    """Put the dashboard behind its password."""
+    """Put the dashboard behind its password.
+
+    Over HTTPS (`secure`) the session and the device are __Host- cookies. Over plain HTTP
+    (local mode) they are no cookies at all: a browser sends a cookie to every port of the
+    host, so to any other program's server on 127.0.0.1 or the same address, which could
+    take the session with it. There the login answers with both, the page keeps them in its
+    own storage, which is the page's alone (scheme, host and port), and sends them as
+    headers. The page itself holds nothing, so it is served to anyone; what it asks for is
+    not."""
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY
-    cookie, device_cookie = (
-        (auth.COOKIE, auth.DEVICE_COOKIE)
-        if secure
-        else (auth.LOCAL_COOKIE, auth.LOCAL_DEVICE_COOKIE)
-    )
+    open_paths = LOGIN_ROUTES if secure else {*LOGIN_ROUTES, *ASSETS}
+
+    def token() -> str | None:
+        return request.cookies.get(auth.COOKIE) if secure else request.headers.get(SESSION_HEADER)
+
+    def device() -> str | None:
+        if secure:
+            return request.cookies.get(auth.DEVICE_COOKIE)
+        return request.headers.get(DEVICE_HEADER)
 
     @app.before_request
     def check_session() -> Any:
-        session = login.session(request.cookies.get(cookie))
-        if request.path in LOGIN_ROUTES:
+        session = login.session(token())
+        if request.path in open_paths:
             # A logged-in browser that opens the login page goes on to the dashboard.
-            return redirect("/", 303) if session and request.path == "/login" else None
+            on_login = secure and session and request.path == "/login"
+            return redirect("/", 303) if on_login else None
         if session is None:
             if request.path == "/" and request.method in ("GET", "HEAD"):
                 return redirect("/login", 303)
@@ -245,9 +259,6 @@ def _guard(app: Flask, login: auth.Login, secure: bool = True, ip_header: bool =
             return jsonify(error="the page is out of date; reload it", login=True), 403
         g.session = session
         return None
-
-    def device() -> str | None:
-        return request.cookies.get(device_cookie)
 
     @app.post(f"{API}/login/challenge")
     def challenge() -> Response:
@@ -260,17 +271,23 @@ def _guard(app: Flask, login: auth.Login, secure: bool = True, ip_header: bool =
     def log_in() -> Response:
         body = _body()
         granted = login.login(client_ip(ip_header), body.get("nonce"), body.get("proof"), device())
-        # Whatever cookie came along is dropped: a session is only ever one made here, now.
-        login.logout(request.cookies.get(cookie))
+        # Whatever session came along is dropped: a session is only ever one made here, now.
+        login.logout(token())
         session = granted.session
-        response = jsonify(csrf=session.csrf, expires_in=login.seconds_left(session))
-        _private_cookie(response, cookie, granted.token, auth.SESSION_SECONDS, secure)
-        _private_cookie(response, device_cookie, granted.device, auth.DEVICE_SECONDS, secure)
+        answer = {"csrf": session.csrf, "expires_in": login.seconds_left(session)}
+        if not secure:
+            return jsonify(**answer, session=granted.token, device=granted.device)
+        response = jsonify(**answer)
+        _private_cookie(response, auth.COOKIE, granted.token, auth.SESSION_SECONDS)
+        _private_cookie(response, auth.DEVICE_COOKIE, granted.device, auth.DEVICE_SECONDS)
         return response
 
     @app.post(f"{API}/logout")
     def log_out() -> Response:
-        login.logout(request.cookies.get(cookie))
+        login.logout(token())
         response = jsonify(login=True)
-        response.delete_cookie(cookie, path="/", secure=secure, httponly=True, samesite="Strict")
+        if secure:
+            response.delete_cookie(
+                auth.COOKIE, path="/", secure=True, httponly=True, samesite="Strict"
+            )
         return response

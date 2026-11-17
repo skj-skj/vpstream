@@ -44,20 +44,67 @@ def _cookies(response: Any) -> SimpleCookie:
     return jar
 
 
-def test_local_cookies_work_over_plain_http(tmp_path: Path) -> None:
-    response = _log_in(_web(tmp_path, secure=False, ip_header=False))
+def _session(web: FlaskClient, token: str | None = None, cookie: str | None = None) -> int:
+    client = web.application.test_client()  # nothing of the browser's but what is given
+    if cookie:
+        client.set_cookie(*cookie.split("=", 1))
+    headers = {api.SESSION_HEADER: token} if token else {}
+    return client.get("/api/v1/session", headers=headers).status_code
+
+
+def test_a_local_login_sets_no_cookie_another_port_could_get(tmp_path: Path) -> None:
+    """A browser sends a cookie to every port of the host (RFC 6265 8.5): to any other
+    app's server on 127.0.0.1 or the phone's address. So local mode keeps none."""
+    web = _web(tmp_path, secure=False, ip_header=False)
+    response = _log_in(web)
     assert response.status_code == 200
-    jar = _cookies(response)
-    assert set(jar) == {login.LOCAL_COOKIE, login.LOCAL_DEVICE_COOKIE}
-    for morsel in jar.values():
-        assert not morsel["secure"] and morsel["httponly"] and morsel["samesite"] == "Strict"
-        assert morsel["path"] == "/"
+    assert response.headers.getlist("Set-Cookie") == []
+    answer = response.get_json()
+    assert answer["csrf"] and answer["session"] and answer["device"]
+    assert _session(web, token=answer["session"]) == 200
+    # The token as a cookie, as another server would replay what it got: nothing.
+    assert _session(web, cookie=f"{login.COOKIE}={answer['session']}") == 401
+    assert _session(web, cookie=f"vpstream-dash={answer['session']}") == 401
+    assert _session(web) == 401
+
+
+def test_a_local_session_needs_the_csrf_token_for_changes(tmp_path: Path) -> None:
+    web = _web(tmp_path, secure=False, ip_header=False)
+    answer = _log_in(web).get_json()
+    headers = {api.SESSION_HEADER: answer["session"]}
+    refused = web.post("/api/v1/stream/stop", json={}, headers=headers)
+    assert refused.status_code == 403
+    headers[login.CSRF_HEADER] = answer["csrf"]
+    assert web.post("/api/v1/stream/stop", json={}, headers=headers).status_code == 400  # none
+    assert web.post("/api/v1/logout", json={}, headers=headers).status_code == 200
+    assert _session(web, token=answer["session"]) == 401
+
+
+def test_the_local_page_is_open_but_what_it_asks_for_is_not(tmp_path: Path) -> None:
+    web = _web(tmp_path, secure=False, ip_header=False)
+    for path in ("/", "/assets/dashboard.js", "/login", "/assets/login.js"):
+        assert web.get(path).status_code == 200, path
+    assert web.get("/api/v1/status").status_code == 401
+    assert web.get("/api/v1/prepared").status_code == 401
+
+
+def test_a_local_device_token_counts_from_its_header(tmp_path: Path) -> None:
+    web = _web(tmp_path, secure=False, ip_header=False)
+    device = _log_in(web).get_json()["device"]
+    for _ in range(login.FAILS_PER_ADDRESS):
+        _log_in(web, "a wrong password")
+    blocked = web.post("/api/v1/login/challenge", json={})
+    assert blocked.status_code == 429
+    known = web.post("/api/v1/login/challenge", json={}, headers={api.DEVICE_HEADER: device})
+    assert known.status_code == 200  # a browser that logged in before is counted on its own
 
 
 def test_the_public_dashboard_keeps_its_secure_cookies(tmp_path: Path) -> None:
-    jar = _cookies(_log_in(_web(tmp_path, secure=True, ip_header=True), ip="198.51.100.2"))
+    response = _log_in(_web(tmp_path, secure=True, ip_header=True), ip="198.51.100.2")
+    jar = _cookies(response)
     assert set(jar) == {login.COOKIE, login.DEVICE_COOKIE}
     assert all(morsel["secure"] for morsel in jar.values())
+    assert "session" not in response.get_json()
 
 
 def test_without_caddy_a_viewer_cannot_choose_its_address(tmp_path: Path) -> None:
@@ -66,14 +113,6 @@ def test_without_caddy_a_viewer_cannot_choose_its_address(tmp_path: Path) -> Non
         _log_in(web, "a wrong password", ip=f"198.51.100.{n}")  # a new "address" each time
     blocked = web.post("/api/v1/login/challenge", json={}, headers={"X-Vpstream-Ip": "10.9.9.9"})
     assert blocked.status_code == 429  # counted by the connection's own address
-
-
-def test_a_local_session_cookie_means_nothing_to_the_public_names(tmp_path: Path) -> None:
-    web = _web(tmp_path, secure=False, ip_header=False)
-    token = _cookies(_log_in(web))[login.LOCAL_COOKIE].value
-    other = _web(tmp_path, secure=True, ip_header=True)
-    other.set_cookie(login.COOKIE, token)
-    assert other.get("/api/v1/status").status_code == 401
 
 
 # --- the daemon's two listeners
@@ -135,7 +174,7 @@ def test_the_lan_dashboard_needs_the_password_and_this_host_does_not(lan_daemon:
     port = run.daemon.config.dashboard_port
     _wait(lambda: run.daemon.lan_address and run.daemon.dashboard_address, "both up", run)
     assert run.daemon.lan_address == f"{LAN}:{port}"
-    assert _get(LAN, port) == (303, "/login")
+    assert _get(LAN, port)[0] == 200  # the page holds nothing; what it asks for needs the login
     assert _get(LAN, port, "/api/v1/status")[0] == 401
     assert _get("127.0.0.1", port, "/api/v1/status")[0] == 200  # Linux: the host's own
     status = run.daemon.status()["dashboard"]
@@ -154,7 +193,6 @@ def test_on_termux_this_device_needs_the_password_too(
     try:
         port = run.daemon.config.dashboard_port
         _wait(lambda: run.daemon.lan_address and run.daemon.dashboard_address, "both up", run)
-        assert _get("127.0.0.1", port) == (303, "/login")
         assert _get("127.0.0.1", port, "/api/v1/status")[0] == 401
         assert run.daemon.status()["dashboard"]["this_device_password"] is True
     finally:
@@ -194,7 +232,7 @@ def test_the_lan_dashboard_goes_with_the_address_and_comes_back(
     assert _get("127.0.0.1", port, "/api/v1/status")[0] == 200  # this device's stays
     here.on = True
     _wait(lambda: run.daemon.lan_address, "lan back", run)
-    assert _get(LAN, port)[0] == 303
+    assert _get(LAN, port, "/api/v1/status")[0] == 401
 
 
 def test_the_socket_keeps_the_password_routes(lan_daemon: Running) -> None:
@@ -203,3 +241,56 @@ def test_the_socket_keeps_the_password_routes(lan_daemon: Running) -> None:
     answer_ = client.call(lan_daemon.paths.socket, "POST", "dashboard/unblock", {})
     assert isinstance(answer_, dict)
     assert json.dumps(answer_)  # an answer, not a refusal
+
+
+def test_held_connections_cannot_take_every_thread(
+    short_tmp: Path, here: Here, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is in front of the local network's dashboard: a device that opens many
+    connections and never finishes a request gets a few threads, the rest a 503 at once,
+    and what it holds is closed after a while."""
+    import socket
+    import threading
+
+    from vpstream import daemon
+
+    monkeypatch.setattr(daemon, "REQUEST_SECONDS", 1.0)
+    run = _running(short_tmp).start()
+    held: list[socket.socket] = []
+    try:
+        port = run.daemon.config.dashboard_port
+        _wait(lambda: run.daemon.lan_address, "lan up", run)
+        before = threading.active_count()
+        for _ in range(40):
+            conn = socket.create_connection((LAN, port), timeout=5)
+            conn.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")  # and never the end of it
+            held.append(conn)
+        time.sleep(0.3)
+        assert threading.active_count() - before <= daemon.PER_ADDRESS + 1
+        held[-1].settimeout(5)
+        assert held[-1].recv(64).startswith(b"HTTP/1.1 503")
+        time.sleep(1.5)  # the held ones time out
+        assert _get(LAN, port, "/api/v1/status")[0] == 401  # served again
+        assert threading.active_count() - before <= 2
+    finally:
+        for conn in held:
+            conn.close()
+        run.close()
+
+
+def test_the_dashboard_serves_an_ipv6_local_address(
+    short_tmp: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An IPv6 address of the local network (fc00::/7) is taken, so the dashboard must
+    listen on it, under an address with brackets."""
+    monkeypatch.setattr(local, "find", lambda configured="": "::1")  # stands in for a ULA
+    monkeypatch.setattr(local, "is_mine", lambda address: address == "::1")
+    run = _running(short_tmp).start()
+    try:
+        port = run.daemon.config.dashboard_port
+        _wait(lambda: run.daemon.lan_address, "lan up on IPv6", run)
+        assert run.daemon.lan_address == f"[::1]:{port}"
+        assert run.daemon.status()["dashboard"]["url"] == f"http://[::1]:{port}/"
+        assert _get("::1", port, "/api/v1/status")[0] == 401
+    finally:
+        run.close()

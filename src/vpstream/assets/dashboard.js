@@ -81,13 +81,23 @@
 
   // --- talking to the daemon
 
-  // Out of the public dashboard's session (it ended, or another tab logged out): to the login.
-  function loggedOut() { window.location.replace("/login"); }
+  // Local mode (plain HTTP): the session the login page kept for this page (see login.js).
+  var SESSION = "vpstream-session";
+  function storedSession() {
+    try { return window.localStorage.getItem(SESSION); } catch (e) { return null; }
+  }
+
+  // Out of the dashboard's session (it ended, or another tab logged out): to the login.
+  function loggedOut() {
+    try { window.localStorage.removeItem(SESSION); } catch (e) { /* nothing kept */ }
+    window.location.replace("/login");
+  }
 
   // A change also carries the session's CSRF token, which the public dashboard asks for. On
   // the tailnet there is no login and no token.
   function request(method, route, payload) {
     var options = { method: method, headers: {}, credentials: "same-origin" };
+    if (storedSession()) { options.headers["X-Vpstream-Session"] = storedSession(); }
     if (payload !== undefined) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(payload);

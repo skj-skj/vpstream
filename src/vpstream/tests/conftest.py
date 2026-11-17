@@ -57,8 +57,8 @@ def quick_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
 
     make = daemon._make_server
 
-    def quick(*args: Any) -> Any:
-        server = make(*args)
+    def quick(*args: Any, **kwargs: Any) -> Any:
+        server = make(*args, **kwargs)
         serve = server.serve_forever
         server.serve_forever = lambda poll_interval=0.05: serve(poll_interval)
         return server
