@@ -32,6 +32,24 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(autouse=True)
+def on_linux() -> Iterator[None]:
+    """Every test acts as on the Linux VPS, wherever it runs; a Termux test says so with
+    the `on_termux` fixture."""
+    from vpstream import platform
+
+    platform.override(platform.LINUX)
+    yield
+    platform.override(None)
+
+
+@pytest.fixture
+def on_termux(on_linux: None) -> None:
+    from vpstream import platform
+
+    platform.override(platform.TERMUX)
+
+
+@pytest.fixture(autouse=True)
 def quick_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
     """The daemon's servers in a test notice a shutdown within 0.05 s, where werkzeug looks
     every 0.5 s: a test daemon then stops in a moment, not in about a second."""
@@ -39,8 +57,8 @@ def quick_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
 
     make = daemon._make_server
 
-    def quick(*args: Any) -> Any:
-        server = make(*args)
+    def quick(*args: Any, **kwargs: Any) -> Any:
+        server = make(*args, **kwargs)
         serve = server.serve_forever
         server.serve_forever = lambda poll_interval=0.05: serve(poll_interval)
         return server

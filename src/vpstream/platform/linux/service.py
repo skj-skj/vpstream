@@ -26,21 +26,11 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
-from vpstream import (
-    caddy,
-    certificate,
-    client,
-    config,
-    dashboard_ca,
-    doctor,
-    ffmpeg_install,
-    firewall,
-    login,
-    net,
-    tailscale,
-)
+from vpstream import caddy, certificate, client, config, dashboard_ca, local, login, net
 from vpstream.files import remove_path, write_atomic
+from vpstream.platform.linux import SYSTEM_INSTALL, doctor, ffmpeg_install, firewall, tailscale
 from vpstream.tools import Result, Runner, tail
 
 USER = "vpstream"  # the service user, and its group
@@ -103,6 +93,9 @@ class Manifest:
     user_created: bool = False
     members_added: list[str] = field(default_factory=list)
     serve_port: int | None = None  # the `tailscale serve` port init published, if any
+    # `init --local`: the ufw rule it added for the dashboard, [port, local network]. Only
+    # written when there is one, so the record of every other install stays as it was.
+    lan_rule: list[Any] | None = None
 
     @classmethod
     def load(cls, path: Path) -> Manifest:
@@ -115,14 +108,20 @@ class Manifest:
         if not isinstance(data, dict):
             raise ServiceError(f"{path} is not a vpstream install record")
         port = data.get("serve_port")
+        rule: Any = data.get("lan_rule")
+        lan = isinstance(rule, list) and len(rule) == 2 and isinstance(rule[0], int)
         return cls(
             user_created=data.get("user_created") is True,
             members_added=[m for m in data.get("members_added") or [] if isinstance(m, str)],
             serve_port=port if isinstance(port, int) else None,
+            lan_rule=[rule[0], str(rule[1])] if lan else None,
         )
 
     def save(self, path: Path) -> None:
-        write_atomic(path, json.dumps(asdict(self), indent=2) + "\n")
+        data = asdict(self)
+        if data["lan_rule"] is None:
+            del data["lan_rule"]
+        write_atomic(path, json.dumps(data, indent=2) + "\n")
 
 
 def port_busy(port: int) -> bool:
@@ -136,13 +135,26 @@ def port_busy(port: int) -> bool:
     return False
 
 
-def unit_text(vpstream_bin: Path, helper: Path, https: bool = False) -> str:
+def lan_rule_args(action: str, port: int, network: str) -> list[str]:
+    """The ufw arguments that let the local network (and only it) reach the dashboard port,
+    or with "close" take that back."""
+    rule = ["allow", "proto", "tcp", "from", network, "to", "any", "port", str(port)]
+    return rule if action == "open" else ["delete", *rule]
+
+
+def unit_text(
+    vpstream_bin: Path, helper: Path, https: bool = False, local: str | None = None
+) -> str:
     """The systemd unit. `+` runs ExecStopPost as root, so the stream port is closed after a
     stop or a crash without depending on sudo. With `https` the service may bind port 80,
     where Let's Encrypt checks while a certificate is requested; nothing else in privilege
     comes with it. No CapabilityBoundingSet: it would hold sudo itself to that one
-    capability, and the firewall helper is run through sudo."""
+    capability, and the firewall helper is run through sudo. With `local` (an address, or
+    "" to find it) the daemon serves the local network only (`init --local`)."""
     bind = "AmbientCapabilities=CAP_NET_BIND_SERVICE\n" if https else ""
+    daemon = "daemon"
+    if local is not None:
+        daemon += f" --local --address {local}" if local else " --local"
     return f"""\
 # Written by `vpstream init`. Removed by `vpstream uninstall`.
 [Unit]
@@ -156,7 +168,7 @@ Group={USER}
 RuntimeDirectory={USER}
 RuntimeDirectoryMode=0750
 UMask=0027
-{bind}ExecStart={vpstream_bin} daemon
+{bind}ExecStart={vpstream_bin} {daemon}
 ExecStopPost=+{helper} close
 ExecStopPost=+{helper} dash-close
 ExecStopPost=+{helper} acme-close
@@ -186,7 +198,7 @@ class Service:
     sudo_user: str | None = None
     bin_dir: Path = field(default_factory=lambda: Path(sys.executable).parent)
     install_problem: Callable[[], str | None] = lambda: doctor.install_problem(
-        Path(__file__).parent
+        Path(__file__).parents[2]
     )
     program_problem: Callable[[Path], str | None] = doctor.program_problem
     port_busy: Callable[[int], bool] = port_busy
@@ -195,6 +207,7 @@ class Service:
     ask_daemon: Callable[[Path, str], object] = lambda socket, route: client.call(
         socket, "POST", route, {}
     )
+    find_local: Callable[[str], str] = local.find  # the private address of `init --local`
     owner_uid: int = 0  # who must own the files root trusts; tests are not root
     say: Callable[[str], None] = print
     pause: Callable[[float], None] = time.sleep
@@ -257,16 +270,22 @@ class Service:
             return f"the password file cannot be used ({exc})"
         return None
 
-    def wants_password(self, public: bool | None = None) -> bool:
-        """Whether init must be given a password: the dashboard goes public without a
-        usable one."""
-        return self.dashboard_public(public) and self.password_problem() is not None
+    def wants_password(self, public: bool | None = None, local: bool = False) -> bool:
+        """Whether init must be given a password: the dashboard goes public, or on the
+        local network, without a usable one."""
+        return (local or self.dashboard_public(public)) and self.password_problem() is not None
 
-    def check_host(self, public: bool = False, https: bool = False) -> None:
+    def lan_address(self, address: str = "") -> str:
+        """`init --local`: the private address the service is to serve on."""
+        try:
+            return self.find_local(address)
+        except local.LocalError as exc:
+            raise ServiceError(f"local mode: {exc}") from exc
+
+    def check_host(self, public: bool = False, https: bool = False, lan: bool = False) -> None:
         """Refuse before changing anything when init could not finish on this host."""
-        needed = tuple(
-            dict.fromkeys((*NEEDED, *NEEDED_FOR[public], *(("caddy",) if https else ())))
-        )
+        dashboard = () if lan else NEEDED_FOR[public]
+        needed = tuple(dict.fromkeys((*NEEDED, *dashboard, *(("caddy",) if https else ()))))
         missing = [name for name in needed if not self.runner.which(name)]
         if missing:
             raise ServiceError(
@@ -279,7 +298,7 @@ class Service:
             raise ServiceError(
                 f"{problem}. The service runs as its own user and cannot use this install. "
                 f"Install vpstream for the whole system and run init from there:\n"
-                f"  {doctor.SYSTEM_INSTALL}"
+                f"  {SYSTEM_INSTALL}"
             )
         for path in (self.helper, self.vpstream_bin):
             if not _PLAIN_PATH.fullmatch(str(path)):
@@ -295,8 +314,9 @@ class Service:
             )
         if https:
             self._check_https(cfg)
-        published = False if public else self._check_serve(port)
-        recorded = Manifest.load(self.layout.manifest).serve_port == port
+        published = False if public or lan else self._check_serve(port)
+        manifest = Manifest.load(self.layout.manifest)
+        recorded = manifest.serve_port == port or manifest.lan_rule is not None
         ours = published or recorded or cfg.dashboard_public
         if self.port_busy(port) and not (
             ours and self._succeeds("systemctl", "is-active", "--quiet", UNIT)
@@ -346,20 +366,33 @@ class Service:
         return proxy is not None
 
     def init(
-        self, public: bool | None = None, password: str | None = None, https: bool | None = None
+        self,
+        public: bool | None = None,
+        password: str | None = None,
+        https: bool | None = None,
+        lan: bool = False,
+        address: str = "",
     ) -> None:
         """Set the service up. `public` moves the dashboard (None keeps it where it is);
         `password` sets the public dashboard's, which it must have. `https` switches streams
-        to HTTPS or back (None keeps them as they are)."""
+        to HTTPS or back (None keeps them as they are). `lan` (`init --local`) serves the
+        local network only, at a private address (`address`, or the one found); without it
+        init sets up the public mode, as it always has."""
         self._require_root("init")
-        public = self.dashboard_public(public)
+        if lan and public:
+            raise ServiceError("local mode has no public dashboard: drop --no-tailscale")
+        public = False if lan else self.dashboard_public(public)
         https = self.stream_https(https)
-        self.check_host(public, https)
+        if lan and https:
+            raise ServiceError("local mode serves plain HTTP: run init --local --no-https")
+        self.check_host(public, https, lan)
+        lan_address = self.lan_address(address) if lan else ""
         if password is not None and (problem := login.password_problem(password)):
             raise ServiceError(problem)
-        if self.wants_password(public) and password is None:
+        if self.wants_password(public, lan) and password is None:
+            which = "on the local network" if lan else "public"
             raise ServiceError(
-                f"the public dashboard needs a password ({self.password_problem()}): run init "
+                f"the dashboard {which} needs a password ({self.password_problem()}): run init "
                 "in a terminal to be asked for one, or give it with --dash-pass-file FILE"
             )
         lay = self.layout
@@ -377,12 +410,21 @@ class Service:
             self._run("chown", "-R", f"{USER}:{USER}", folder, what=f"giving {folder} to {USER}")
         self._init_sudoers()
         made = False
-        if public:
+        if lan:
+            if password is not None:
+                self._write_password(password)
+            self._remove_authority()
+            self._close_recorded(lay.paths.open_dashboard_ports_file, "dashboard port")
+            self._unpublish(manifest)
+            self._init_lan_rule(manifest, cfg.dashboard_port, local.network_of(lan_address))
+        elif public:
+            self._remove_lan_rule(manifest)
             if password is not None:
                 self._write_password(password)
             made = self._init_authority(cfg)
             self._unpublish(manifest)
         else:
+            self._remove_lan_rule(manifest)
             self._remove_password()
             self._remove_authority()
             self._close_recorded(lay.paths.open_dashboard_ports_file, "dashboard port")
@@ -390,7 +432,10 @@ class Service:
         if not https:
             self._close_acme(lay.paths.open_acme_ports_file)
         self._init_member(manifest)
-        self._init_unit(https)
+        # The address as checked: never the text as given, which goes into the unit.
+        self._init_unit(https, (lan_address if address else "") if lan else None)
+        if lan:
+            self._report_local(cfg, lan_address)
         if public:
             self._report_public(cfg, made)
         if https:
@@ -507,6 +552,38 @@ class Service:
             f"firewall of its own, let {port}/tcp in there too."
         )
 
+    def _init_lan_rule(self, manifest: Manifest, port: int, network: str) -> None:
+        """Let the local network reach the dashboard port: one ufw rule, written down first
+        so uninstall and the next plain init take it back. One for another port or network
+        (from an earlier init --local) goes."""
+        rule = [port, network]
+        if manifest.lan_rule == rule:
+            self.say(f"ufw: {port}/tcp from {network} already allowed (the dashboard)")
+            return
+        self._remove_lan_rule(manifest)
+        manifest.lan_rule = rule
+        manifest.save(self.layout.manifest)
+        self._run("ufw", *lan_rule_args("open", port, network), what="allowing the dashboard")
+        self.say(f"ufw: {port}/tcp from {network} is allowed (the dashboard on the local network)")
+
+    def _remove_lan_rule(self, manifest: Manifest) -> None:
+        if manifest.lan_rule is None:
+            return
+        port, network = manifest.lan_rule
+        if self.runner.which("ufw"):
+            self._run("ufw", *lan_rule_args("close", port, network), what="closing the dashboard")
+            self.say(f"ufw: {port}/tcp from {network} is no longer allowed")
+        manifest.lan_rule = None
+        manifest.save(self.layout.manifest)
+
+    def _report_local(self, cfg: config.Config, address: str) -> None:
+        stream, dash = cfg.stream_port, cfg.dashboard_port
+        self.say(
+            f"local mode: streams at {net.url('http', address, stream)}/<alias>, the dashboard at "
+            f"{net.url('http', address, dash)}/ (password) and http://127.0.0.1:{dash}/ on "
+            f"this host.\nWARNING: {local.WARNING}"
+        )
+
     def _report_https(self, cfg: config.Config) -> None:
         host = net.public_host(cfg.stream_host, self.outgoing_address)
         port = cfg.stream_port
@@ -524,7 +601,8 @@ class Service:
         """`vpstream dash-pass`: a new password for the public dashboard. The running daemon
         takes it at once and logs every browser out; a running stream goes on."""
         self._require_root("dash-pass")
-        if not self._config().dashboard_public:
+        lan = Manifest.load(self.layout.manifest).lan_rule is not None
+        if not (self._config().dashboard_public or lan):
             raise ServiceError(
                 "the dashboard is not public, so it has no password. Make it public with: "
                 "sudo vpstream init --no-tailscale"
@@ -656,9 +734,10 @@ class Service:
             "Log out and in again for it to take effect."
         )
 
-    def _init_unit(self, https: bool) -> None:
+    def _init_unit(self, https: bool, lan: str | None = None) -> None:
         unit = self.layout.unit_file
-        unit.write_text(unit_text(self.vpstream_bin, self.helper, https), encoding="utf-8")
+        text = unit_text(self.vpstream_bin, self.helper, https, lan)
+        unit.write_text(text, encoding="utf-8")
         unit.chmod(0o644)
         self._run("systemctl", "daemon-reload", what="reloading systemd")
         self._run("systemctl", "enable", UNIT, what="enabling the service")
@@ -713,6 +792,7 @@ class Service:
                 )
 
         self._unpublish(manifest)
+        self._remove_lan_rule(manifest)
 
         if lay.sudoers_file.exists():
             lay.sudoers_file.unlink()

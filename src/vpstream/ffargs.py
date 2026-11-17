@@ -37,6 +37,7 @@ class EncodeSettings:
     bufsize: str = "16M"
     audio_bitrate: str = "160k"
     audio_channels: int = 2
+    threads: int = 0  # ffmpeg's threads for the encode; 0 leaves it to ffmpeg (see Limits)
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,16 @@ def keyframe_args() -> list[str]:
     return ["-force_key_frames", f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})"]
 
 
+def thread_args(s: EncodeSettings) -> list[str]:
+    """With a bound (`threads`): what holds the first input's decoder and a filter_complex
+    (burned-in subtitles) to it. Go right after the program. A -vf filter is bounded among
+    the output's options, where ffmpeg 7 and later read -filter_threads (h264_video_args)."""
+    if not s.threads:
+        return []
+    n = str(s.threads)
+    return ["-threads", n, "-filter_complex_threads", n]
+
+
 def h264_video_args(s: EncodeSettings) -> list[str]:
     return [
         "-c:v",
@@ -134,6 +145,7 @@ def h264_video_args(s: EncodeSettings) -> list[str]:
         "-pix_fmt",
         "yuv420p",
         *keyframe_args(),
+        *(["-threads", str(s.threads), "-filter_threads", str(s.threads)] if s.threads else []),
     ]
 
 

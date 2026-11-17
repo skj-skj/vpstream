@@ -8,6 +8,8 @@ import socket
 from pathlib import Path
 from typing import Any
 
+from vpstream import platform
+
 # The routes of the daemon's API (see `api`), kept here so the command line does not load
 # Flask to talk to the daemon.
 API = "/api/v1"
@@ -69,7 +71,7 @@ def call(
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         raise DaemonUnavailable(
             f"the vpstream daemon is not running (no answer on {socket_path}). "
-            "Start it with: sudo systemctl start vpstream (the first time: sudo vpstream init)"
+            f"Start it with: {platform.hints().start}"
         ) from exc
     except PermissionError as exc:
         raise DaemonUnavailable(

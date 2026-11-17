@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from vpstream.caddy import CaddyError
-from vpstream.firewall import FirewallError
+from vpstream.platform.common import FirewallError
 from vpstream.tools import Result, SystemRunner
 
 NAME = "host.example.ts.net"  # the fake host's name on its tailnet
@@ -100,6 +100,8 @@ class FakeServer:
         self.fail = fail
         self.up = False
         self.certificate: Any = None  # what the last start serves HTTPS with
+        self.host = ""  # local mode: the address it listens on
+        self.left_over_checks = 0
         self.started_with: list[Any] = []
 
     def start(self) -> None:
@@ -112,6 +114,9 @@ class FakeServer:
     def stop(self) -> None:
         self.calls.append("stop")
         self.up = False
+
+    def stop_left_over(self) -> None:
+        self.left_over_checks += 1
 
     def running(self) -> bool:
         return self.up

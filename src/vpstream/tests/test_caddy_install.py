@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from vpstream import caddy_install as ci
-from vpstream.system_install import Cancelled, SetupError
+from vpstream.platform.linux import caddy_install as ci
+from vpstream.platform.linux.system_install import Cancelled, SetupError
 from vpstream.tests.fakes import FakeRunner
 from vpstream.tools import Result
 

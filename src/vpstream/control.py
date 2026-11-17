@@ -13,6 +13,7 @@ from typing import Any
 from vpstream import (
     clients,
     gate,
+    local,
     mkv,
     net,
     player,
@@ -28,8 +29,8 @@ from vpstream.certificate import Certificate, CertificateError, Certificates
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import under
-from vpstream.firewall import Firewall, FirewallError, switch
 from vpstream.media import shown
+from vpstream.platform.common import Firewall, FirewallError, switch
 from vpstream.stream import (
     BROWSER,
     DIRECT,
@@ -138,10 +139,26 @@ class Control:
         self.firewall_problem = None
 
     def host(self) -> str:
-        """The address the URLs name, and the certificate is for."""
+        """The address the URLs name, and the certificate is for. In local mode the one the
+        running stream listens on, or the one a stream would get now ("" when none)."""
+        if self.config.local:
+            if self.stream is not None:
+                return self._host
+            try:
+                return local.find(self.config.local_address)
+            except local.LocalError:
+                return ""
         if not self._host:  # asked again while there is no route yet
             self._host = net.public_host(self.config.stream_host)
         return self._host
+
+    def _local_address(self) -> str:
+        """Local mode: the private address a stream listens on, looked up at each start (a
+        new network may have given another). Raises ControlError when there is none."""
+        try:
+            return local.find(self.config.local_address)
+        except local.LocalError as exc:
+            raise ControlError(f"no stream on the local network: {exc}") from exc
 
     def base_url(self) -> str:
         """The running stream's address; without one, what a stream would get."""
@@ -170,6 +187,13 @@ class Control:
             return None
         return self.certificates.status(self.host())
 
+    def _port_state(self) -> str:
+        """Without a firewall, local mode says where it listens instead."""
+        if self.config.local and self.firewall is None:
+            where = f" on {self._host}" if self.stream is not None else ""
+            return f"no firewall; listening{where} only while a stream runs"
+        return self.port_state
+
     def _running(self) -> Stream:
         if self.stream is None:
             raise StreamError("no stream is running")
@@ -180,6 +204,8 @@ class Control:
         that asks the gate. Called with `_op` held; viewers get a 404 until it is done."""
         if self.server is None:
             raise ControlError("this daemon has no public server to start")
+        if self.config.local:
+            self._host = self.server.host = self._local_address()
         self.server.certificate = self._certificate(stream)
         if stream.mode == BROWSER:
             links: list[str | None] = list(stream.entries)  # folders; Caddy sends files in them
@@ -321,6 +347,8 @@ class Control:
         open rule survives a crash or a reboot.
         """
         with self._op:
+            if self.server is not None:  # Termux: what a daemon that was killed left
+                self.server.stop_left_over()
             recorded, problem = state.load(self._state_file)
             if problem:
                 self.log(f"{problem}; treating it as no stream running")
@@ -389,6 +417,11 @@ class Control:
                 why = "its time limit is over"
             elif self.server is not None and not self.server.running():
                 why = "Caddy stopped unexpectedly"
+            elif self.config.local and not local.is_mine(self._host):
+                why = (
+                    f"{self._host} is no longer this device's address: the Wi-Fi is off or "
+                    "it is on another network"
+                )
             else:
                 return
         with self._op:
@@ -510,7 +543,8 @@ class Control:
                 "now": now,
                 "stream": described,
                 "stream_port": self.config.stream_port,
-                "stream_port_state": self.port_state,
+                "stream_port_state": self._port_state(),
+                "local": {"address": self.host() or None} if self.config.local else None,
                 "firewall_problem": self.firewall_problem,
                 "prepare": [] if self.preparer is None else self.preparer.status(),
                 "prepare_run": None if self.preparer is None else self.preparer.run,

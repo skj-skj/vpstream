@@ -17,7 +17,7 @@ const PBKDF2 = fs.readFileSync(pbkdf2Path, "utf8");
 
 // --- one page load, with a stand-in API
 
-function load(answers) {
+function load(answers, storage) {
   const root = parse(PAGE);
   const sent = [];
   const headers = [];
@@ -39,7 +39,7 @@ function load(answers) {
   };
   const window = {
     location,
-    localStorage: { getItem: () => null, setItem() {} },
+    localStorage: storage || { getItem: () => null, setItem() {} },
     isSecureContext: false,
     setInterval: (fn) => { intervals.push(fn); return intervals.length; },
     setTimeout: (fn) => { timers.push(fn); return 0; },
@@ -64,7 +64,8 @@ function loadLogin(answers, options) {
   const location = { replaced: [], replace(url) { this.replaced.push(url); } };
   const fetch = (url, fetchOptions) => {
     const route = url.replace("/api/v1/", "");
-    sent.push({ method: fetchOptions.method, route, raw: fetchOptions.body, body: JSON.parse(fetchOptions.body) });
+    sent.push({ method: fetchOptions.method, route, raw: fetchOptions.body, body: JSON.parse(fetchOptions.body),
+      headers: fetchOptions.headers });
     let answer = answers[route];
     if (typeof answer === "function") { answer = answer(JSON.parse(fetchOptions.body)); }
     const status = answer.status || 200;
@@ -81,6 +82,7 @@ function loadLogin(answers, options) {
     location,
     isSecureContext: !!opts.secure,
     crypto: subtle ? { subtle } : undefined,
+    localStorage: opts.storage,
     setTimeout: (fn) => { setImmediate(fn); return 0; },
   };
   const context = { window, document, fetch, Node, console, JSON, Math, Object, Array, String,
@@ -693,6 +695,45 @@ const { check, finish } = runner();
       status: { status: 401, data: { error: "log in first", login: true } } });
     await settle();
     ok(page.location.replaced.includes("/login"), JSON.stringify(page.location.replaced));
+  });
+
+  // --- local mode, over plain HTTP: the session is kept by the page, never a cookie
+
+  function memory(start) {
+    const kept = new Map(Object.entries(start || {}));
+    return { kept, getItem: (k) => (kept.has(k) ? kept.get(k) : null), setItem: (k, v) => kept.set(k, String(v)),
+      removeItem: (k) => kept.delete(k) };
+  }
+
+  await check("local login: the page keeps the session and the device, and sends the device", async () => {
+    const storage = memory({ "vpstream-device": "dev-1" });
+    const page = loadLogin({ "login/challenge": CHALLENGE,
+      login: { csrf: "c", expires_in: 60, session: "sess-1", device: "dev-2" } }, { storage });
+    await submit(page, "a long enough password");
+    eq(page.location.replaced, ["/"]);
+    eq(storage.kept.get("vpstream-session"), "sess-1");
+    eq(storage.kept.get("vpstream-device"), "dev-2");
+    ok(page.sent.every((s) => s.headers["X-Vpstream-Device"] === "dev-1"), JSON.stringify(page.sent));
+  });
+
+  await check("public login: nothing is kept by the page", async () => {
+    const storage = memory();
+    const page = loadLogin({ "login/challenge": CHALLENGE, login: { csrf: "c", expires_in: 60 } },
+      { storage, secure: true });
+    await submit(page, "a long enough password");
+    eq(storage.kept.size, 0);
+  });
+
+  await check("local dashboard: every request carries the kept session; an ended one is forgotten", async () => {
+    const storage = memory({ "vpstream-session": "sess-1" });
+    const page = load({ session: { login: true, csrf: "tok" }, status: status({ stream: stream() }),
+      devices: { status: 401, data: { error: "log in first", login: true } } }, storage);
+    await settle();
+    ok(page.headers.length > 0 && page.headers.every((h) => h["X-Vpstream-Session"] === "sess-1"));
+    Array.from(page.$("waiters").querySelector(".item").querySelectorAll("button")).find((b) => text(b) === "Let in").click();
+    await settle(); await settle();
+    ok(page.location.replaced.includes("/login"));
+    ok(!storage.kept.has("vpstream-session"));
   });
 
   await check("tailnet dashboard: no login, no Log out, no token", async () => {

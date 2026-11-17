@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import access, clients, gate, media, player, prepared, tracks
+from vpstream import clients, gate, media, platform, player, prepared, tracks
 from vpstream.certificate import LONGEST_STREAM_SECONDS
 from vpstream.checks import is_number
+from vpstream.platform.linux import access
 
 DIRECT = "direct"  # the files as they are, for players such as VLC
 BROWSER = "browser"  # prepared HLS versions and a player page, for TV browsers
@@ -102,6 +103,12 @@ class Unreadable(StreamError):
             if prepared
             else ""
         )
+        if platform.is_termux():
+            super().__init__(
+                f"Termux cannot read {path}. {hint}Allow Termux to read the phone's storage "
+                "with: termux-setup-storage"
+            )
+            return
         super().__init__(
             f"the vpstream service (user {self.user}) cannot read {path}. {hint}`vpstream "
             "start`, run by the owner of the files, gives it access by itself, or the owner "

@@ -25,10 +25,10 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from vpstream import config
 from vpstream.files import write_atomic
+from vpstream.platform.common import FirewallError
 from vpstream.tools import Result, Runner, SystemRunner, tail
 
 HELPER_NAME = "vpstream-fw"
@@ -40,10 +40,6 @@ ACTIONS = (*STREAM_ACTIONS, *DASHBOARD_ACTIONS, *ACME_ACTIONS)
 _EXISTING = "Skipping adding existing rule"
 UFW_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")  # never taken from the caller's PATH
 TIMEOUT = 60.0
-
-
-class FirewallError(RuntimeError):
-    pass
 
 
 def ufw_args(action: str, port: int, ipv4: bool = False) -> list[str]:
@@ -115,7 +111,7 @@ def _trusted_config(config_file: Path, owner_uid: int) -> tuple[config.Config | 
     if problem := config_file_problem(config_file, owner_uid):
         return None, f"refusing to read the port: {problem}"
     try:
-        return config.load(config_file), ""
+        return config.load(config_file, local_keys=False), ""
     except config.ConfigError as exc:
         return None, str(exc)
 
@@ -313,22 +309,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 def helper_path() -> Path:
     """The helper that belongs to this install: next to the Python that runs vpstream."""
     return Path(sys.executable).parent / HELPER_NAME
-
-
-class Firewall(Protocol):
-    def open(self) -> None: ...
-
-    def close(self) -> None: ...
-
-
-def switch(fw: Firewall, action: str) -> str:
-    """Open or close the port (`action` "open" or "close"); returns its state now, "open"
-    or "closed". Raises FirewallError, after which the state is not known."""
-    if action == "open":
-        fw.open()
-        return "open"
-    fw.close()
-    return "closed"
 
 
 STREAM, DASHBOARD, ACME = "stream", "dashboard", "certificate check"

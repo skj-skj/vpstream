@@ -7,6 +7,7 @@ dashboard over HTTPS behind a password).
 Streams a file or a folder as it is, for players such as VLC and mpv (direct mode), or as
 prepared HLS versions with a player page for TV browsers (browser mode), over plain HTTP or
 HTTPS with a Let's Encrypt certificate for the address. Tested on Ubuntu Server 24.04.
+It also runs on an Android phone in Termux, for the local network (see Termux).
 
 ## Install
 
@@ -96,7 +97,9 @@ stay.
 | `vpstream doctor` | Checks this host |
 | `sudo vpstream init` | Sets the service up, or again after an upgrade or a change of the configuration |
 | `sudo vpstream uninstall [--purge] [--yes]` | Removes it (see Uninstall) |
+| `vpstream up`, `vpstream down` | Termux: starts the daemon in the background and keeps the phone awake, or stops it (see Termux) |
 | `sudo vpstream init --no-tailscale`, `sudo vpstream init --tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
+| `sudo vpstream init --local [--address IP]` | Serves the local network only, at a private address, with the dashboard there behind a password (see Local network mode); plain `init` goes back to the default |
 | `sudo vpstream init --https`, `sudo vpstream init --no-https` | Serves streams over HTTPS with a Let's Encrypt certificate for the address, or over plain HTTP again |
 | `sudo vpstream dash-pass [--dash-pass-file FILE]` | Sets a new password for the public dashboard (logs every browser out; a stream goes on) |
 | `vpstream dash-unblock` | Forgets the public dashboard's failed logins, to log in from a new browser |
@@ -228,6 +231,71 @@ makes for this host (with `openssl`). Only a salted PBKDF2 verifier of the passw
 - The command line keeps talking to the daemon over its socket, with no password.
   `sudo vpstream init --tailscale` goes back: the password and the authority are removed and
   the port closed.
+
+## Local network mode
+
+For a home network, where every device is on the same Wi-Fi: no tailnet, no public address.
+`sudo vpstream init --local` asks for a dashboard password (or takes `--dash-pass-file FILE`)
+and sets the service up to serve the local network only. Plain `sudo vpstream init` is the
+public mode, as always, and goes back to it.
+
+- **Address:** the stream and the dashboard listen on this host's private address (the one it
+  reaches the network from, or `--address IP`), never on every interface. Only private
+  addresses are taken (192.168.x.x, 10.x.x.x, 172.16.x.x to 172.31.x.x, 169.254.x.x, and
+  fc00::/7 for IPv6); a carrier's shared address (100.64.0.0/10) and an IPv6 link-local one
+  (fe80::/10, which needs its interface) are refused. When the address
+  goes, a running stream stops.
+- **Dashboard:** at `http://<address>:1338/`, behind the password, over plain HTTP (cookies
+  without Secure, under names of their own), and at `http://127.0.0.1:1338/` on this host
+  without one, as on the tailnet. `init --local` lets 1338/tcp in from the private block of
+  the address in ufw, and takes that back on the next plain `init` or `uninstall`.
+- Use it only on a network you control, never on public Wi-Fi: anyone on the network can
+  reach the stream and dashboard ports, and can see what crosses plain HTTP. `start` says so.
+
+## Termux
+
+vpstream runs on an Android phone in Termux, for the local network only: the phone streams
+to a TV or another phone on the same Wi-Fi. There is no service, no firewall and nothing
+that needs root; `vpstream up` runs the daemon as you.
+
+```text
+pkg install python ffmpeg caddy mkvtoolnix
+termux-setup-storage              # lets Termux read the phone's videos
+pip install "vpstream[dev]"
+vpstream init                     # the configuration, and what is left to do
+vpstream dash-pass                # the dashboard's password
+vpstream up                       # the daemon, in the background; keeps the phone awake
+vpstream doctor
+vpstream start --file /storage/emulated/0/Movies/film.mkv
+vpstream down                     # stops the daemon and lets the phone sleep again
+```
+
+- **Local network only:** the stream and the dashboard listen on the phone's Wi-Fi address,
+  which must be private, never on every interface (see Local network mode). Turning the
+  Wi-Fi off, or a move to mobile data, stops a running stream. Use it only on your own
+  Wi-Fi or a network you control, never on public Wi-Fi: Android has no firewall, and
+  anyone on the network can reach the stream and dashboard ports. Setting
+  `[network] address` makes vpstream refuse to serve at any other address.
+- **Dashboard:** `http://<phone's address>:1338/` and `http://127.0.0.1:1338/`, both behind
+  the password, since every app on the phone can reach 127.0.0.1. It stays closed until
+  `vpstream dash-pass` sets one.
+- **Files:** the configuration is `~/.config/vpstream/config.toml`, the state
+  `~/.local/state/vpstream/` (with the daemon's log, `daemon.log`), the prepared videos
+  `~/.cache/vpstream/` and the sockets `$PREFIX/var/run/vpstream/`. The videos themselves
+  may be on the phone's storage; nothing vpstream makes is.
+- **When Android stops Termux:** run `vpstream up` again. A stream that was running comes
+  back, with its devices, unless the phone restarted or its time ran out. Android 12 and
+  newer may stop the programs Termux starts (Caddy, ffmpeg) to save power; if a stream stops
+  by itself, turn off "child process restrictions" in the developer options (Android 14 and
+  newer), or see the Termux wiki on "phantom processes".
+- **Limits:** a phone serves one or two devices. `[limits]` in the configuration bounds what
+  a stream takes: 8 requests to the daemon at once (more wait their turn), 2 processors and
+  192 MiB for Caddy, 4 threads for ffmpeg. Measured on a phone with 7 cores
+  (`scripts/load-probe.py`): no failed request at 64 parallel range requests with bursts of
+  seeks, Caddy at 70-75 MB, the daemon at 45 MB. Transcoding on a phone is slow (1080p HEVC
+  at about 0.2 times real time; 4K HDR far slower): prepare ahead, or play in direct mode.
+- `init`, `uninstall`, `dash-pass` and `revoke` work without root; `vpstream install` points
+  to `pkg install`.
 
 ## HTTPS for streams
 

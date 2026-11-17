@@ -18,12 +18,14 @@ applies on the next request without a reload.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -31,7 +33,7 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import dashboard_ca
+from vpstream import dashboard_ca, platform
 from vpstream.certificate import PROFILE, Certificate, CertificateError, first_der
 from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
@@ -86,11 +88,23 @@ def unlink_videos(folder: Path) -> None:
 _NO_ADMIN = {"disabled": True, "config": {"persist": False}}
 
 
-def _proxy_to(socket_path: Path) -> dict[str, Any]:
+def _proxy_to(socket_path: Path, connections: int = 0) -> dict[str, Any]:
     """Hand the request to the daemon on a unix socket, with the viewer's address in a
-    header Caddy sets itself, so whatever a viewer sends under that name is replaced."""
+    header Caddy sets itself, so whatever a viewer sends under that name is replaced. With
+    `connections`, at most that many at once: the others wait for one to be free, where
+    more would overflow the socket and be refused (see `Limits`)."""
+    transport: dict[str, Any] = {}
+    if connections:
+        transport = {
+            "transport": {
+                "protocol": "http",
+                "max_conns_per_host": connections,
+                "keep_alive": {"max_idle_conns_per_host": connections},
+            }
+        }
     return {
         "handler": "reverse_proxy",
+        **transport,
         "upstreams": [{"dial": f"unix/{socket_path}"}],
         "headers": {
             "request": {
@@ -110,10 +124,13 @@ def config(
     access_log: Path,
     videos_dir: Path,
     certificate: Certificate | None = None,
+    host: str = "",
+    gate_connections: int = 0,
 ) -> dict[str, Any]:
     """The stream's Caddy: its whole configuration, as its native JSON. With a
     `certificate` it serves HTTPS with it, loaded from its files: this Caddy never asks for
-    one (see `certificate`)."""
+    one (see `certificate`). With a `host` it listens on that address only (local mode),
+    else on every address."""
     send_file = [
         {
             "handler": "headers",
@@ -123,7 +140,7 @@ def config(
         {"handler": "file_server", "root": str(videos_dir)},
     ]
     ask_gate = {
-        **_proxy_to(gate_socket),
+        **_proxy_to(gate_socket, gate_connections),
         "handle_response": [
             {"match": {"headers": {HEADER_FILE: ["*"]}}, "routes": [{"handle": send_file}]}
         ],
@@ -135,7 +152,7 @@ def config(
     }
     access = f"http.log.access.{SERVER}"
     server: dict[str, Any] = {
-        "listen": [f":{port}"],
+        "listen": [f"{url_host(host) if host else ''}:{port}"],
         "automatic_https": {"disable": True},
         "read_header_timeout": 10 * _SECOND,
         "idle_timeout": 120 * _SECOND,
@@ -356,6 +373,8 @@ class Server(Protocol):
 
     def start(self) -> None: ...
 
+    def stop_left_over(self) -> None: ...
+
     def stop(self) -> None: ...
 
     def running(self) -> bool: ...
@@ -381,9 +400,57 @@ class CaddyProcess:
         self.port = port
         self.work_dir = work_dir  # Caddy's own files and its error output
         self._proc: subprocess.Popen[bytes] | None = None
+        # On Termux nothing stops Caddy with a daemon that was killed (Android, kill -9): it
+        # is written down, and one left by an earlier daemon is stopped before a start. On
+        # Linux systemd stops every process of the service.
+        self.reap = platform.is_termux()
+
+    @property
+    def config_file(self) -> Path:
+        return self.work_dir / "caddy.json"
+
+    @property
+    def pid_file(self) -> Path:
+        return self.work_dir / "caddy.pid"
+
+    def stop_left_over(self) -> None:
+        """Stop the Caddy an earlier daemon of this install left running, if any: only a
+        process whose command line names this Caddy's configuration file. Only on Termux
+        (`reap`); a race with its own end is harmless."""
+        if not self.reap:
+            return
+        try:
+            pid = int(self.pid_file.read_text(encoding="ascii").strip())
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except (OSError, ValueError):
+            self.pid_file.unlink(missing_ok=True)
+            return
+        if os.fsencode(self.config_file) not in argv:
+            self.pid_file.unlink(missing_ok=True)
+            return  # the number is another process's now
+        with contextlib.suppress(ProcessLookupError):  # it ended by itself meanwhile
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + STOP_SECONDS
+            while time.monotonic() < deadline and _alive(pid):
+                time.sleep(0.1)
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        self.pid_file.unlink(missing_ok=True)
 
     def config(self) -> dict[str, Any]:
         raise NotImplementedError
+
+    cpus = 0  # GOMAXPROCS; 0 leaves it to Go
+    memory_mb = 0  # GOMEMLIMIT, where Go's collector works harder; 0 leaves it to Go
+
+    def limits_env(self) -> dict[str, str]:
+        env = {}
+        if self.cpus:
+            env["GOMAXPROCS"] = str(self.cpus)
+        if self.memory_mb:
+            env["GOMEMLIMIT"] = f"{self.memory_mb}MiB"
+        return env
 
     @property
     def probe_host(self) -> str:
@@ -412,16 +479,18 @@ class CaddyProcess:
         if self.running():
             return
         binary = require(self.runner, "caddy", self.needed_for)
+        self.stop_left_over()
         if problem := self.port_problem():
             raise CaddyError(problem)
         self.work_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
-        config_file = self.work_dir / "caddy.json"
+        config_file = self.config_file
         write_atomic(config_file, json.dumps(self.config(), indent=1))
         # The service user has no home folder; Caddy keeps its files where it is told to.
         env = {
             **os.environ,
             "XDG_DATA_HOME": str(self.data_dir),
             "XDG_CONFIG_HOME": str(self.work_dir / "config"),
+            **self.limits_env(),
         }
         with self.error_log.open("wb") as errors:
             proc = subprocess.Popen(
@@ -432,6 +501,8 @@ class CaddyProcess:
                 env=env,
                 cwd=str(self.work_dir),
             )
+        if self.reap:
+            write_atomic(self.pid_file, f"{proc.pid}\n")
         deadline = time.monotonic() + START_SECONDS
         while proc.poll() is None and time.monotonic() < deadline:
             if not self.listens or _accepts(self.port, self.probe_host):
@@ -453,6 +524,8 @@ class CaddyProcess:
         proc, self._proc = self._proc, None
         if proc is not None:
             _end(proc)
+            if self.reap:
+                self.pid_file.unlink(missing_ok=True)
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -466,6 +539,7 @@ class StreamServer(Server, Protocol):
     """The stream's Caddy as the daemon uses it. Tests swap in a fake."""
 
     certificate: Certificate | None  # HTTPS with it, or plain HTTP; set before each start
+    host: str  # the one address to listen on (local mode), or "" for every address
 
 
 class CaddyServer(CaddyProcess):
@@ -477,11 +551,23 @@ class CaddyServer(CaddyProcess):
         self.access_log = paths.access_log
         self.videos_dir = paths.videos_dir
         self.certificate: Certificate | None = None
+        self.host = ""  # local mode: the one address to listen on; set before each start
+        self.gate_connections = 0  # at most this many requests to the gate at once
 
     def config(self) -> dict[str, Any]:
         return config(
-            self.port, self.gate_socket, self.access_log, self.videos_dir, self.certificate
+            self.port,
+            self.gate_socket,
+            self.access_log,
+            self.videos_dir,
+            self.certificate,
+            self.host,
+            self.gate_connections,
         )
+
+    @property
+    def probe_host(self) -> str:
+        return self.host or "127.0.0.1"
 
     def start(self) -> None:
         if not self.running():
@@ -641,6 +727,15 @@ def obtain_failure(log: str) -> str | None:
         ):
             return problem or str(entry.get("error") or entry.get("msg"))
     return None
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process still runs: there, and not a zombie waiting for its parent."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return False
+    return stat.rpartition(")")[2].split()[:1] != ["Z"]
 
 
 def _end(proc: subprocess.Popen[bytes]) -> None:

@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, stream
+from vpstream import __version__, gate, platform, stream
 from vpstream.net import url_host
 from vpstream.show import (
     ACTIVE,
@@ -232,7 +232,8 @@ def _request(
     """Ask the daemon to start a stream or a prepare of a file or folder. When the service
     cannot read the videos, give it access (an ACL entry for its user alone) and ask once
     more; when it would take long, say what and ask whether to go ahead."""
-    from vpstream import access, client, config
+    from vpstream import client, config
+    from vpstream.platform.linux import access
     from vpstream.tools import SystemRunner, ToolMissing
 
     socket = config.default_paths().socket
@@ -247,7 +248,9 @@ def _request(
                 return info
             except client.DaemonRefused as exc:
                 code = exc.data.get("code")
-                if code == stream.Unreadable.CODE and not granted:
+                # On Termux the daemon is the caller: what it cannot read, Android keeps
+                # from Termux (termux-setup-storage), and no grant changes that.
+                if code == stream.Unreadable.CODE and not granted and not platform.is_termux():
                     granted = True
                     user = str(exc.data.get("user"))
                     try:
@@ -343,6 +346,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     if info is None or not info.get("stream"):
         return _show(info) or 1
     stream = info["stream"]
+    if info.get("local") is not None:
+        from vpstream import local
+
+        print(f"WARNING: {local.WARNING}", file=sys.stderr)
     print(format_stream(stream))
     print("Dashboard:    " + dashboard_line(info.get("dashboard") or {}))
     print("Stop it with: vpstream stop")
@@ -451,7 +458,7 @@ def cmd_track_info(args: argparse.Namespace) -> int:
 
 def _revoke() -> int:
     """Take back the file access `start` gave the service. Says so when it did."""
-    from vpstream import access
+    from vpstream.platform.linux import access
     from vpstream.tools import SystemRunner, ToolMissing
 
     try:
@@ -464,6 +471,9 @@ def _revoke() -> int:
 
 
 def cmd_revoke(args: argparse.Namespace) -> int:
+    if platform.is_termux():
+        print("Nothing to take back on Termux: the daemon runs as you and was given no access.")
+        return 0
     info = _daemon("status")
     if info is None:
         return 1
@@ -527,28 +537,71 @@ def cmd_clients(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    from vpstream import config, daemon, firewall
+    from vpstream import config, daemon
+    from vpstream.platform.linux import firewall
     from vpstream.tools import SystemRunner
 
     paths = config.default_paths()
     runner = SystemRunner()
+    if platform.is_termux():  # no firewall: the daemon serves the local network only
+        try:
+            return daemon.run(config.load(paths.config_file), paths, runner)
+        except (config.ConfigError, daemon.DaemonError) as exc:
+            return _error(str(exc))
+        except OSError as exc:
+            return _error(f"the daemon cannot start: {exc}")
     # The helper always works on the real host, so a daemon tried out under $VPSTREAM_ROOT
     # gets none: it must not close the real stream port.
     trial = bool(os.environ.get(config.ROOT_ENV))
+    try:
+        settings = config.with_local(config.load(paths.config_file), args.local, args.address)
+    except config.ConfigError as exc:
+        return _error(str(exc))
     helper = firewall.helper_path()
     fw = None if trial else firewall.SudoFirewall(runner, helper)
     dash_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.DASHBOARD)
     acme_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.ACME)
     try:
-        return daemon.run(config.load(paths.config_file), paths, runner, fw, dash_fw, acme_fw)
+        return daemon.run(settings, paths, runner, fw, dash_fw, acme_fw)
     except (config.ConfigError, daemon.DaemonError) as exc:
         return _error(str(exc))
     except OSError as exc:  # the run folder cannot be made, for example
         return _error(f"the daemon cannot start: {exc}")
 
 
+def cmd_up(args: argparse.Namespace) -> int:
+    return _up_down(up=True)
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    return _up_down(up=False)
+
+
+def _up_down(up: bool) -> int:
+    """Termux has no service manager: `up` and `down` start and stop the daemon."""
+    if not platform.is_termux():
+        what = "start" if up else "stop"
+        return _error(
+            f"on Linux the service runs the daemon: sudo systemctl {what} vpstream "
+            "(or vpstream daemon, in the foreground)"
+        )
+    from vpstream import config
+    from vpstream.platform.termux import commands
+    from vpstream.tools import SystemRunner
+
+    try:
+        if up:
+            info = commands.up(SystemRunner(), config.default_paths())
+            print("Dashboard:    " + dashboard_line(info.get("dashboard") or {}))
+        else:
+            commands.down(SystemRunner(), config.default_paths())
+    except (commands.CommandError, OSError) as exc:
+        return _error(str(exc))
+    return 0
+
+
 def _service() -> Any:
-    from vpstream import service
+    from vpstream.platform.linux import service
     from vpstream.tools import SystemRunner
 
     return service.Service(SystemRunner(), sudo_user=os.environ.get("SUDO_USER"))
@@ -589,24 +642,61 @@ def _password(args: argparse.Namespace, ask: bool) -> str | None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    from vpstream import service
+    if platform.is_termux():
+        from vpstream import config
+        from vpstream.platform.termux import commands
+        from vpstream.tools import SystemRunner
+
+        linux_only = args.public is not None or args.https is not None or args.local
+        if linux_only or args.address or _given(args):
+            return _error("Termux serves the local network only; run init without options", 2)
+        try:
+            commands.init(SystemRunner(), config.default_paths())
+        except (commands.CommandError, OSError) as exc:
+            return _error(str(exc))
+        return 0
+    from vpstream.platform.linux import service
 
     svc = _service()
     try:
-        public = svc.dashboard_public(args.public)
-        given = args.dash_pass is not None or args.dash_pass_file is not None
-        if given and not public:
+        public = False if args.local else svc.dashboard_public(args.public)
+        if args.address and not args.local:
+            return _error("--address goes with --local", 2)
+        if _given(args) and not (public or args.local):
             return _error("a password is for the public dashboard only (--no-tailscale)", 2)
         # Not asked for a password that a refusal for want of root would throw away.
-        ask = os.geteuid() == 0 and svc.wants_password(public)
-        svc.init(public, _password(args, ask), args.https)
+        ask = os.geteuid() == 0 and (
+            svc.wants_password(public, True) if args.local else svc.wants_password(public)
+        )
+        password = _password(args, ask)
+        if args.local:
+            svc.init(public, password, args.https, lan=True, address=args.address)
+        else:
+            svc.init(public, password, args.https)
     except (ValueError, service.ServiceError, OSError) as exc:
         return _error(str(exc))
     return 0
 
 
+def _given(args: argparse.Namespace) -> bool:
+    """Whether a password was given on the command line."""
+    return args.dash_pass is not None or args.dash_pass_file is not None
+
+
 def cmd_dash_pass(args: argparse.Namespace) -> int:
-    from vpstream import service
+    if platform.is_termux():
+        from vpstream import config
+        from vpstream.platform.termux import commands
+
+        try:
+            password = _password(args, ask=True)
+            if password is None:
+                return _error("no terminal to ask on; give it with --dash-pass-file FILE", 2)
+            commands.set_password(config.default_paths(), password)
+        except (ValueError, commands.CommandError, OSError) as exc:
+            return _error(str(exc))
+        return 0
+    from vpstream.platform.linux import service
 
     if os.geteuid() != 0:
         return _error("this needs root: sudo vpstream dash-pass")
@@ -637,7 +727,22 @@ def cmd_dashboard_cert(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    from vpstream import service
+    if platform.is_termux():
+        from vpstream import config
+        from vpstream.platform.termux import commands
+
+        what = "vpstream's configuration and state" + (
+            ", and every prepared video" if args.purge else ""
+        )
+        if not _confirm(f"Remove {what}?", args.yes):
+            print("Cancelled; nothing was changed.")
+            return 1
+        try:
+            commands.uninstall(config.default_paths(), args.purge)
+        except (commands.CommandError, OSError) as exc:
+            return _error(str(exc))
+        return 0
+    from vpstream.platform.linux import service
 
     what = "the vpstream service, its user, configuration and state"
     what += ", every prepared video and the ffmpeg it installed" if args.purge else ""
@@ -663,7 +768,11 @@ def _ask(question: str) -> bool:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    from vpstream import caddy_install, ffmpeg_install, system_install
+    if platform.is_termux():
+        from vpstream.platform.termux import commands
+
+        return _error(commands.install_refusal(args.program))
+    from vpstream.platform.linux import caddy_install, ffmpeg_install, system_install
     from vpstream.tools import SystemRunner
 
     if args.tmp and not Path(args.tmp).is_dir():
@@ -737,6 +846,13 @@ def build_parser() -> argparse.ArgumentParser:
         const=False,
         help="put the dashboard back on the tailnet only (the default)",
     )
+    where.add_argument(
+        "--local",
+        action="store_true",
+        help="serve the local network only, at this host's private address, with no tailnet "
+        "or public dashboard (without it, init sets up the public mode)",
+    )
+    ini.add_argument("--address", default="", help="with --local: the private address to use")
     scheme = ini.add_mutually_exclusive_group()
     scheme.add_argument(
         "--https",
@@ -877,7 +993,19 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--name", help="what to call the device on the dashboard")
     cl.set_defaults(func=cmd_clients)
 
+    sub.add_parser(
+        "up", help="Termux: start the daemon in the background and keep the phone awake"
+    ).set_defaults(func=cmd_up)
+    sub.add_parser("down", help="Termux: stop the daemon and let the phone sleep").set_defaults(
+        func=cmd_down
+    )
     dm = sub.add_parser("daemon", help="run the daemon in the foreground (the service does this)")
+    dm.add_argument(
+        "--local",
+        action="store_true",
+        help="Linux: serve the local network only, at this host's private address",
+    )
+    dm.add_argument("--address", default="", help="with --local: the private address to use")
     dm.set_defaults(func=cmd_daemon)
 
     b = sub.add_parser("bench", help="measure how fast this host prepares a file")

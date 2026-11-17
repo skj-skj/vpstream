@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vpstream import caddy
-from vpstream.system_install import APT_GET, Cancelled, Installer, SetupError
+from vpstream.platform.linux.system_install import APT_GET, Cancelled, Installer, SetupError
 from vpstream.tools import tail
 
 REPOSITORY = "https://dl.cloudsmith.io/public/caddy/stable"

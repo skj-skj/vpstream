@@ -24,7 +24,7 @@ from typing import Any
 
 from vpstream.ffargs import parse_ffmpeg_list
 from vpstream.files import read_json_object
-from vpstream.system_install import APT_GET, Cancelled, Installer, SetupError
+from vpstream.platform.linux.system_install import APT_GET, Cancelled, Installer, SetupError
 from vpstream.tools import Runner, tail
 
 REPO = "FFmpeg-Builds/FFmpeg-Builds"  # formerly BtbN/FFmpeg-Builds

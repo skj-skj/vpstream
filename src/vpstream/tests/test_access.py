@@ -9,8 +9,9 @@ from typing import Any
 
 import pytest
 
-from vpstream import access, api, cli, client, config, doctor
+from vpstream import api, cli, client, config
 from vpstream.control import Control
+from vpstream.platform.linux import access, doctor
 from vpstream.tests.fakes import FakeFirewall, FakeRunner, FakeServer
 from vpstream.tools import Result, ToolMissing
 

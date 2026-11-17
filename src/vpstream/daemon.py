@@ -11,6 +11,9 @@ dashboard port, over HTTPS. The port is opened in the firewall only while that C
 
 from __future__ import annotations
 
+import collections
+import contextlib
+import dataclasses
 import os
 import secrets
 import socket
@@ -21,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import __version__, api, net, prepare, public, tailscale
+from vpstream import __version__, api, ffargs, local, net, platform, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
     CaddyError,
@@ -35,7 +38,8 @@ from vpstream.caddy import (
 from vpstream.certificate import Certificates
 from vpstream.config import Config, Paths
 from vpstream.control import Control
-from vpstream.firewall import Firewall, FirewallError, switch
+from vpstream.platform.common import Firewall, FirewallError, switch
+from vpstream.platform.linux import tailscale
 from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out
@@ -49,6 +53,10 @@ URL_SECONDS = 30.0  # how long the tailnet address is remembered between status 
 # "not published" instead of the daemon looking dead.
 TAILSCALE_SECONDS = 4.0
 PROBE_SECONDS = 2.0
+# Local mode's dashboard, with nothing in front of it (see _make_server).
+REQUEST_SECONDS = 15.0
+EXPOSED_THREADS = 16
+PER_ADDRESS = 6  # what a browser opens to one host at most
 
 
 class DaemonError(RuntimeError):
@@ -88,7 +96,7 @@ def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
             if socket_in_use(path):
                 raise DaemonError(
                     f"a vpstream daemon is already listening on {path}; "
-                    "stop it first (sudo systemctl stop vpstream)"
+                    f"stop it first ({platform.hints().stop})"
                 )
             path.unlink()
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -105,8 +113,10 @@ def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
 
 
 def bind_tcp(host: str, port: int) -> socket.socket:
-    """Listen on one address. Raises OSError when the address or port cannot be used."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    """Listen on one address (IPv4, or IPv6 in local mode). Raises OSError when the address
+    or port cannot be used."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
@@ -117,20 +127,125 @@ def bind_tcp(host: str, port: int) -> socket.socket:
     return sock
 
 
-def _make_server(host: str, port: int, app: Any, listener: socket.socket) -> Any:
+def _make_server(
+    host: str, port: int, app: Any, listener: socket.socket, exposed: bool = False
+) -> Any:
     """A threaded server on a socket that is already listening. Requests that only read (a
     viewer's, a status poll) are not logged one by one: there is one for every piece of a
-    video. Changes are."""
+    video. Changes are.
+
+    `exposed`: nothing is in front of it (local mode's dashboard, which the network reaches
+    directly). A connection that sends nothing for REQUEST_SECONDS is closed, and at most
+    EXPOSED_THREADS are served at once, PER_ADDRESS of them for one address: the others get
+    a 503 at once, so connections held open cannot take a thread each without end, nor one
+    device every thread."""
     from werkzeug.serving import WSGIRequestHandler, make_server
 
+    deadlines = _Deadlines(REQUEST_SECONDS) if exposed else None
+
     class Handler(WSGIRequestHandler):
+        timeout = REQUEST_SECONDS if exposed else None
+
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
             if self.command not in ("GET", "HEAD"):
                 super().log_request(code, size)
 
-    return make_server(
+        def handle_one_request(self) -> None:
+            # The request line and the headers must come within one deadline, however
+            # slowly they trickle in: the socket's timeout starts again with every byte.
+            if deadlines is not None:
+                deadlines.arm(self.connection)
+            super().handle_one_request()
+
+        def parse_request(self) -> bool:
+            done = super().parse_request()
+            if deadlines is not None:
+                deadlines.disarm(self.connection)
+            return done
+
+        def finish(self) -> None:
+            if deadlines is not None:
+                deadlines.disarm(self.connection)
+            super().finish()
+
+    server = make_server(
         host, port, app, threaded=True, request_handler=Handler, fd=listener.fileno()
     )
+    if exposed:
+        _bound_threads(server, EXPOSED_THREADS, PER_ADDRESS)
+    return server
+
+
+class _Deadlines:
+    """Connections whose request must be read by a time; one thread closes those that are
+    not, so a client that sends a byte now and then cannot keep its slot."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._due: dict[socket.socket, float] = {}
+        self._lock = threading.Lock()
+        self._watcher: threading.Thread | None = None
+
+    def arm(self, conn: socket.socket) -> None:
+        with self._lock:
+            self._due[conn] = time.monotonic() + self.seconds
+            if self._watcher is None:
+                self._watcher = threading.Thread(target=self._watch, daemon=True)
+                self._watcher.start()
+
+    def disarm(self, conn: socket.socket) -> None:
+        with self._lock:
+            self._due.pop(conn, None)
+
+    def _watch(self) -> None:
+        while True:
+            time.sleep(min(1.0, self.seconds / 4))
+            now = time.monotonic()
+            with self._lock:
+                late = [conn for conn, due in self._due.items() if due <= now]
+                for conn in late:
+                    del self._due[conn]
+            for conn in late:  # the read it waits in ends, and so does its thread
+                with contextlib.suppress(OSError):
+                    conn.shutdown(socket.SHUT_RDWR)
+
+
+BUSY = b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 0\r\n" + (
+    b"Connection: close\r\n\r\n"
+)
+
+
+def _bound_threads(server: Any, most: int, per_address: int) -> None:
+    """Serve at most `most` connections at once, and `per_address` from one address; refuse
+    the others with a 503 at once."""
+    serve_one = server.process_request_thread
+    lock = threading.Lock()
+    busy: collections.Counter[str] = collections.Counter()
+
+    def process_request(request: socket.socket, client_address: Any) -> None:
+        who = str(client_address[0]) if isinstance(client_address, tuple) else ""
+        with lock:
+            room = sum(busy.values()) < most and busy[who] < per_address
+            if room:
+                busy[who] += 1
+        if not room:
+            with contextlib.suppress(OSError):
+                request.sendall(BUSY)
+            server.shutdown_request(request)
+            return
+
+        def run() -> None:
+            try:
+                serve_one(request, client_address)
+            finally:
+                with lock:
+                    busy[who] -= 1
+                    if not busy[who]:
+                        del busy[who]
+
+        threading.Thread(target=run, daemon=True).start()
+
+    server.process_request = process_request
 
 
 @dataclass
@@ -151,19 +266,27 @@ class Daemon:
     dashboard_problem: str = "starting"
     ready: threading.Event = field(default_factory=threading.Event)
     dashboard_port_state: str = "closed"  # public mode: "open", "closed" or "unknown"
+    # Local mode: the dashboard on the local network's address, behind the password.
+    lan_address: str | None = None
+    lan_problem: str = "starting"
     control: Control = field(init=False)
     login: auth.Login | None = field(init=False, default=None)
     _published: tuple[float, str | None, str | None] | None = None
 
     def __post_init__(self) -> None:
-        if self.config.dashboard_public:
+        if self.config.dashboard_public or self.config.local:
             self.login = auth.Login(
                 self._verifier(),
                 auth.Limiter(self.paths.login_record, log=self.log),
                 device_secret=self._device_secret(),
             )
         speeds = prepare.Speeds(self.config.copy_speed, self.config.encode_speed)
-        preparer = prepare.Preparer(self.paths.cache_dir, self.runner, self.log, speeds=speeds)
+        settings = ffargs.DEFAULT_SETTINGS
+        if self.config.prepare_threads:
+            settings = dataclasses.replace(settings, threads=self.config.prepare_threads)
+        preparer = prepare.Preparer(
+            self.paths.cache_dir, self.runner, self.log, settings=settings, speeds=speeds
+        )
         self.control = Control(
             self.config,
             self.paths,
@@ -182,7 +305,7 @@ class Daemon:
             self.log(f"WARNING: nobody can log in to the dashboard: {exc}")
             return None
         if verifier is None:
-            self.log("WARNING: no dashboard password is set: sudo vpstream dash-pass")
+            self.log(f"WARNING: no dashboard password is set: {platform.hints().dash_pass}")
         return verifier
 
     def _device_secret(self, new: bool = False) -> bytes:
@@ -256,6 +379,8 @@ class Daemon:
         }
 
     def _dashboard_status(self) -> dict[str, Any]:
+        if self.config.local:
+            return self._local_status()
         public = self.config.dashboard_public
         info: dict[str, Any] = {
             "mode": "public" if public else "tailnet",
@@ -278,6 +403,20 @@ class Daemon:
             info["url"], info["problem"] = self.published()
         return info
 
+    def _local_status(self) -> dict[str, Any]:
+        here = self.dashboard_address
+        return {
+            "mode": "local",
+            "port": self.config.dashboard_port,
+            "address": self.lan_address,
+            "url": f"http://{self.lan_address}/" if self.lan_address else None,
+            "problem": None if self.lan_address else self.lan_problem,
+            "this_device": f"http://{here}/" if here else None,
+            "this_device_problem": None if here else self.dashboard_problem,
+            "this_device_password": platform.is_termux(),
+            "password": bool(self.login and self.login.verifier),
+        }
+
     def _unix_server(self, path: Path, app: Any) -> tuple[socket.socket, Any]:
         listener = bind_unix(path)
         return listener, _make_server(f"unix://{path}", 0, app, listener)
@@ -294,7 +433,7 @@ class Daemon:
         socket files are removed."""
         apps = {
             self.paths.socket: api.create_app(
-                self.status, self.control, None, self.certificate, self._admin()
+                self.status, self.control, None, self.certificate, self._admin(stop)
             ),
             self.paths.gate_socket: public.create_app(self.control),
         }
@@ -317,12 +456,16 @@ class Daemon:
             threading.Thread(target=server.serve_forever, name=path.name, daemon=True)
             for path, _, server in servers
         ]
-        if self.login is None:
-            dash, keep_up = apps[self.paths.socket], self._dashboard
+        if self.config.local:
+            threads += self._local_dashboards(stop)
         else:
-            dash = api.create_app(self.status, self.control, self.login, self.certificate)
-            keep_up = self._public_dashboard
-        threads.append(threading.Thread(target=keep_up, args=(dash, stop), name="dash"))
+            keep_up: Callable[[Any, threading.Event], None]
+            if self.login is None:
+                dash, keep_up = apps[self.paths.socket], self._dashboard
+            else:
+                dash = api.create_app(self.status, self.control, self.login, self.certificate)
+                keep_up = self._public_dashboard
+            threads.append(threading.Thread(target=keep_up, args=(dash, stop), name="dash"))
         threads.append(threading.Thread(target=self._tick, args=(stop,), name="tick"))
         for thread in threads:
             thread.daemon = True
@@ -344,39 +487,91 @@ class Daemon:
             _close(servers)
             self.log("vpstream daemon stopped")
 
-    def _dashboard(self, app: Any, stop: threading.Event) -> None:
-        """Keep the dashboard up on the loopback address; wait and retry while the port is
-        taken."""
+    def _local_dashboards(self, stop: threading.Event) -> list[threading.Thread]:
+        """Local mode: the dashboard on the local network's address, behind the password,
+        and on the loopback address. On Termux that one has the password too, since every
+        app on the phone can reach it; on Linux it is the host's own, as on the tailnet."""
+        # Nothing is in front of these: the address a request comes from is the viewer's,
+        # and a header that says otherwise is the viewer's own.
+        lan = api.create_app(
+            self.status, self.control, self.login, self.certificate, secure=False, ip_header=False
+        )
+        home = lan if platform.is_termux() else api.create_app(self.status, self.control)
+        return [
+            threading.Thread(target=self._dashboard, args=(home, stop), name="dash"),
+            threading.Thread(target=self._dashboard, args=(lan, stop, True), name="dash-lan"),
+        ]
+
+    def _lan_host(self) -> str:
+        """The local network's address for the dashboard, once it has a password."""
+        if self.login is None or self.login.verifier is None:
+            raise DaemonError(f"no password is set: {platform.hints().dash_pass}")
+        try:
+            return local.find(self.config.local_address)
+        except local.LocalError as exc:
+            raise DaemonError(str(exc)) from exc
+
+    def _lan_lost(self, host: str) -> bool:
+        return not local.is_mine(host) or self.login is None or self.login.verifier is None
+
+    def _dashboard(self, app: Any, stop: threading.Event, lan: bool = False) -> None:
+        """Keep the dashboard up on the loopback address, or with `lan` on the local
+        network's (local mode); wait and retry while the port is taken. The local network's
+        is taken down when its address goes, and comes back with it."""
         port = self.config.dashboard_port
         while not stop.is_set():
-            host = LOOPBACK
             try:
+                host = self._lan_host() if lan else LOOPBACK
                 listener = bind_tcp(host, port)
-            except OSError as exc:
-                self._dashboard_failed(f"the dashboard is not available: {exc}")
+            except (OSError, DaemonError) as exc:
+                where = " on the local network" if lan else ""
+                self._dashboard_failed(f"the dashboard is not available{where}: {exc}", lan=lan)
                 stop.wait(self.retry_seconds)
                 continue
             bound_port = listener.getsockname()[1]
-            server = _make_server(host, bound_port, app, listener)
-            self.dashboard_address = f"{host}:{bound_port}"
-            self.log(f"dashboard on http://{self.dashboard_address}/ (this host only)")
-            closer = threading.Thread(
-                target=lambda s=server: (stop.wait(), s.shutdown()), daemon=True
-            )
-            closer.start()
+            server = _make_server(host, bound_port, app, listener, exposed=self.config.local)
+            address = net.url("http", host, bound_port).removeprefix("http://")
+            if lan:
+                self.lan_address = address
+                self.log(f"dashboard on http://{address}/ (local network, behind the password)")
+            else:
+                self.dashboard_address = address
+                self.log(f"dashboard on http://{address}/ (this host only)")
+
+            def close(s: Any = server, watched: str = host if lan else "") -> None:
+                while not stop.wait(TICK_SECONDS if watched else None):
+                    if self._lan_lost(watched):
+                        break
+                s.shutdown()
+
+            threading.Thread(target=close, daemon=True).start()
             try:
                 server.serve_forever()
             finally:
-                self.dashboard_address = None
-                self.dashboard_problem = "stopped"
+                if lan:
+                    self.lan_address, self.lan_problem = None, "stopped"
+                else:
+                    self.dashboard_address, self.dashboard_problem = None, "stopped"
                 server.server_close()
                 listener.close()
+            if lan and not stop.is_set():
+                self.log(f"the dashboard on {address} is closed: the address is gone")
 
-    def _admin(self) -> dict[str, Callable[[], Any]] | None:
-        """What only the command line's socket may ask for: the public dashboard's own."""
-        if self.login is None:
-            return None
-        return {"dashboard/reload": self.reload_password, "dashboard/unblock": self.unblock}
+    def _admin(self, stop: threading.Event) -> dict[str, Callable[[], Any]] | None:
+        """What only the command line's socket may ask for: the dashboard's password, and on
+        Termux, where no service manager stops the daemon, `vpstream down`."""
+        routes: dict[str, Callable[[], Any]] = {}
+        if self.login is not None:
+            routes |= {"dashboard/reload": self.reload_password, "dashboard/unblock": self.unblock}
+        if platform.is_termux():
+
+            def stop_daemon() -> dict[str, Any]:
+                self.log("asked to stop (vpstream down)")
+                stop.set()
+                return {"stopping": True}
+
+            routes["daemon/stop"] = stop_daemon
+        return routes or None
 
     def _dashboard_port(self, action: str) -> None:
         """Open or close the dashboard port. Without a helper (a trial run) nothing is done."""
@@ -389,10 +584,13 @@ class Daemon:
             self.dashboard_port_state = "unknown"
             raise
 
-    def _dashboard_failed(self, problem: str, wait: float | None = None) -> None:
-        if problem != self.dashboard_problem:
+    def _dashboard_failed(self, problem: str, wait: float | None = None, lan: bool = False) -> None:
+        if problem != (self.lan_problem if lan else self.dashboard_problem):
             self.log(f"{problem}; trying again in {wait or self.retry_seconds:g} seconds")
-        self.dashboard_problem = problem
+        if lan:
+            self.lan_problem = problem
+        else:
+            self.dashboard_problem = problem
 
     def _public_dashboard(self, app: Any, stop: threading.Event) -> None:
         """Keep the public dashboard up: the app on its unix socket, Caddy in front of it,
@@ -492,6 +690,8 @@ def run(
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
     server = CaddyServer(runner, config.stream_port, paths)
+    server.gate_connections = config.gate_connections
+    server.cpus, server.memory_mb = config.caddy_cpus, config.caddy_memory_mb
     log = lambda m: print(m, flush=True)  # noqa: E731
     certificates = stream_certificates(config, paths, runner, acme_firewall, log)
     daemon = Daemon(config, paths, runner, firewall, server, certificates, log=log)

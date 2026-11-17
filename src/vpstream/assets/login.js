@@ -6,13 +6,26 @@
   var API = "/api/v1/";
   var KEY_BYTES = 32;
   var C = window.vpCrypto;
+  // Local mode (plain HTTP): the session and the device are not cookies, which a browser
+  // would send to every port of this host, but kept here, for this page alone (see api.py).
+  var SESSION = "vpstream-session", DEVICE = "vpstream-device";
+
+  function stored(name) {
+    try { return window.localStorage.getItem(name); } catch (e) { return null; }
+  }
+
+  function store(name, value) {
+    try { window.localStorage.setItem(name, value); } catch (e) { /* the next login asks again */ }
+  }
 
   function $(id) { return document.getElementById(id); }
 
   function post(route, payload) {
+    var headers = { "Content-Type": "application/json" };
+    if (stored(DEVICE)) { headers["X-Vpstream-Device"] = stored(DEVICE); }
     return fetch(API + route, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers,
       body: JSON.stringify(payload),
       credentials: "same-origin"
     }).then(function (response) {
@@ -63,7 +76,9 @@
         var proof = C.hex(C.hmac(key, C.utf8(challenge.label + challenge.nonce)));
         return post("login", { nonce: challenge.nonce, proof: proof });
       });
-    }).then(function () {
+    }).then(function (granted) {
+      if (granted.session) { store(SESSION, granted.session); }
+      if (granted.device) { store(DEVICE, granted.device); }
       $("password").value = "";
       state("Logged in", false, true);
       window.location.replace("/");

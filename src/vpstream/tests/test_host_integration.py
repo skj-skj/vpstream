@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import __version__, client, config, daemon, doctor, service, tailscale
+from vpstream import __version__, client, config, daemon
+from vpstream.platform.linux import doctor, service, tailscale
 from vpstream.tools import SystemRunner
 
 pytestmark = pytest.mark.integration

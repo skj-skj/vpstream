@@ -8,23 +8,45 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from vpstream import certificate, text
+from vpstream import certificate, local, platform, text
 
 
 def dashboard_line(dash: dict[str, Any]) -> str:
     if dash.get("mode") == "public":
         notes = [f"public, port {dash.get('port_state') or 'unknown'}"]
         if not dash.get("password"):
-            notes.append("NO PASSWORD: sudo vpstream dash-pass")
+            notes.append(f"NO PASSWORD: {platform.hints().dash_pass}")
         line = f"{dash.get('url') or dash.get('problem')} ({'; '.join(notes)})"
         if dash.get("certificate"):
             line += f"\n              certificate authority SHA-256 {dash['certificate']}"
         return line
+    if dash.get("mode") == "local":
+        return _local_dashboard(dash)
     if dash.get("url"):
         return f"{dash['url']} (Tailscale only)"
     if dash.get("address"):
         return f"http://{dash['address']}/ on this host only; {dash.get('problem')}"
     return str(dash.get("problem"))
+
+
+def _local_dashboard(dash: dict[str, Any]) -> str:
+    """The local network's address, behind the password, and this device's own."""
+    if dash.get("url"):
+        lan = f"{dash['url']} (local network, password)"
+    else:
+        lan = _why_not("not on the local network", dash.get("problem"))
+    if dash.get("this_device"):
+        password = ", password" if dash.get("this_device_password") else ""
+        here = f"{dash['this_device']} (this device{password})"
+    else:
+        here = _why_not("not on this device", dash.get("this_device_problem"))
+    return f"{lan}\n              {here}"
+
+
+def _why_not(where: str, problem: Any) -> str:
+    """Where the dashboard is not, and why: the daemon's own words when they say it."""
+    text = str(problem)
+    return text if text.startswith("the dashboard is not available") else f"{where}: {text}"
 
 
 def _https_line(https: dict[str, Any]) -> str | None:
@@ -257,6 +279,9 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     ]
     if https := _https_line(info.get("https") or {}):
         lines.insert(3, f"HTTPS:        {https}")
+    if (where := info.get("local")) is not None:
+        address = where.get("address") or "no private address now (is the Wi-Fi on?)"
+        lines.insert(1, f"Local mode:   {address} ({local.REMINDER})")
     if stream:
         count = len(stream.get("devices") or [])
         lines.append(f"Devices:      {count} (see: vpstream devices)")
@@ -270,6 +295,6 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     if info.get("version") != cli_version:
         lines.append(
             f"note: the daemon runs {info.get('version')} but this command is {cli_version}; "
-            "restart it with: sudo systemctl restart vpstream"
+            f"restart it with: {platform.hints().restart}"
         )
     return "\n".join(lines)
