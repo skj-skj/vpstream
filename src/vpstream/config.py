@@ -175,10 +175,12 @@ class Config:
     # which runs `vpstream daemon --local`, never from this file.
     local: bool = False
     local_address: str = ""  # with `local`: the address to serve on; "" means: find it
-    # How much the stream may take of the host, 0 for no bound (Linux; see TERMUX_LIMITS):
+    # How much the stream may take of the host, 0 for no bound (see TERMUX_LIMITS):
     # requests Caddy asks the gate at once, Caddy's processors and memory (GOMAXPROCS,
-    # GOMEMLIMIT), and the threads of one ffmpeg that prepares.
-    gate_connections: int = 0
+    # GOMEMLIMIT), and the threads of one ffmpeg that prepares. The gate is bounded
+    # everywhere: past its socket's backlog (daemon.bind_unix, 16) a request Caddy hands it
+    # is refused and the viewer gets a 502, where bounded it waits its turn.
+    gate_connections: int = 16
     caddy_cpus: int = 0
     caddy_memory_mb: int = 0
     prepare_threads: int = 0

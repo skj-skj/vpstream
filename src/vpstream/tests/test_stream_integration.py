@@ -38,7 +38,7 @@ class Live:
         self.log: list[str] = []
         self.tls = tls
         runner = SystemRunner()
-        self.server = caddy.CaddyServer(runner, self.cfg.stream_port, self.paths)
+        self.server = daemon.stream_server(self.cfg, self.paths, runner)
         certificates = daemon.stream_certificates(
             self.cfg, self.paths, runner, None, self.log.append
         )
@@ -476,3 +476,19 @@ def test_a_tv_is_known_by_its_cookie_and_obeys_through_caddy(live: Live, sample:
     )
     # Without the header it is no report, even with the cookie (a request from another site).
     assert live.get(f"{report}?ack=99", headers=tv)[0] == 404
+
+
+def test_many_requests_at_once_wait_their_turn_and_none_fails(live: Live, show: Path) -> None:
+    """A player that seeks while its old requests still run, or several devices at once:
+    Caddy asks the gate once per request, and past the gate socket's backlog (16) a dial
+    was refused and the viewer got a 502. Bounded, the others wait for a free one."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    live.api("stream/start", {"file": str(show / "e1.mp4"), "alias": "aaa"})
+
+    def one(n: int) -> int:
+        return live.get("/aaa", headers={"Range": f"bytes={n % 100}-{n % 100 + 99}"})[0]
+
+    with ThreadPoolExecutor(64) as pool:
+        statuses = list(pool.map(one, range(640)))
+    assert statuses.count(206) == len(statuses), sorted(set(statuses))
