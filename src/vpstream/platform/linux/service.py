@@ -432,7 +432,8 @@ class Service:
         if not https:
             self._close_acme(lay.paths.open_acme_ports_file)
         self._init_member(manifest)
-        self._init_unit(https, address if lan else None)
+        # The address as checked: never the text as given, which goes into the unit.
+        self._init_unit(https, (lan_address if address else "") if lan else None)
         if lan:
             self._report_local(cfg, lan_address)
         if public:

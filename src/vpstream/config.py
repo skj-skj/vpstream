@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from vpstream import platform
+from vpstream import local, platform
 from vpstream.checks import is_number, is_whole
 
 MIN_PORT = 1024  # the daemon runs as an unprivileged user, which cannot bind lower ports
@@ -337,6 +337,17 @@ def _limit_problem(name: str, value: Any) -> str | None:
     return None
 
 
+def _local_address_problem(name: str, value: Any) -> str | None:
+    """A private address of the local network, or "" to find one (see `local`)."""
+    if value == "":
+        return None
+    if problem := _host_problem(name, value):
+        return problem
+    if problem := local.private_problem(value):
+        return f"{name}: {problem}"
+    return None
+
+
 def _mode_problem(name: str, value: Any) -> str | None:
     if value != "local":
         return f'{name} must be "local" (Termux serves the local network only), not {value!r}'
@@ -388,7 +399,7 @@ _CHECKS = {
     "copy_speed": _speed_problem,
     "encode_speed": _speed_problem,
     "local": _mode_problem,
-    "local_address": _host_problem,
+    "local_address": _local_address_problem,
     "gate_connections": _limit_problem,
     "caddy_cpus": _limit_problem,
     "caddy_memory_mb": _limit_problem,
@@ -418,9 +429,7 @@ def parse(text: str, local_keys: bool | None = None) -> Config:
             field = keys.get((section, key))
             name = f"{section}.{key}"
             if field is None:
-                local = section == "network" and (section, key) in _LOCAL_KEYS
-                hint = " (local mode on Linux: sudo vpstream init --local)" if local else ""
-                problems.append(f"unknown setting {name!r}{hint}")
+                problems.append(f"unknown setting {name!r}")
             elif problem := _CHECKS.get(field, _port_problem)(name, value):
                 problems.append(problem)
             elif termux and value is True and field in _NOT_LOCAL:
@@ -453,7 +462,7 @@ def with_local(config: Config, on: bool, address: str = "") -> Config:
         if address:
             raise ConfigError("--address goes with --local")
         return config
-    if problem := _host_problem("--address", address):
+    if problem := _local_address_problem("--address", address):
         raise ConfigError(problem)
     if config.dashboard_public or config.stream_https:
         raise ConfigError(

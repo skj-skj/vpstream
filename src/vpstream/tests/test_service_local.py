@@ -163,3 +163,16 @@ def test_doctor_on_a_local_install(setup: Setup, tmp_path: Path) -> None:
     assert checks["local mode"].detail == "init --local: 1338/tcp from 192.168.0.0/16"
     assert "dashboard password" in checks
     assert "tailscale up" not in checks and "dashboard" not in checks
+
+
+@pytest.mark.parametrize(
+    "given", ["192.168.1.20%x", " 192.168.1.20", "192.168.1.20%\nExecStartPre=/bin/true"]
+)
+def test_the_unit_gets_the_address_as_checked_never_as_given(setup: Setup, given: str) -> None:
+    def find(configured: str) -> str:
+        return local.net.normal_ip(configured) or ""
+
+    setup.service(find_local=find).init(password=PASSWORD, lan=True, address=given)
+    unit = setup.layout.unit_file.read_text()
+    assert f"ExecStart={BIN} daemon --local --address 192.168.1.20\n" in unit
+    assert "%" not in unit and "ExecStartPre" not in unit

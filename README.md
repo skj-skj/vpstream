@@ -241,8 +241,9 @@ public mode, as always, and goes back to it.
 
 - **Address:** the stream and the dashboard listen on this host's private address (the one it
   reaches the network from, or `--address IP`), never on every interface. Only private
-  addresses are taken (192.168.x.x, 10.x.x.x, 172.16.x.x to 172.31.x.x, 169.254.x.x; fc00::/7
-  and fe80::/10); a carrier's shared address (100.64.0.0/10) is refused. When the address
+  addresses are taken (192.168.x.x, 10.x.x.x, 172.16.x.x to 172.31.x.x, 169.254.x.x, and
+  fc00::/7 for IPv6); a carrier's shared address (100.64.0.0/10) and an IPv6 link-local one
+  (fe80::/10, which needs its interface) are refused. When the address
   goes, a running stream stops.
 - **Dashboard:** at `http://<address>:1338/`, behind the password, over plain HTTP (cookies
   without Secure, under names of their own), and at `http://127.0.0.1:1338/` on this host

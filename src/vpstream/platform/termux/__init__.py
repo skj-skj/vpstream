@@ -21,7 +21,6 @@ HINTS = Hints(
         "ffprobe": "ffmpeg",
         "mkvextract": "mkvtoolnix",
         "mkvmerge": "mkvtoolnix",
-        "setfacl": "acl",
         "fc-list": "fontconfig-utils",
         "termux-wake-lock": "termux-tools",
     },

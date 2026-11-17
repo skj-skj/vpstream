@@ -17,7 +17,7 @@ LAN = "192.168.1.69"
 @pytest.mark.parametrize(
     "address",
     ["192.168.1.5", "10.0.0.2", "172.16.0.1", "172.31.255.254", "169.254.3.4", "fd12::1",
-     "fe80::1", "::ffff:192.168.1.5"],
+     "::ffff:192.168.1.5"],
 )  # fmt: skip
 def test_private_addresses_are_local(address: str) -> None:
     assert local.private_problem(address) is None
@@ -36,6 +36,8 @@ def test_private_addresses_are_local(address: str) -> None:
         ("2001:db8::1", "not a private address"),
         ("::1", "not a private address"),
         ("not an address", "is not an IP address"),
+        ("fe80::1", "IPv6 link-local address, which cannot be served"),
+        ("fe80::1%wlan0", "IPv6 link-local address, which cannot be served"),
     ],
 )
 def test_other_addresses_are_refused(address: str, why: str) -> None:
@@ -57,6 +59,7 @@ def test_is_mine() -> None:
 
 def test_find(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(local, "is_mine", lambda address: address == LAN)
+    monkeypatch.setattr(local, "interface_addresses", lambda: [])
     monkeypatch.setattr(local.net, "outgoing_address", lambda: LAN)
     assert local.find() == LAN
     assert local.find(LAN) == LAN
@@ -68,6 +71,28 @@ def test_find(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(local.net, "outgoing_address", lambda: "")
     with pytest.raises(local.LocalError, match="on no network"):
         local.find()
+
+
+def test_the_wifi_is_found_when_a_vpn_or_mobile_data_has_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tailscale's app, or mobile data while the Wi-Fi has no internet, carries the way out:
+    the Wi-Fi's address is still this phone's, and the one to serve on."""
+    wifi = "192.168.1.20"
+    monkeypatch.setattr(local.net, "outgoing_address", lambda: "100.101.102.103")
+    monkeypatch.setattr(local, "is_mine", lambda address: address == wifi)
+    found = [("lo", "127.0.0.1"), ("tun0", "100.101.102.103"), ("rmnet0", "10.20.30.40"),
+             ("wlan0", wifi)]  # fmt: skip
+    monkeypatch.setattr(local, "interface_addresses", lambda: found)
+    assert local.find() == wifi  # Wi-Fi before a carrier's private 10.x
+    monkeypatch.setattr(local, "interface_addresses", lambda: found[:2])
+    with pytest.raises(local.LocalError, match=r"carrier's shared .*set its address as"):
+        local.find()
+
+
+def test_interface_addresses_of_this_host() -> None:
+    found = dict(local.interface_addresses())
+    assert found.get("lo") == "127.0.0.1"  # SIOCGIFCONF works here, without root
 
 
 def test_caddy_listens_on_one_address_in_local_mode(tmp_path: Path) -> None:
@@ -89,6 +114,7 @@ class Here:
         self.on = True
         monkeypatch.setattr(local, "is_mine", lambda address: self.on and address == LAN)
         monkeypatch.setattr(local.net, "outgoing_address", lambda: LAN if self.on else "")
+        monkeypatch.setattr(local, "interface_addresses", lambda: [])
 
 
 @pytest.fixture
@@ -169,6 +195,9 @@ def test_with_local() -> None:
         config.with_local(config.Config(dashboard_public=True), True)
     with pytest.raises(config.ConfigError, match="must be an address"):
         config.with_local(cfg, True, "a;b")
+    for wrong in ("phone.lan", "8.8.8.8", "100.64.1.1"):  # found out now, not at a start
+        with pytest.raises(config.ConfigError, match="--address: "):
+            config.with_local(cfg, True, wrong)
 
 
 def test_status_reminds_of_local_mode() -> None:

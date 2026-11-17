@@ -647,7 +647,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         from vpstream.platform.termux import commands
         from vpstream.tools import SystemRunner
 
-        if args.public is not None or args.https is not None or _given(args) or args.local:
+        linux_only = args.public is not None or args.https is not None or args.local
+        if linux_only or args.address or _given(args):
             return _error("Termux serves the local network only; run init without options", 2)
         try:
             commands.init(SystemRunner(), config.default_paths())

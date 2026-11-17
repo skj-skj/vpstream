@@ -58,6 +58,9 @@ def test_termux_config_is_local_always(on_termux: None) -> None:
         ("[dashboard]\npublic = true\n", "local network only on Termux"),
         ("[stream]\nhttps = true\n", "plain HTTP on the local network"),
         ('[network]\naddress = "a b"\n', "must be an address"),
+        ('[network]\naddress = "phone.lan"\n', "is not an IP address"),
+        ('[network]\naddress = "8.8.8.8"\n', "not a private address"),
+        ('[network]\naddress = "100.64.1.1"\n', "carrier's shared address"),
     ],
 )
 def test_termux_config_refuses_public(on_termux: None, text: str, problem: str) -> None:
@@ -67,8 +70,9 @@ def test_termux_config_refuses_public(on_termux: None, text: str, problem: str) 
 
 def test_linux_config_has_no_local_mode() -> None:
     assert config.parse("").local is False
-    with pytest.raises(config.ConfigError, match=r"unknown setting 'network.mode'.*init --local"):
+    with pytest.raises(config.ConfigError) as refused:
         config.parse('[network]\nmode = "local"\n')
+    assert str(refused.value) == "unknown setting 'network.mode'"  # word for word as on main
     # The default text, as init writes it on Linux, is the same as before.
     assert "[network]" not in config.DEFAULT_TEXT
 
@@ -185,6 +189,8 @@ def test_cli_on_termux(
     assert "Nothing to take back on Termux" in capsys.readouterr().out
     assert cli.main(["init", "--no-tailscale"]) == 2
     assert "local network only" in capsys.readouterr().err
+    assert cli.main(["init", "--address", "192.168.1.20"]) == 2  # [network] address instead
+    assert "run init without options" in capsys.readouterr().err
 
 
 def test_cli_daemon_on_termux_gets_no_firewall(
