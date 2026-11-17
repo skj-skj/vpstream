@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import os
 import re
@@ -404,6 +405,23 @@ def parse(text: str, local_keys: bool | None = None) -> Config:
     if problems:
         raise ConfigError("; ".join(problems))
     return config
+
+
+def with_local(config: Config, on: bool, address: str = "") -> Config:
+    """The configuration in local mode, as `vpstream daemon --local` asks on Linux (Termux
+    reads it from the file). Raises ConfigError for what does not go with it."""
+    if not on:
+        if address:
+            raise ConfigError("--address goes with --local")
+        return config
+    if problem := _host_problem("--address", address):
+        raise ConfigError(problem)
+    if config.dashboard_public or config.stream_https:
+        raise ConfigError(
+            "local mode serves the local network over plain HTTP: it cannot go with "
+            "[dashboard] public or [stream] https"
+        )
+    return dataclasses.replace(config, local=True, local_address=address or config.local_address)
 
 
 def load(path: Path, local_keys: bool | None = None) -> Config:

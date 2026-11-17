@@ -346,6 +346,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     if info is None or not info.get("stream"):
         return _show(info) or 1
     stream = info["stream"]
+    if info.get("local") is not None:
+        from vpstream import local
+
+        print(f"WARNING: {local.WARNING}", file=sys.stderr)
     print(format_stream(stream))
     print("Dashboard:    " + dashboard_line(info.get("dashboard") or {}))
     print("Stop it with: vpstream stop")
@@ -549,12 +553,16 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     # The helper always works on the real host, so a daemon tried out under $VPSTREAM_ROOT
     # gets none: it must not close the real stream port.
     trial = bool(os.environ.get(config.ROOT_ENV))
+    try:
+        settings = config.with_local(config.load(paths.config_file), args.local, args.address)
+    except config.ConfigError as exc:
+        return _error(str(exc))
     helper = firewall.helper_path()
     fw = None if trial else firewall.SudoFirewall(runner, helper)
     dash_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.DASHBOARD)
     acme_fw = None if trial else firewall.SudoFirewall(runner, helper, firewall.ACME)
     try:
-        return daemon.run(config.load(paths.config_file), paths, runner, fw, dash_fw, acme_fw)
+        return daemon.run(settings, paths, runner, fw, dash_fw, acme_fw)
     except (config.ConfigError, daemon.DaemonError) as exc:
         return _error(str(exc))
     except OSError as exc:  # the run folder cannot be made, for example
@@ -939,6 +947,12 @@ def build_parser() -> argparse.ArgumentParser:
     cl.set_defaults(func=cmd_clients)
 
     dm = sub.add_parser("daemon", help="run the daemon in the foreground (the service does this)")
+    dm.add_argument(
+        "--local",
+        action="store_true",
+        help="Linux: serve the local network only, at this host's private address",
+    )
+    dm.add_argument("--address", default="", help="with --local: the private address to use")
     dm.set_defaults(func=cmd_daemon)
 
     b = sub.add_parser("bench", help="measure how fast this host prepares a file")

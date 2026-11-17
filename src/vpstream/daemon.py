@@ -259,7 +259,7 @@ class Daemon:
     def _dashboard_status(self) -> dict[str, Any]:
         public = self.config.dashboard_public
         info: dict[str, Any] = {
-            "mode": "public" if public else "tailnet",
+            "mode": "local" if self.config.local else "public" if public else "tailnet",
             "port": self.config.dashboard_port,
             "address": self.dashboard_address,
             "url": None,
@@ -275,6 +275,8 @@ class Daemon:
         elif public and self.dashboard_server is not None:
             hosts = self.dashboard_server.hosts
             info["url"] = net.url("https", hosts[0], self.config.dashboard_port) + "/"
+        elif self.config.local:
+            info["url"] = f"http://{self.dashboard_address}/"
         else:
             info["url"], info["problem"] = self.published()
         return info

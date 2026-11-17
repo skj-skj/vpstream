@@ -110,10 +110,12 @@ def config(
     access_log: Path,
     videos_dir: Path,
     certificate: Certificate | None = None,
+    host: str = "",
 ) -> dict[str, Any]:
     """The stream's Caddy: its whole configuration, as its native JSON. With a
     `certificate` it serves HTTPS with it, loaded from its files: this Caddy never asks for
-    one (see `certificate`)."""
+    one (see `certificate`). With a `host` it listens on that address only (local mode),
+    else on every address."""
     send_file = [
         {
             "handler": "headers",
@@ -135,7 +137,7 @@ def config(
     }
     access = f"http.log.access.{SERVER}"
     server: dict[str, Any] = {
-        "listen": [f":{port}"],
+        "listen": [f"{url_host(host) if host else ''}:{port}"],
         "automatic_https": {"disable": True},
         "read_header_timeout": 10 * _SECOND,
         "idle_timeout": 120 * _SECOND,
@@ -466,6 +468,7 @@ class StreamServer(Server, Protocol):
     """The stream's Caddy as the daemon uses it. Tests swap in a fake."""
 
     certificate: Certificate | None  # HTTPS with it, or plain HTTP; set before each start
+    host: str  # the one address to listen on (local mode), or "" for every address
 
 
 class CaddyServer(CaddyProcess):
@@ -477,11 +480,21 @@ class CaddyServer(CaddyProcess):
         self.access_log = paths.access_log
         self.videos_dir = paths.videos_dir
         self.certificate: Certificate | None = None
+        self.host = ""  # local mode: the one address to listen on; set before each start
 
     def config(self) -> dict[str, Any]:
         return config(
-            self.port, self.gate_socket, self.access_log, self.videos_dir, self.certificate
+            self.port,
+            self.gate_socket,
+            self.access_log,
+            self.videos_dir,
+            self.certificate,
+            self.host,
         )
+
+    @property
+    def probe_host(self) -> str:
+        return self.host or "127.0.0.1"
 
     def start(self) -> None:
         if not self.running():

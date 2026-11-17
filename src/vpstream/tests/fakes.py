@@ -100,6 +100,7 @@ class FakeServer:
         self.fail = fail
         self.up = False
         self.certificate: Any = None  # what the last start serves HTTPS with
+        self.host = ""  # local mode: the address it listens on
         self.started_with: list[Any] = []
 
     def start(self) -> None:

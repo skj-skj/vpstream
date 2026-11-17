@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from vpstream import certificate, platform, text
+from vpstream import certificate, local, platform, text
 
 
 def dashboard_line(dash: dict[str, Any]) -> str:
@@ -20,6 +20,8 @@ def dashboard_line(dash: dict[str, Any]) -> str:
         if dash.get("certificate"):
             line += f"\n              certificate authority SHA-256 {dash['certificate']}"
         return line
+    if dash.get("mode") == "local":
+        return f"{dash.get('url') or dash.get('problem')} (this device only)"
     if dash.get("url"):
         return f"{dash['url']} (Tailscale only)"
     if dash.get("address"):
@@ -257,6 +259,9 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     ]
     if https := _https_line(info.get("https") or {}):
         lines.insert(3, f"HTTPS:        {https}")
+    if (where := info.get("local")) is not None:
+        address = where.get("address") or "no private address now (is the Wi-Fi on?)"
+        lines.insert(1, f"Local mode:   {address} ({local.REMINDER})")
     if stream:
         count = len(stream.get("devices") or [])
         lines.append(f"Devices:      {count} (see: vpstream devices)")
