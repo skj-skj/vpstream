@@ -33,6 +33,8 @@ def test_paths_follow_xdg_but_never_a_relative_one() -> None:
 
 def test_default_paths_on_termux(on_termux: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(config.ROOT_ENV, raising=False)
+    for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):  # a CI runner sets them
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", "/home/u")
     monkeypatch.setenv("PREFIX", "/usr")
     paths = config.default_paths()
