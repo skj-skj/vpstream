@@ -66,10 +66,13 @@ def _body() -> dict[str, Any]:
     return data
 
 
-def client_ip() -> str | None:
+def client_ip(ip_header: bool = True) -> str | None:
     """The viewer's address: from Caddy's header on the public dashboard, where Caddy
-    replaces whatever the viewer sent under that name."""
-    return normal_ip(request.headers.get(HEADER_IP)) or request.remote_addr or None
+    replaces whatever the viewer sent under that name. Without Caddy in front (local mode,
+    `ip_header` False) only the connection's own address counts."""
+    if ip_header and (found := normal_ip(request.headers.get(HEADER_IP))):
+        return found
+    return normal_ip(request.remote_addr) or None
 
 
 def create_app(
@@ -78,11 +81,17 @@ def create_app(
     login: auth.Login | None = None,
     certificate: Callable[[], dict[str, str] | None] = lambda: None,
     admin: dict[str, Callable[[], Any]] | None = None,
+    *,
+    secure: bool = True,
+    ip_header: bool = True,
 ) -> Flask:
     """Build the app. `status` returns the daemon's current state as plain data; `control`
     starts, stops and changes the stream; `login`, for the public dashboard, guards it;
     `certificate` is the public dashboard's certificate authority, once there is one;
-    `admin` are changes for the command line's socket only, such as a new password."""
+    `admin` are changes for the command line's socket only, such as a new password.
+
+    In local mode the login is served over plain HTTP (`secure` False), where a browser
+    keeps no Secure or __Host- cookie, and with no Caddy in front (`ip_header` False)."""
     app = Flask("vpstream", static_folder=None, template_folder=None)
     files = resources.files("vpstream.assets")
 
@@ -116,7 +125,7 @@ def create_app(
         app.add_url_rule(route, endpoint=name, view_func=asset(name, ctype))
 
     if login is not None:
-        _guard(app, login)
+        _guard(app, login, secure, ip_header)
 
     @app.after_request
     def harden(response: Response) -> Response:
@@ -193,28 +202,36 @@ def create_app(
     return app
 
 
-def _private_cookie(response: Response, name: str, value: str, seconds: int) -> None:
+def _private_cookie(
+    response: Response, name: str, value: str, seconds: int, secure: bool = True
+) -> None:
     """__Host-, Secure and Path=/: sent over HTTPS only, so never to the plain-HTTP stream
     port on the same address, and never set by it. HttpOnly: no script reads it. Strict: no
-    other site's page makes the browser send it."""
+    other site's page makes the browser send it. In local mode (not `secure`) the same
+    without Secure, under a name of its own (see `login.LOCAL_COOKIE`)."""
     response.set_cookie(
         name,
         value,
         max_age=seconds,
         path="/",
-        secure=True,
+        secure=secure,
         httponly=True,
         samesite="Strict",
     )
 
 
-def _guard(app: Flask, login: auth.Login) -> None:
-    """Put the public dashboard behind its password."""
+def _guard(app: Flask, login: auth.Login, secure: bool = True, ip_header: bool = True) -> None:
+    """Put the dashboard behind its password."""
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY
+    cookie, device_cookie = (
+        (auth.COOKIE, auth.DEVICE_COOKIE)
+        if secure
+        else (auth.LOCAL_COOKIE, auth.LOCAL_DEVICE_COOKIE)
+    )
 
     @app.before_request
     def check_session() -> Any:
-        session = login.session(request.cookies.get(auth.COOKIE))
+        session = login.session(request.cookies.get(cookie))
         if request.path in LOGIN_ROUTES:
             # A logged-in browser that opens the login page goes on to the dashboard.
             return redirect("/", 303) if session and request.path == "/login" else None
@@ -230,30 +247,30 @@ def _guard(app: Flask, login: auth.Login) -> None:
         return None
 
     def device() -> str | None:
-        return request.cookies.get(auth.DEVICE_COOKIE)
+        return request.cookies.get(device_cookie)
 
     @app.post(f"{API}/login/challenge")
     def challenge() -> Response:
         # JSON only, like every change: another site's page cannot send it without asking
         # first, so it cannot use up the nonces of a visitor's address.
         _body()
-        return jsonify(login.challenge(client_ip(), device()))
+        return jsonify(login.challenge(client_ip(ip_header), device()))
 
     @app.post(f"{API}/login")
     def log_in() -> Response:
         body = _body()
-        granted = login.login(client_ip(), body.get("nonce"), body.get("proof"), device())
+        granted = login.login(client_ip(ip_header), body.get("nonce"), body.get("proof"), device())
         # Whatever cookie came along is dropped: a session is only ever one made here, now.
-        login.logout(request.cookies.get(auth.COOKIE))
+        login.logout(request.cookies.get(cookie))
         session = granted.session
         response = jsonify(csrf=session.csrf, expires_in=login.seconds_left(session))
-        _private_cookie(response, auth.COOKIE, granted.token, auth.SESSION_SECONDS)
-        _private_cookie(response, auth.DEVICE_COOKIE, granted.device, auth.DEVICE_SECONDS)
+        _private_cookie(response, cookie, granted.token, auth.SESSION_SECONDS, secure)
+        _private_cookie(response, device_cookie, granted.device, auth.DEVICE_SECONDS, secure)
         return response
 
     @app.post(f"{API}/logout")
     def log_out() -> Response:
-        login.logout(request.cookies.get(auth.COOKIE))
+        login.logout(request.cookies.get(cookie))
         response = jsonify(login=True)
-        response.delete_cookie(auth.COOKIE, path="/", secure=True, httponly=True, samesite="Strict")
+        response.delete_cookie(cookie, path="/", secure=secure, httponly=True, samesite="Strict")
         return response

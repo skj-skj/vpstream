@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import __version__, api, net, platform, prepare, public
+from vpstream import __version__, api, local, net, platform, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
     CaddyError,
@@ -152,12 +152,15 @@ class Daemon:
     dashboard_problem: str = "starting"
     ready: threading.Event = field(default_factory=threading.Event)
     dashboard_port_state: str = "closed"  # public mode: "open", "closed" or "unknown"
+    # Local mode: the dashboard on the local network's address, behind the password.
+    lan_address: str | None = None
+    lan_problem: str = "starting"
     control: Control = field(init=False)
     login: auth.Login | None = field(init=False, default=None)
     _published: tuple[float, str | None, str | None] | None = None
 
     def __post_init__(self) -> None:
-        if self.config.dashboard_public:
+        if self.config.dashboard_public or self.config.local:
             self.login = auth.Login(
                 self._verifier(),
                 auth.Limiter(self.paths.login_record, log=self.log),
@@ -257,6 +260,8 @@ class Daemon:
         }
 
     def _dashboard_status(self) -> dict[str, Any]:
+        if self.config.local:
+            return self._local_status()
         public = self.config.dashboard_public
         info: dict[str, Any] = {
             "mode": "local" if self.config.local else "public" if public else "tailnet",
@@ -280,6 +285,20 @@ class Daemon:
         else:
             info["url"], info["problem"] = self.published()
         return info
+
+    def _local_status(self) -> dict[str, Any]:
+        here = self.dashboard_address
+        return {
+            "mode": "local",
+            "port": self.config.dashboard_port,
+            "address": self.lan_address,
+            "url": f"http://{self.lan_address}/" if self.lan_address else None,
+            "problem": None if self.lan_address else self.lan_problem,
+            "this_device": f"http://{here}/" if here else None,
+            "this_device_problem": None if here else self.dashboard_problem,
+            "this_device_password": platform.is_termux(),
+            "password": bool(self.login and self.login.verifier),
+        }
 
     def _unix_server(self, path: Path, app: Any) -> tuple[socket.socket, Any]:
         listener = bind_unix(path)
@@ -320,12 +339,16 @@ class Daemon:
             threading.Thread(target=server.serve_forever, name=path.name, daemon=True)
             for path, _, server in servers
         ]
-        if self.login is None:
-            dash, keep_up = apps[self.paths.socket], self._dashboard
+        if self.config.local:
+            threads += self._local_dashboards(stop)
         else:
-            dash = api.create_app(self.status, self.control, self.login, self.certificate)
-            keep_up = self._public_dashboard
-        threads.append(threading.Thread(target=keep_up, args=(dash, stop), name="dash"))
+            keep_up: Callable[[Any, threading.Event], None]
+            if self.login is None:
+                dash, keep_up = apps[self.paths.socket], self._dashboard
+            else:
+                dash = api.create_app(self.status, self.control, self.login, self.certificate)
+                keep_up = self._public_dashboard
+            threads.append(threading.Thread(target=keep_up, args=(dash, stop), name="dash"))
         threads.append(threading.Thread(target=self._tick, args=(stop,), name="tick"))
         for thread in threads:
             thread.daemon = True
@@ -347,33 +370,75 @@ class Daemon:
             _close(servers)
             self.log("vpstream daemon stopped")
 
-    def _dashboard(self, app: Any, stop: threading.Event) -> None:
-        """Keep the dashboard up on the loopback address; wait and retry while the port is
-        taken."""
+    def _local_dashboards(self, stop: threading.Event) -> list[threading.Thread]:
+        """Local mode: the dashboard on the local network's address, behind the password,
+        and on the loopback address. On Termux that one has the password too, since every
+        app on the phone can reach it; on Linux it is the host's own, as on the tailnet."""
+        # Nothing is in front of these: the address a request comes from is the viewer's,
+        # and a header that says otherwise is the viewer's own.
+        lan = api.create_app(
+            self.status, self.control, self.login, self.certificate, secure=False, ip_header=False
+        )
+        home = lan if platform.is_termux() else api.create_app(self.status, self.control)
+        return [
+            threading.Thread(target=self._dashboard, args=(home, stop), name="dash"),
+            threading.Thread(target=self._dashboard, args=(lan, stop, True), name="dash-lan"),
+        ]
+
+    def _lan_host(self) -> str:
+        """The local network's address for the dashboard, once it has a password."""
+        if self.login is None or self.login.verifier is None:
+            raise DaemonError(f"no password is set: {platform.hints().dash_pass}")
+        try:
+            return local.find(self.config.local_address)
+        except local.LocalError as exc:
+            raise DaemonError(str(exc)) from exc
+
+    def _lan_lost(self, host: str) -> bool:
+        return not local.is_mine(host) or self.login is None or self.login.verifier is None
+
+    def _dashboard(self, app: Any, stop: threading.Event, lan: bool = False) -> None:
+        """Keep the dashboard up on the loopback address, or with `lan` on the local
+        network's (local mode); wait and retry while the port is taken. The local network's
+        is taken down when its address goes, and comes back with it."""
         port = self.config.dashboard_port
         while not stop.is_set():
-            host = LOOPBACK
             try:
+                host = self._lan_host() if lan else LOOPBACK
                 listener = bind_tcp(host, port)
-            except OSError as exc:
-                self._dashboard_failed(f"the dashboard is not available: {exc}")
+            except (OSError, DaemonError) as exc:
+                where = " on the local network" if lan else ""
+                self._dashboard_failed(f"the dashboard is not available{where}: {exc}", lan=lan)
                 stop.wait(self.retry_seconds)
                 continue
             bound_port = listener.getsockname()[1]
             server = _make_server(host, bound_port, app, listener)
-            self.dashboard_address = f"{host}:{bound_port}"
-            self.log(f"dashboard on http://{self.dashboard_address}/ (this host only)")
-            closer = threading.Thread(
-                target=lambda s=server: (stop.wait(), s.shutdown()), daemon=True
-            )
-            closer.start()
+            address = f"{host}:{bound_port}"
+            if lan:
+                self.lan_address = address
+                self.log(f"dashboard on http://{address}/ (local network, behind the password)")
+            else:
+                self.dashboard_address = address
+                self.log(f"dashboard on http://{address}/ (this host only)")
+
+            def close(s: Any = server, watched: str = host if lan else "") -> None:
+                while not stop.wait(TICK_SECONDS if watched else None):
+                    if self._lan_lost(watched):
+                        break
+                s.shutdown()
+
+            threading.Thread(target=close, daemon=True).start()
             try:
                 server.serve_forever()
             finally:
-                self.dashboard_address = None
-                self.dashboard_problem = "stopped"
+                if lan:
+                    self.lan_address, self.lan_problem = None, "stopped"
+                else:
+                    self.dashboard_address, self.dashboard_problem = None, "stopped"
                 server.server_close()
                 listener.close()
+            if lan and not stop.is_set():
+                self.log(f"the dashboard on {address} is closed: the address is gone")
 
     def _admin(self) -> dict[str, Callable[[], Any]] | None:
         """What only the command line's socket may ask for: the public dashboard's own."""
@@ -392,10 +457,13 @@ class Daemon:
             self.dashboard_port_state = "unknown"
             raise
 
-    def _dashboard_failed(self, problem: str, wait: float | None = None) -> None:
-        if problem != self.dashboard_problem:
+    def _dashboard_failed(self, problem: str, wait: float | None = None, lan: bool = False) -> None:
+        if problem != (self.lan_problem if lan else self.dashboard_problem):
             self.log(f"{problem}; trying again in {wait or self.retry_seconds:g} seconds")
-        self.dashboard_problem = problem
+        if lan:
+            self.lan_problem = problem
+        else:
+            self.dashboard_problem = problem
 
     def _public_dashboard(self, app: Any, stop: threading.Event) -> None:
         """Keep the public dashboard up: the app on its unix socket, Caddy in front of it,

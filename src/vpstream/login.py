@@ -58,6 +58,10 @@ MAX_PASSWORD = 1024
 
 COOKIE = "__Host-vpstream-dash"  # __Host-: only set over HTTPS, for this host and path /
 DEVICE_COOKIE = "__Host-vpstream-device"  # a browser that logged in here before
+# Local mode serves the dashboard over plain HTTP, where a browser keeps neither a Secure
+# cookie nor a __Host- one. Names of their own, so they never mix with those.
+LOCAL_COOKIE = "vpstream-dash"
+LOCAL_DEVICE_COOKIE = "vpstream-device"
 DEVICE_SECONDS = 365 * 86400
 DEVICE_LABEL = "vpstream-device:"
 SECRET_BYTES = 32

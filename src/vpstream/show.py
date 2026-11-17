@@ -21,12 +21,26 @@ def dashboard_line(dash: dict[str, Any]) -> str:
             line += f"\n              certificate authority SHA-256 {dash['certificate']}"
         return line
     if dash.get("mode") == "local":
-        return f"{dash.get('url') or dash.get('problem')} (this device only)"
+        return _local_dashboard(dash)
     if dash.get("url"):
         return f"{dash['url']} (Tailscale only)"
     if dash.get("address"):
         return f"http://{dash['address']}/ on this host only; {dash.get('problem')}"
     return str(dash.get("problem"))
+
+
+def _local_dashboard(dash: dict[str, Any]) -> str:
+    """The local network's address, behind the password, and this device's own."""
+    if dash.get("url"):
+        lan = f"{dash['url']} (local network, password)"
+    else:
+        lan = f"not on the local network: {dash.get('problem')}"
+    if dash.get("this_device"):
+        password = ", password" if dash.get("this_device_password") else ""
+        here = f"{dash['this_device']} (this device{password})"
+    else:
+        here = f"not on this device: {dash.get('this_device_problem')}"
+    return f"{lan}\n              {here}"
 
 
 def _https_line(https: dict[str, Any]) -> str | None:
