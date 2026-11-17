@@ -18,6 +18,7 @@ applies on the next request without a reload.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import json
@@ -372,6 +373,8 @@ class Server(Protocol):
 
     def start(self) -> None: ...
 
+    def stop_left_over(self) -> None: ...
+
     def stop(self) -> None: ...
 
     def running(self) -> bool: ...
@@ -410,9 +413,12 @@ class CaddyProcess:
     def pid_file(self) -> Path:
         return self.work_dir / "caddy.pid"
 
-    def _stop_left_over(self) -> None:
+    def stop_left_over(self) -> None:
         """Stop the Caddy an earlier daemon of this install left running, if any: only a
-        process whose command line names this Caddy's configuration file."""
+        process whose command line names this Caddy's configuration file. Only on Termux
+        (`reap`); a race with its own end is harmless."""
+        if not self.reap:
+            return
         try:
             pid = int(self.pid_file.read_text(encoding="ascii").strip())
             with open(f"/proc/{pid}/cmdline", "rb") as fh:
@@ -423,12 +429,13 @@ class CaddyProcess:
         if os.fsencode(self.config_file) not in argv:
             self.pid_file.unlink(missing_ok=True)
             return  # the number is another process's now
-        os.kill(pid, signal.SIGTERM)
-        deadline = time.monotonic() + STOP_SECONDS
-        while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
-            time.sleep(0.1)
-        if Path(f"/proc/{pid}").exists():
-            os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):  # it ended by itself meanwhile
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + STOP_SECONDS
+            while time.monotonic() < deadline and _alive(pid):
+                time.sleep(0.1)
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
         self.pid_file.unlink(missing_ok=True)
 
     def config(self) -> dict[str, Any]:
@@ -472,8 +479,7 @@ class CaddyProcess:
         if self.running():
             return
         binary = require(self.runner, "caddy", self.needed_for)
-        if self.reap:
-            self._stop_left_over()
+        self.stop_left_over()
         if problem := self.port_problem():
             raise CaddyError(problem)
         self.work_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
@@ -721,6 +727,15 @@ def obtain_failure(log: str) -> str | None:
         ):
             return problem or str(entry.get("error") or entry.get("msg"))
     return None
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process still runs: there, and not a zombie waiting for its parent."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return False
+    return stat.rpartition(")")[2].split()[:1] != ["Z"]
 
 
 def _end(proc: subprocess.Popen[bytes]) -> None:

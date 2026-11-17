@@ -558,7 +558,7 @@ class Preparer:
             if at is not None:
                 job.done_seconds = at
 
-        full = ffargs.with_progress([program, *args[1:]])
+        full = ffargs.with_progress([program, *ffargs.thread_args(self.settings), *args[1:]])
         code, output = run_cancellable([*low_priority_prefix(self.runner), *full], job.cancel, seen)
         if code != 0:
             raise PrepareError(f"ffmpeg failed (exit {code}): {ffmpeg_errors(output)}")

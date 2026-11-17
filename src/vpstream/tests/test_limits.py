@@ -71,3 +71,32 @@ def test_the_daemon_passes_the_bounds_on(tmp_path: Path) -> None:
     bounded = daemon.Daemon(config.Config(prepare_threads=4), paths, FakeRunner())
     assert bounded.control.preparer is not None
     assert bounded.control.preparer.settings.threads == 4
+
+
+def test_the_bound_holds_the_decoder_and_the_filters_too() -> None:
+    """`-threads` after the input bounds the encoder alone; the decoder and the filter
+    graph (the HDR tone mapping) start a thread per core unless told before it."""
+    assert ffargs.thread_args(ffargs.DEFAULT_SETTINGS) == []
+    assert ffargs.thread_args(ffargs.EncodeSettings(threads=4)) == [
+        "-threads", "4", "-filter_threads", "4", "-filter_complex_threads", "4",
+    ]  # fmt: skip
+
+
+def test_a_prepare_runs_ffmpeg_with_the_bound_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vpstream import prepare
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        prepare, "run_cancellable", lambda args, *a, **k: (ran.append(args), (0, ""))[1]
+    )
+    runner = FakeRunner(("ffmpeg",))
+    for threads in (0, 4):
+        settings = ffargs.EncodeSettings(threads=threads)
+        preparer = prepare.Preparer(tmp_path, runner, lambda m: None, settings=settings)
+        job = type("Job", (), {"cancel": None, "done_seconds": 0})()
+        preparer._ffmpeg(job, ["ffmpeg", "-i", "in.mkv", "out"])  # type: ignore[arg-type]
+    plain, bounded = ran
+    assert "-threads" not in plain  # as before, where there is no bound
+    assert bounded.index("-threads") < bounded.index("-filter_threads") < bounded.index("-i")

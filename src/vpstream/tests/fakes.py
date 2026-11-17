@@ -101,6 +101,7 @@ class FakeServer:
         self.up = False
         self.certificate: Any = None  # what the last start serves HTTPS with
         self.host = ""  # local mode: the address it listens on
+        self.left_over_checks = 0
         self.started_with: list[Any] = []
 
     def start(self) -> None:
@@ -113,6 +114,9 @@ class FakeServer:
     def stop(self) -> None:
         self.calls.append("stop")
         self.up = False
+
+    def stop_left_over(self) -> None:
+        self.left_over_checks += 1
 
     def running(self) -> bool:
         return self.up

@@ -118,6 +118,16 @@ def keyframe_args() -> list[str]:
     return ["-force_key_frames", f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})"]
 
 
+def thread_args(s: EncodeSettings) -> list[str]:
+    """With a bound (`threads`): the global options that hold the first input's decoder and
+    the filters to it, as the encoder is (see h264_video_args). Go right after the
+    program."""
+    if not s.threads:
+        return []
+    n = str(s.threads)
+    return ["-threads", n, "-filter_threads", n, "-filter_complex_threads", n]
+
+
 def h264_video_args(s: EncodeSettings) -> list[str]:
     return [
         "-c:v",

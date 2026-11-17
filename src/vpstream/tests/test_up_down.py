@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -128,6 +129,11 @@ def _left_over(work: Path, argv_path: Path) -> subprocess.Popen[bytes]:
     )
     work.mkdir(parents=True, exist_ok=True)
     (work / "caddy.pid").write_text(f"{proc.pid}\n")
+    # Until it has started, its command line is still the one of this test's process.
+    for _ in range(200):
+        if os.fsencode(argv_path) in Path(f"/proc/{proc.pid}/cmdline").read_bytes().split(b"\0"):
+            break
+        time.sleep(0.025)
     return proc
 
 
@@ -136,7 +142,7 @@ def test_a_left_over_caddy_of_this_install_is_stopped(on_termux: None, tmp_path:
     assert server.reap
     proc = _left_over(server.work_dir, server.config_file)
     try:
-        server._stop_left_over()
+        server.stop_left_over()
         assert proc.wait(10) is not None
         assert not server.pid_file.exists()
     finally:
@@ -147,7 +153,7 @@ def test_another_process_with_the_number_is_left_alone(on_termux: None, tmp_path
     server = caddy.CaddyServer(FakeRunner(), free_port(), _paths(tmp_path))
     proc = _left_over(server.work_dir, tmp_path / "something else")
     try:
-        server._stop_left_over()
+        server.stop_left_over()
         assert proc.poll() is None  # still running
         assert not server.pid_file.exists()
     finally:
@@ -157,3 +163,42 @@ def test_another_process_with_the_number_is_left_alone(on_termux: None, tmp_path
 
 def test_linux_writes_no_pid_file(tmp_path: Path) -> None:
     assert not caddy.CaddyServer(FakeRunner(), free_port(), _paths(tmp_path)).reap
+
+
+def test_a_left_over_caddy_goes_when_the_daemon_starts_even_without_a_stream(
+    on_termux: None, tmp_path: Path
+) -> None:
+    """A killed daemon's Caddy holds the stream port on the old address until the next
+    daemon starts, whether or not it has a stream to take up again."""
+    from vpstream.control import Control
+
+    server = caddy.CaddyServer(FakeRunner(), free_port(), _paths(tmp_path))
+    proc = _left_over(server.work_dir, server.config_file)
+    try:
+        Control(
+            config.Config(local=True), _paths(tmp_path), None, server, lambda m: None
+        ).reconcile()
+        assert proc.wait(10) is not None
+    finally:
+        proc.kill()
+
+
+def test_a_left_over_caddy_that_ends_meanwhile_is_no_error(
+    on_termux: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    server = caddy.CaddyServer(FakeRunner(), free_port(), _paths(tmp_path))
+    proc = _left_over(server.work_dir, server.config_file)
+
+    def gone(pid: int, sig: int) -> None:
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(os, "kill", gone)
+    try:
+        server.stop_left_over()  # it ended between the look and the signal
+        assert not server.pid_file.exists()
+    finally:
+        monkeypatch.undo()
+        proc.kill()
+        proc.wait()

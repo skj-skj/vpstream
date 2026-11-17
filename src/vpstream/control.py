@@ -347,6 +347,8 @@ class Control:
         open rule survives a crash or a reboot.
         """
         with self._op:
+            if self.server is not None:  # Termux: what a daemon that was killed left
+                self.server.stop_left_over()
             recorded, problem = state.load(self._state_file)
             if problem:
                 self.log(f"{problem}; treating it as no stream running")
