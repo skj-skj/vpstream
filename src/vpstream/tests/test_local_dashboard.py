@@ -206,9 +206,9 @@ def test_no_lan_dashboard_without_a_password(short_tmp: Path, here: Here) -> Non
         _wait(lambda: "no password is set" in run.daemon.lan_problem, "lan refused", run)
         assert run.daemon.lan_address is None
         status = run.daemon.status()["dashboard"]
-        assert "not on the local network: the dashboard is not available" in (
-            show.dashboard_line(status)
-        )
+        line = show.dashboard_line(status)
+        assert line.startswith("the dashboard is not available on the local network: no pass")
+        assert "not on the local network" not in line  # said once, not twice
         # dash-pass, then the reload the command line asks for: it comes up.
         run.paths.dashboard_key.parent.mkdir(parents=True, exist_ok=True)
         login.write_verifier(run.paths.dashboard_key, verifier())

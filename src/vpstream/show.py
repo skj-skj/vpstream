@@ -34,13 +34,19 @@ def _local_dashboard(dash: dict[str, Any]) -> str:
     if dash.get("url"):
         lan = f"{dash['url']} (local network, password)"
     else:
-        lan = f"not on the local network: {dash.get('problem')}"
+        lan = _why_not("not on the local network", dash.get("problem"))
     if dash.get("this_device"):
         password = ", password" if dash.get("this_device_password") else ""
         here = f"{dash['this_device']} (this device{password})"
     else:
-        here = f"not on this device: {dash.get('this_device_problem')}"
+        here = _why_not("not on this device", dash.get("this_device_problem"))
     return f"{lan}\n              {here}"
+
+
+def _why_not(where: str, problem: Any) -> str:
+    """Where the dashboard is not, and why: the daemon's own words when they say it."""
+    text = str(problem)
+    return text if text.startswith("the dashboard is not available") else f"{where}: {text}"
 
 
 def _https_line(https: dict[str, Any]) -> str | None:
