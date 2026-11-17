@@ -315,6 +315,17 @@ def check_install(package_dir: Path, owner_uid: int = 0, helper: Path | None = N
     )
 
 
+def lan_rule(paths: config.Paths) -> tuple[int, str] | None:
+    """The dashboard's ufw rule `init --local` wrote down, or None for any other install."""
+    from vpstream.platform.linux import service  # it uses doctor's checks
+
+    try:
+        rule = service.Manifest.load(paths.config_file.parent / "install.json").lan_rule
+    except service.ServiceError:
+        return None
+    return None if rule is None else (int(rule[0]), str(rule[1]))
+
+
 def run_checks(
     runner: Runner,
     *,
@@ -335,14 +346,16 @@ def run_checks(
     except config.ConfigError:
         cfg = None
     public = cfg is not None and cfg.dashboard_public
+    lan = lan_rule(paths)
     checks = [check_python(python_version or tuple(sys.version_info[:3]))]
     for tool in TOOLS:
         check = check_tool(runner, tool)
-        if public and tool.name == "tailscale" and check.status == "problem":
+        if (public or lan) and tool.name == "tailscale" and check.status == "problem":
             check = replace(
                 check,
                 status="warning",
-                detail="not found; not needed while the dashboard is public",
+                detail="not found; not needed while the dashboard is "
+                + ("on the local network" if lan else "public"),
             )
         checks.append(check)
     found = {c.name for c in checks if c.status == "ok"}
@@ -352,7 +365,7 @@ def run_checks(
             checks.append(extra)
     if "ufw" in found:
         checks.append(check_ufw_enabled(ufw_conf))
-    if "tailscale" in found and not public:
+    if "tailscale" in found and not public and not lan:
         checks.append(check_tailscale(runner))
         checks.append(check_tailnet_https(runner))
     checks += check_fonts(runner)
@@ -367,6 +380,10 @@ def run_checks(
         checks += check_https(runner, cfg.acme_port, status)
     if cfg is not None and public:
         checks += check_public_dashboard(paths, cfg.dashboard_port, status, owner_uid)
+    elif lan:
+        port, network = lan
+        checks.append(Check("local mode", "ok", f"init --local: {port}/tcp from {network}"))
+        checks.append(check_password_file(paths.dashboard_key, owner_uid))
     elif cfg is not None and "tailscale" in found and unit_file.exists():
         checks.append(check_dashboard(runner, cfg.dashboard_port))
     return checks

@@ -616,7 +616,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         from vpstream.platform.termux import commands
         from vpstream.tools import SystemRunner
 
-        if args.public is not None or args.https is not None or _given(args):
+        if args.public is not None or args.https is not None or _given(args) or args.local:
             return _error("Termux serves the local network only; run init without options", 2)
         try:
             commands.init(SystemRunner(), config.default_paths())
@@ -627,12 +627,20 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     svc = _service()
     try:
-        public = svc.dashboard_public(args.public)
-        if _given(args) and not public:
+        public = False if args.local else svc.dashboard_public(args.public)
+        if args.address and not args.local:
+            return _error("--address goes with --local", 2)
+        if _given(args) and not (public or args.local):
             return _error("a password is for the public dashboard only (--no-tailscale)", 2)
         # Not asked for a password that a refusal for want of root would throw away.
-        ask = os.geteuid() == 0 and svc.wants_password(public)
-        svc.init(public, _password(args, ask), args.https)
+        ask = os.geteuid() == 0 and (
+            svc.wants_password(public, True) if args.local else svc.wants_password(public)
+        )
+        password = _password(args, ask)
+        if args.local:
+            svc.init(public, password, args.https, lan=True, address=args.address)
+        else:
+            svc.init(public, password, args.https)
     except (ValueError, service.ServiceError, OSError) as exc:
         return _error(str(exc))
     return 0
@@ -806,6 +814,13 @@ def build_parser() -> argparse.ArgumentParser:
         const=False,
         help="put the dashboard back on the tailnet only (the default)",
     )
+    where.add_argument(
+        "--local",
+        action="store_true",
+        help="serve the local network only, at this host's private address, with no tailnet "
+        "or public dashboard (without it, init sets up the public mode)",
+    )
+    ini.add_argument("--address", default="", help="with --local: the private address to use")
     scheme = ini.add_mutually_exclusive_group()
     scheme.add_argument(
         "--https",

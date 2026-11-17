@@ -97,6 +97,7 @@ stay.
 | `sudo vpstream init` | Sets the service up, or again after an upgrade or a change of the configuration |
 | `sudo vpstream uninstall [--purge] [--yes]` | Removes it (see Uninstall) |
 | `sudo vpstream init --no-tailscale`, `sudo vpstream init --tailscale` | Puts the dashboard on the internet behind a password, or back on the tailnet |
+| `sudo vpstream init --local [--address IP]` | Serves the local network only, at a private address, with the dashboard there behind a password (see Local network mode); plain `init` goes back to the default |
 | `sudo vpstream init --https`, `sudo vpstream init --no-https` | Serves streams over HTTPS with a Let's Encrypt certificate for the address, or over plain HTTP again |
 | `sudo vpstream dash-pass [--dash-pass-file FILE]` | Sets a new password for the public dashboard (logs every browser out; a stream goes on) |
 | `vpstream dash-unblock` | Forgets the public dashboard's failed logins, to log in from a new browser |
@@ -228,6 +229,25 @@ makes for this host (with `openssl`). Only a salted PBKDF2 verifier of the passw
 - The command line keeps talking to the daemon over its socket, with no password.
   `sudo vpstream init --tailscale` goes back: the password and the authority are removed and
   the port closed.
+
+## Local network mode
+
+For a home network, where every device is on the same Wi-Fi: no tailnet, no public address.
+`sudo vpstream init --local` asks for a dashboard password (or takes `--dash-pass-file FILE`)
+and sets the service up to serve the local network only. Plain `sudo vpstream init` is the
+public mode, as always, and goes back to it.
+
+- **Address:** the stream and the dashboard listen on this host's private address (the one it
+  reaches the network from, or `--address IP`), never on every interface. Only private
+  addresses are taken (192.168.x.x, 10.x.x.x, 172.16.x.x to 172.31.x.x, 169.254.x.x; fc00::/7
+  and fe80::/10); a carrier's shared address (100.64.0.0/10) is refused. When the address
+  goes, a running stream stops.
+- **Dashboard:** at `http://<address>:1338/`, behind the password, over plain HTTP (cookies
+  without Secure, under names of their own), and at `http://127.0.0.1:1338/` on this host
+  without one, as on the tailnet. `init --local` lets 1338/tcp in from the private block of
+  the address in ufw, and takes that back on the next plain `init` or `uninstall`.
+- Use it only on a network you control, never on public Wi-Fi: anyone on the network can
+  reach the stream and dashboard ports, and can see what crosses plain HTTP. `start` says so.
 
 ## HTTPS for streams
 
