@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.15.2 (2026-11-17)
+
+### Performance Improvements
+
+- Release the code-quality pass of #28
+  ([`537e296`](https://github.com/skj-skj/vpstream/commit/537e296fc0979a7bd12c6e06a9a0bbc9c735fe47))
+
+### Refactoring
+
+- Code-quality pass (shared helpers, show.py, faster tests, batched getfacl)
+  ([#28](https://github.com/skj-skj/vpstream/pull/28),
+  [`cc3ba90`](https://github.com/skj-skj/vpstream/commit/cc3ba90f3121816769bf0410b29fb6210d7b8f1b))
+
+
 ## v0.15.1 (2026-11-16)
 
 ### Bug Fixes
