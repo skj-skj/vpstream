@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from vpstream import config
+from vpstream import config, platform
 from vpstream.tools import Runner
 
 Status = Literal["ok", "problem", "warning"]
@@ -44,6 +44,15 @@ def check_python(version: Sequence[int]) -> Check:
     return Check("python", "problem", f"{shown}; vpstream needs {need} or newer")
 
 
+def check_tool(runner: Runner, tool: Tool) -> Check:
+    path = runner.which(tool.name)
+    if path:
+        return Check(tool.name, "ok", path)
+    fix = tool.fix or platform.hints().install(tool.name)
+    status: Status = "problem" if tool.required else "warning"
+    return Check(tool.name, status, f"not found; needed for {tool.needed_for}", fix)
+
+
 def check_config(path: Path) -> Check:
     if not path.exists():
         return Check("config", "ok", f"no {path}; the defaults are used")
@@ -58,6 +67,10 @@ def check_config(path: Path) -> Check:
 
 def run_checks(runner: Runner, **options: Any) -> list[Check]:
     """Run every check of this platform. Nothing here changes the host or needs root."""
+    if platform.is_termux():
+        from vpstream.platform.termux import doctor as termux
+
+        return termux.run_checks(runner, **options)
     from vpstream.platform.linux import doctor as linux
 
     return linux.run_checks(runner, **options)

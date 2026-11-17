@@ -8,14 +8,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from vpstream import certificate, text
+from vpstream import certificate, platform, text
 
 
 def dashboard_line(dash: dict[str, Any]) -> str:
     if dash.get("mode") == "public":
         notes = [f"public, port {dash.get('port_state') or 'unknown'}"]
         if not dash.get("password"):
-            notes.append("NO PASSWORD: sudo vpstream dash-pass")
+            notes.append(f"NO PASSWORD: {platform.hints().dash_pass}")
         line = f"{dash.get('url') or dash.get('problem')} ({'; '.join(notes)})"
         if dash.get("certificate"):
             line += f"\n              certificate authority SHA-256 {dash['certificate']}"
@@ -270,6 +270,6 @@ def format_status(info: dict[str, Any], cli_version: str) -> str:
     if info.get("version") != cli_version:
         lines.append(
             f"note: the daemon runs {info.get('version')} but this command is {cli_version}; "
-            "restart it with: sudo systemctl restart vpstream"
+            f"restart it with: {platform.hints().restart}"
         )
     return "\n".join(lines)

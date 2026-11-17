@@ -15,14 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from vpstream import caddy, certificate, config, login
-from vpstream.doctor import Check, Status, Tool, check_config, check_python
+from vpstream.doctor import Check, Tool, check_config, check_python, check_tool
 from vpstream.doctor import exit_code as exit_code
 from vpstream.doctor import format_report as format_report
-from vpstream.platform.linux import firewall, tailscale
-from vpstream.tools import PACKAGES, Runner
-
-SYSTEM_INSTALL = 'sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "vpstream[dev]"'
-
+from vpstream.platform.linux import SYSTEM_INSTALL, firewall, tailscale
+from vpstream.tools import Runner
 
 TOOLS = (
     Tool("ffmpeg", "preparing videos for the browser", "vpstream install ffmpeg"),
@@ -40,15 +37,6 @@ TOOLS = (
 
 # Burned-in subtitles fall back to these when a file does not carry its font.
 FONTS = (("Noto Sans CJK", "fonts-noto-cjk"), ("Liberation Sans", "fonts-liberation"))
-
-
-def check_tool(runner: Runner, tool: Tool) -> Check:
-    path = runner.which(tool.name)
-    if path:
-        return Check(tool.name, "ok", path)
-    fix = tool.fix or f"sudo apt install {PACKAGES.get(tool.name, tool.name)}"
-    status: Status = "problem" if tool.required else "warning"
-    return Check(tool.name, status, f"not found; needed for {tool.needed_for}", fix)
 
 
 def check_caddy_service(runner: Runner) -> Check | None:

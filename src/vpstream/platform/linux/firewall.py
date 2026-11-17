@@ -111,7 +111,7 @@ def _trusted_config(config_file: Path, owner_uid: int) -> tuple[config.Config | 
     if problem := config_file_problem(config_file, owner_uid):
         return None, f"refusing to read the port: {problem}"
     try:
-        return config.load(config_file), ""
+        return config.load(config_file, local_keys=False), ""
     except config.ConfigError as exc:
         return None, str(exc)
 

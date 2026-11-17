@@ -29,7 +29,7 @@ from pathlib import Path
 
 from vpstream import caddy, certificate, client, config, dashboard_ca, login, net
 from vpstream.files import remove_path, write_atomic
-from vpstream.platform.linux import doctor, ffmpeg_install, firewall, tailscale
+from vpstream.platform.linux import SYSTEM_INSTALL, doctor, ffmpeg_install, firewall, tailscale
 from vpstream.tools import Result, Runner, tail
 
 USER = "vpstream"  # the service user, and its group
@@ -268,7 +268,7 @@ class Service:
             raise ServiceError(
                 f"{problem}. The service runs as its own user and cannot use this install. "
                 f"Install vpstream for the whole system and run init from there:\n"
-                f"  {doctor.SYSTEM_INSTALL}"
+                f"  {SYSTEM_INSTALL}"
             )
         for path in (self.helper, self.vpstream_bin):
             if not _PLAIN_PATH.fullmatch(str(path)):

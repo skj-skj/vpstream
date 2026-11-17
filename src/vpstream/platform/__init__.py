@@ -15,6 +15,10 @@ from __future__ import annotations
 import functools
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vpstream.platform.common import Hints
 
 LINUX = "linux"
 TERMUX = "termux"
@@ -71,3 +75,14 @@ def override(name: str | None) -> None:
 
 def is_termux() -> bool:
     return current() == TERMUX
+
+
+def hints() -> Hints:
+    """What this platform's messages tell the person to run."""
+    if is_termux():
+        from vpstream.platform import termux
+
+        return termux.HINTS
+    from vpstream.platform import linux
+
+    return linux.HINTS

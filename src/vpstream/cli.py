@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, stream
+from vpstream import __version__, gate, platform, stream
 from vpstream.net import url_host
 from vpstream.show import (
     ACTIVE,
@@ -248,7 +248,9 @@ def _request(
                 return info
             except client.DaemonRefused as exc:
                 code = exc.data.get("code")
-                if code == stream.Unreadable.CODE and not granted:
+                # On Termux the daemon is the caller: what it cannot read, Android keeps
+                # from Termux (termux-setup-storage), and no grant changes that.
+                if code == stream.Unreadable.CODE and not granted and not platform.is_termux():
                     granted = True
                     user = str(exc.data.get("user"))
                     try:
@@ -465,6 +467,9 @@ def _revoke() -> int:
 
 
 def cmd_revoke(args: argparse.Namespace) -> int:
+    if platform.is_termux():
+        print("Nothing to take back on Termux: the daemon runs as you and was given no access.")
+        return 0
     info = _daemon("status")
     if info is None:
         return 1
@@ -534,6 +539,13 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
     paths = config.default_paths()
     runner = SystemRunner()
+    if platform.is_termux():  # no firewall: the daemon serves the local network only
+        try:
+            return daemon.run(config.load(paths.config_file), paths, runner)
+        except (config.ConfigError, daemon.DaemonError) as exc:
+            return _error(str(exc))
+        except OSError as exc:
+            return _error(f"the daemon cannot start: {exc}")
     # The helper always works on the real host, so a daemon tried out under $VPSTREAM_ROOT
     # gets none: it must not close the real stream port.
     trial = bool(os.environ.get(config.ROOT_ENV))
@@ -591,13 +603,24 @@ def _password(args: argparse.Namespace, ask: bool) -> str | None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    if platform.is_termux():
+        from vpstream import config
+        from vpstream.platform.termux import commands
+        from vpstream.tools import SystemRunner
+
+        if args.public is not None or args.https is not None or _given(args):
+            return _error("Termux serves the local network only; run init without options", 2)
+        try:
+            commands.init(SystemRunner(), config.default_paths())
+        except (commands.CommandError, OSError) as exc:
+            return _error(str(exc))
+        return 0
     from vpstream.platform.linux import service
 
     svc = _service()
     try:
         public = svc.dashboard_public(args.public)
-        given = args.dash_pass is not None or args.dash_pass_file is not None
-        if given and not public:
+        if _given(args) and not public:
             return _error("a password is for the public dashboard only (--no-tailscale)", 2)
         # Not asked for a password that a refusal for want of root would throw away.
         ask = os.geteuid() == 0 and svc.wants_password(public)
@@ -607,7 +630,24 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _given(args: argparse.Namespace) -> bool:
+    """Whether a password was given on the command line."""
+    return args.dash_pass is not None or args.dash_pass_file is not None
+
+
 def cmd_dash_pass(args: argparse.Namespace) -> int:
+    if platform.is_termux():
+        from vpstream import config
+        from vpstream.platform.termux import commands
+
+        try:
+            password = _password(args, ask=True)
+            if password is None:
+                return _error("no terminal to ask on; give it with --dash-pass-file FILE", 2)
+            commands.set_password(config.default_paths(), password)
+        except (ValueError, commands.CommandError, OSError) as exc:
+            return _error(str(exc))
+        return 0
     from vpstream.platform.linux import service
 
     if os.geteuid() != 0:
@@ -639,6 +679,21 @@ def cmd_dashboard_cert(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
+    if platform.is_termux():
+        from vpstream import config
+        from vpstream.platform.termux import commands
+
+        what = "vpstream's configuration and state" + (
+            ", and every prepared video" if args.purge else ""
+        )
+        if not _confirm(f"Remove {what}?", args.yes):
+            print("Cancelled; nothing was changed.")
+            return 1
+        try:
+            commands.uninstall(config.default_paths(), args.purge)
+        except (commands.CommandError, OSError) as exc:
+            return _error(str(exc))
+        return 0
     from vpstream.platform.linux import service
 
     what = "the vpstream service, its user, configuration and state"
@@ -665,6 +720,10 @@ def _ask(question: str) -> bool:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
+    if platform.is_termux():
+        from vpstream.platform.termux import commands
+
+        return _error(commands.install_refusal(args.program))
     from vpstream.platform.linux import caddy_install, ffmpeg_install, system_install
     from vpstream.tools import SystemRunner
 

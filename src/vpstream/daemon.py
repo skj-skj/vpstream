@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vpstream import __version__, api, net, prepare, public
+from vpstream import __version__, api, net, platform, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
     CaddyError,
@@ -89,7 +89,7 @@ def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
             if socket_in_use(path):
                 raise DaemonError(
                     f"a vpstream daemon is already listening on {path}; "
-                    "stop it first (sudo systemctl stop vpstream)"
+                    f"stop it first ({platform.hints().stop})"
                 )
             path.unlink()
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -183,7 +183,7 @@ class Daemon:
             self.log(f"WARNING: nobody can log in to the dashboard: {exc}")
             return None
         if verifier is None:
-            self.log("WARNING: no dashboard password is set: sudo vpstream dash-pass")
+            self.log(f"WARNING: no dashboard password is set: {platform.hints().dash_pass}")
         return verifier
 
     def _device_secret(self, new: bool = False) -> bytes:
