@@ -45,8 +45,6 @@ class LanLive(Live):
     def __init__(self, root: Path) -> None:
         settings = {**config.TERMUX_LIMITS, "local": True}
         super().__init__(root, **settings)
-        self.server.gate_connections = self.cfg.gate_connections
-        self.server.cpus, self.server.memory_mb = self.cfg.caddy_cpus, self.cfg.caddy_memory_mb
 
     def at(
         self, host: str, target: str, headers: dict[str, str] | None = None

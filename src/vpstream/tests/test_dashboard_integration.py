@@ -249,7 +249,17 @@ def test_a_dashboard_caddy_that_dies_closes_the_port_and_comes_back(public: Publ
     wait_for(lambda: public.fw.calls.count("open") == 2 and public.status()["address"])
     assert public.fw.calls == ["open", "close", "open"]
     assert any("Caddy for the dashboard stopped" in line for line in public.log)
-    assert public.https("GET", "/login")[0] == 200
+    # The new Caddy listens a moment before it serves its certificate: until then a
+    # handshake ends in an alert ("internal error"). It serves the page within seconds.
+    assert wait_for(lambda: _login_page(public)) == 200
+
+
+def _login_page(public: Public) -> int | None:
+    try:
+        status = public.https("GET", "/login")[0]
+    except OSError:  # ssl.SSLError among them
+        return None
+    return status if status == 200 else None
 
 
 def test_stopping_the_daemon_closes_the_port_before_caddy_goes(public: Public) -> None:

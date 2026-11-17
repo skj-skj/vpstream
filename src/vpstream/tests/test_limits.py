@@ -25,10 +25,11 @@ def test_termux_has_bounds_by_default(on_termux: None) -> None:
         config.parse("[limits]\ncaddy_cpus = -1\n")
 
 
-def test_linux_has_no_bounds_and_no_limits_section() -> None:
+def test_linux_bounds_only_the_gate_and_has_no_limits_section() -> None:
     cfg = config.parse("")
+    # The gate's socket takes 16 waiting dials; Caddy keeps to that, the others wait.
     assert (cfg.gate_connections, cfg.caddy_cpus, cfg.caddy_memory_mb, cfg.prepare_threads) == (
-        0,
+        16,
         0,
         0,
         0,

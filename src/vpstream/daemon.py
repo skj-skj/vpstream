@@ -675,6 +675,14 @@ def stream_certificates(
     return Certificates(config, paths, CertificateCaddy(runner, config, paths), firewall, log=log)
 
 
+def stream_server(config: Config, paths: Paths, runner: Runner) -> CaddyServer:
+    """The stream's Caddy, with what it may take of the host (see Config)."""
+    server = CaddyServer(runner, config.stream_port, paths)
+    server.gate_connections = config.gate_connections
+    server.cpus, server.memory_mb = config.caddy_cpus, config.caddy_memory_mb
+    return server
+
+
 def run(
     config: Config,
     paths: Paths,
@@ -689,9 +697,7 @@ def run(
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
-    server = CaddyServer(runner, config.stream_port, paths)
-    server.gate_connections = config.gate_connections
-    server.cpus, server.memory_mb = config.caddy_cpus, config.caddy_memory_mb
+    server = stream_server(config, paths, runner)
     log = lambda m: print(m, flush=True)  # noqa: E731
     certificates = stream_certificates(config, paths, runner, acme_firewall, log)
     daemon = Daemon(config, paths, runner, firewall, server, certificates, log=log)
