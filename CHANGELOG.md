@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.16.1 (2026-11-17)
+
+### Bug Fixes
+
+- Caddy asks the gate at most 16 requests at once on Linux too
+  ([#30](https://github.com/skj-skj/vpstream/pull/30),
+  [`a5df78c`](https://github.com/skj-skj/vpstream/commit/a5df78ca369d5a8627bd0822e5ac57ce444e3097))
+
+
 ## v0.16.0 (2026-11-17)
 
 ### Features
