@@ -59,12 +59,12 @@ def relaunch_elevated(user: str) -> bool:
     administrator of another account apart (see cli)."""
     if sys.platform != "win32":
         return False
-    from vpstream.platform.windows.shortcut import ARGUMENTS, pythonw
+    from vpstream.platform.windows.shortcut import launch
 
-    program = pythonw()
+    program, arguments = launch()  # vpstream.exe: Windows' question names vpstream
     if not program.exists():
-        program = Path(sys.executable)
-    args = f'{ARGUMENTS} --elevated-for "{user}"'
+        program, arguments = Path(sys.executable), "-P -m vpstream"
+    args = f'{arguments} --elevated-for "{user}"'.strip()
     done = ctypes.windll.shell32.ShellExecuteW(None, "runas", str(program), args, None, 1)
     return int(done) > 32  # ShellExecute's success
 

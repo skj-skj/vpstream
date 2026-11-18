@@ -70,11 +70,12 @@ def _open(elevated_for: str) -> int:
     first = not paths.config_file.exists()
     runner = SystemRunner()
     session = Session(paths, runner=runner, log=log)
-    if first:
-        try:
-            log(f"the desktop icon: {shortcut.create(runner)}")
-        except Exception as exc:  # the window works without it
-            log(f"WARNING: the desktop icon: {exc}")
+    try:  # made on the first run; afterwards only kept up to date where it is
+        icon = shortcut.create(runner) if first else shortcut.refresh(runner)
+        if icon:
+            log(f"the desktop icon: {icon}")
+    except Exception as exc:  # the window works without it
+        log(f"WARNING: the desktop icon: {exc}")
     me = processes.user()
     other = me if elevated_for and elevated_for.lower() != me.lower() else ""
     return app.run(session, runner, log.path, other)

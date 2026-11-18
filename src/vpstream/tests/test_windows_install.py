@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
 import types
 import zipfile
 from collections.abc import Callable, Sequence
@@ -176,6 +177,7 @@ def running(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
         return real(path, mode, *args, **kw)  # type: ignore[call-overload]
 
     monkeypatch.setattr(Path, "open", open_)
+    monkeypatch.setattr(install, "RUNNING_SECONDS", 0.0)
 
 
 def test_a_running_program_is_found_before_anything_changes(
@@ -283,6 +285,33 @@ def test_powershell_strings_are_taken_as_they_are() -> None:
     assert shortcut.quote("C:\\Users\\O'Brien\\$x") == "'C:\\Users\\O''Brien\\$x'"
 
 
+def test_vpstream_exe_runs_vpstream_with_pythonw(tmp_path: Path) -> None:
+    """So that Windows names vpstream when it asks for administrator rights."""
+    pytest.importorskip("pip._vendor.distlib", reason="no pip here")
+    exe = shortcut.launcher(tmp_path, Path("C:/Py/pythonw.exe"))
+    assert exe == tmp_path / "vpstream.exe"
+    data = exe.read_bytes()
+    assert (
+        data.startswith(b"MZ") and b'#!"' + str(Path("C:/Py/pythonw.exe")).encode() + b'"\n' in data
+    )
+    with zipfile.ZipFile(exe) as zf:
+        assert zf.read("__main__.py").decode() == shortcut.MAIN
+    first = exe.stat().st_mtime_ns
+    assert shortcut.launcher(tmp_path, Path("C:/Py/pythonw.exe")) == exe
+    assert exe.stat().st_mtime_ns == first  # the same: not written again
+    shortcut.launcher(tmp_path, Path("D:/Other/pythonw.exe"))
+    assert b"D:" in exe.read_bytes() and not (tmp_path / "vpstream.new").exists()
+    assert shortcut.launch(tmp_path) == (exe, "")
+
+
+def test_without_pip_the_icon_runs_pythonw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shortcut, "launcher_bytes", lambda python: None)
+    assert shortcut.launcher(tmp_path) is None
+    assert shortcut.launch(tmp_path) == (shortcut.pythonw(), "-P -m vpstream")
+    (tmp_path / "vpstream.exe").write_bytes(b"MZ")  # made before: still used
+    assert shortcut.launch(tmp_path) == (tmp_path / "vpstream.exe", "")
+
+
 def test_the_icon_runs_the_window_without_a_console(tmp_path: Path) -> None:
     assert shortcut.pythonw("C:\\Py\\python.exe").name == "pythonw.exe"
     runner = FakeRunner(())
@@ -298,8 +327,23 @@ def test_the_icon_runs_the_window_without_a_console(tmp_path: Path) -> None:
     assert f"{shortcut.ICON},0" in script and shortcut.ICON.is_file()
 
 
+def test_an_icon_is_kept_up_to_date_only_where_it_is_vpstreams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shortcut, "launch", lambda: (tmp_path / "vpstream.exe", ""))
+    runner = FakeRunner(())
+    assert shortcut.refresh(runner) == ""
+    script = runner.calls[0][4]
+    keep = f"if (-not ((Test-Path -LiteralPath $path) -and {shortcut.IS_OURS})) {{ exit 0 }}"
+    assert keep in script and script.index("exit 0") < script.index("$s.Save()")
+    assert f"$s.TargetPath = {shortcut.quote(tmp_path / 'vpstream.exe')}" in script
+    assert "exit 0" not in shortcut.create_script(Path("p"))
+
+
 def test_only_vpstreams_icon_is_removed() -> None:
-    assert "if ($s.Arguments -eq '-P -m vpstream') { Remove-Item" in shortcut.REMOVE_SCRIPT
+    script = shortcut.REMOVE_SCRIPT
+    assert "if ($s.Arguments -eq '-P -m vpstream' -or $s.TargetPath -like " in script
+    assert "'*\\vpstream\\vpstream.exe') { Remove-Item" in script
     runner = FakeRunner(())
     assert shortcut.remove(runner) == ""
     runner.on("powershell", returncode=1, stderr="Access denied")
@@ -436,3 +480,42 @@ def test_doctor_says_which_programs_vpstream_installed_and_which_are_old(tmp_pat
     assert checks["caddy"].detail.endswith("(vpstream's 2.10.0; 2.11.9 is out)")
     assert checks["caddy"].fix == "vpstream windows-install caddy"
     assert checks["mkvmerge"].status == "ok" and "vpstream's" not in checks["mkvmerge"].detail
+
+
+def test_a_program_the_antivirus_holds_for_a_moment_is_moved_once_it_lets_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows Defender reads a new program after it is written and run; meanwhile Windows
+    refuses to move its folder ("access is denied"). The move is tried again."""
+    tools = tmp_path / "tools"
+    staged = tools / ".install-caddy" / "staged"
+    (staged / "caddy").mkdir(parents=True)
+    (staged / "caddy" / "caddy.exe").write_bytes(b"new")
+    real, refusals = os.replace, [2]
+    waits: list[float] = []
+
+    def replace(src: Path, dst: Path) -> None:
+        if refusals[0]:
+            refusals[0] -= 1
+            raise PermissionError(5, "Access is denied")
+        real(src, dst)
+
+    monkeypatch.setattr(install.os, "replace", replace)
+    monkeypatch.setattr(install, "_sleep", waits.append)
+    install.swap(tools, staged, "caddy")
+    assert (tools / "caddy" / "caddy.exe").read_bytes() == b"new" and len(waits) == 2
+    refusals[0] = 10**6  # it never lets go: the error, after a while
+    monkeypatch.setattr(install, "SCAN_SECONDS", 0.0)
+    (staged / "caddy").mkdir()
+    with pytest.raises(PermissionError):
+        install.swap(tools, staged, "caddy")
+
+
+def test_a_program_locked_for_a_moment_is_not_taken_as_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "caddy.exe").write_bytes(b"x")
+    looks = iter([True, True, False])
+    monkeypatch.setattr(install, "_locked", lambda program: next(looks))
+    monkeypatch.setattr(install, "_sleep", lambda s: None)
+    assert install.in_use(tmp_path) is None
