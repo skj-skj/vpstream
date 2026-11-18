@@ -273,3 +273,24 @@ def test_every_test_skipped_on_windows_is_there() -> None:
         tree = ast.parse((here / file).read_text(encoding="utf-8"))
         names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
         assert name.split("[")[0] in names, key
+
+
+def test_what_a_program_writes_is_read_as_utf8() -> None:
+    """ffmpeg writes UTF-8 (track titles, file names); Windows would read its code page."""
+    write = "import sys; sys.stdout.buffer.write('Épisode 日本\\n'.encode())"
+    assert tools.SystemRunner().run([sys.executable, "-c", write]).stdout == "Épisode 日本\n"
+    code, out = tools.run_cancellable([sys.executable, "-c", write], threading.Event())
+    assert (code, out.strip()) == (0, "Épisode 日本")
+
+
+def test_under_takes_windows_paths_as_windows_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ntpath
+
+    from vpstream import files
+
+    monkeypatch.setattr(files.os, "path", ntpath)
+    monkeypatch.setattr(files.os, "sep", "\\")
+    assert files.under("C:/Films/Show/e1.mkv", "C:\\films\\show")  # / and either case
+    assert files.under("C:\\Films\\a.mkv", "C:\\") and files.under("C:\\Films\\a.mkv", "C:")
+    assert not files.under("C:\\Films2\\a.mkv", "C:\\Films")
+    assert not files.under("D:\\Films\\a.mkv", "C:\\Films")

@@ -41,6 +41,7 @@ class SystemRunner:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",  # what ffmpeg writes; Windows would read its own code page
                 errors="replace",
                 timeout=timeout,
                 check=False,
@@ -142,6 +143,7 @@ def run_cancellable(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
         errors="replace",
         cwd=cwd,
     )
