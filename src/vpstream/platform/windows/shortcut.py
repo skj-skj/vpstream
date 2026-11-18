@@ -49,7 +49,8 @@ def launcher_bytes(python: Path) -> bytes | None:
         return None
     packed = io.BytesIO()
     with zipfile.ZipFile(packed, "w") as zf:
-        zf.writestr("__main__.py", MAIN)
+        # A fixed time: the same Python gives the same bytes, so it is not written again.
+        zf.writestr(zipfile.ZipInfo("__main__.py", date_time=(2026, 1, 1, 0, 0, 0)), MAIN)
     return stub + f'#!"{python}"\n'.encode() + packed.getvalue()
 
 

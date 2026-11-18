@@ -296,6 +296,10 @@ def test_vpstream_exe_runs_vpstream_with_pythonw(tmp_path: Path) -> None:
     )
     with zipfile.ZipFile(exe) as zf:
         assert zf.read("__main__.py").decode() == shortcut.MAIN
+    later = (2031, 5, 6, 7, 8, 9, 0, 0, 0)
+    with pytest.MonkeyPatch.context() as clock:  # built again at another time: the same
+        clock.setattr(zipfile.time, "localtime", lambda *a: later)
+        assert shortcut.launcher_bytes(Path("C:/Py/pythonw.exe")) == data
     first = exe.stat().st_mtime_ns
     assert shortcut.launcher(tmp_path, Path("C:/Py/pythonw.exe")) == exe
     assert exe.stat().st_mtime_ns == first  # the same: not written again
