@@ -7,8 +7,11 @@ anything, except `make_private`, which the person asks for with a button.
 
 from __future__ import annotations
 
+import ctypes
 import ipaddress
 import json
+import socket
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,3 +110,56 @@ def make_private(runner: Runner, index: int) -> None:
     res = runner.run(powershell(script), timeout=60)
     if res.returncode != 0:
         raise NetworkError(f"Windows did not make the network private: {tail(res)}")
+
+
+# --- whether an address is still in use, asked of Windows itself (once a second)
+
+
+class _Unicast(ctypes.Structure):
+    """MIB_UNICASTIPADDRESS_ROW (netioapi.h), with the address as SOCKADDR_INET's bytes."""
+
+    _fields_ = [
+        ("family", ctypes.c_ushort),
+        ("port", ctypes.c_ushort),
+        ("ipv4", ctypes.c_ubyte * 4),
+        ("rest", ctypes.c_ubyte * 20),  # the rest of SOCKADDR_INET (an IPv6 address)
+        ("luid", ctypes.c_ulonglong),
+        ("index", ctypes.c_ulong),
+        ("prefix_origin", ctypes.c_int),
+        ("suffix_origin", ctypes.c_int),
+        ("valid_lifetime", ctypes.c_ulong),
+        ("preferred_lifetime", ctypes.c_ulong),
+        ("prefix_length", ctypes.c_ubyte),
+        ("skip_as_source", ctypes.c_ubyte),
+        ("dad_state", ctypes.c_int),
+        ("scope_id", ctypes.c_ulong),
+        ("created", ctypes.c_longlong),
+    ]
+
+
+def address_states() -> dict[str, int]:
+    """IPv4 address -> its state (DadState: 1 Tentative, 3 Deprecated, 4 Preferred), from
+    Windows' own table; {} where it cannot be asked."""
+    if sys.platform != "win32":
+        return {}
+    iphlpapi = ctypes.WinDLL("iphlpapi")  # type: ignore[attr-defined,unused-ignore]
+    table = ctypes.c_void_p()
+    if iphlpapi.GetUnicastIpAddressTable(socket.AF_INET, ctypes.byref(table)) != 0:
+        return {}
+    try:
+        count = ctypes.c_ulong.from_address(table.value or 0).value
+        first = (table.value or 0) + ctypes.sizeof(ctypes.c_ulonglong)  # NumEntries, aligned
+        rows = (_Unicast * count).from_address(first)
+        return {socket.inet_ntoa(bytes(row.ipv4)): row.dad_state for row in rows}
+    finally:
+        iphlpapi.FreeMibTable(table)
+
+
+def in_use(address: str, states: Any = address_states) -> bool:
+    """Whether this PC still uses `address`. Windows keeps the address of a Wi-Fi that was
+    turned off, as Deprecated, and a socket can still be bound to it; only a Preferred one
+    is in use. Where Windows cannot be asked, a socket is bound to it (`local.is_mine`)."""
+    found = states()
+    if not found:
+        return local.is_mine(address)
+    return bool(found.get(address) == PREFERRED)

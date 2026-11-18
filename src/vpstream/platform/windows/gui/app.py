@@ -333,6 +333,8 @@ class Window:
                 automatic = local.find("")
             except local.LocalError:
                 automatic = ""
+            if automatic and not network.in_use(automatic):
+                automatic = ""  # a turned-off Wi-Fi's
             return network.addresses(self.runner), automatic
 
         self.worker.do(work, self._networks, self.failed)

@@ -32,7 +32,7 @@ from vpstream.config import Config, Paths
 from vpstream.control import Control
 from vpstream.daemon import TICK_SECONDS, make_control
 from vpstream.platform.common import FirewallError
-from vpstream.platform.windows import WINDOWS_TEXT, processes
+from vpstream.platform.windows import WINDOWS_TEXT, network, processes
 from vpstream.platform.windows.firewall import NetshFirewall
 from vpstream.tools import Runner, SystemRunner
 
@@ -266,6 +266,7 @@ class Session:
     firewall: NetshFirewall | None = None
     server: Any = None
     clock: Callable[[], float] = time.monotonic
+    has_address: Callable[[str], bool] = network.in_use
     config: Config = dataclasses.field(init=False)
     control: Control = dataclasses.field(init=False)
     notice: str = ""  # what the window says when it opens (three crashes)
@@ -292,6 +293,7 @@ class Session:
             self.server,
             self.log,
             boot=self.boot,
+            has_address=self.has_address,
         )
 
     # --- open and close

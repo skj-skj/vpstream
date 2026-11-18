@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import caddy, config, local, state
+from vpstream import caddy, config, control, local, state
 from vpstream.platform.common import FirewallError
 from vpstream.platform.windows import WINDOWS_TEXT, firewall, network, processes, session
 from vpstream.tests.fakes import FakeFirewall, FakeRunner, FakeServer
@@ -43,11 +43,12 @@ def a_session(tmp_path: Path, taken: set[int] = frozenset(), **more: Any) -> ses
     return session.Session(
         config.Paths.under(tmp_path / "vp"),
         runner=FakeRunner(()),
-        log=lines.append,
+        log=more.pop("log", lines.append),
         free=lambda host, port: port not in taken,
         boot="windows-7",
         firewall=more.pop("firewall", FakeFirewall()),
         server=more.pop("server", FakeServer()),
+        has_address=more.pop("has_address", lambda address: local.is_mine(address)),
         **more,
     )
 
@@ -197,6 +198,50 @@ def test_a_resumed_stream_that_runs_ten_minutes_counts_as_fine(
     threading.Event().wait(session.TICK_SECONDS * 2.5)
     assert s._crashes() == 0
     s.close()
+
+
+# --- Wi-Fi turned off
+
+
+def test_a_stream_stops_when_windows_no_longer_uses_its_address(
+    tmp_path: Path, lan: None, film: Path
+) -> None:
+    """Windows keeps a turned-off Wi-Fi's address (Deprecated), and a socket can still be
+    bound to it: Windows is asked whether it is in use."""
+    wifi = [True]
+    lines: list[str] = []
+    s = a_session(tmp_path, has_address=lambda address: wifi[0], log=lines.append)
+    s.open()
+    s.start({"file": str(film)})
+    wifi[0] = False
+    for _ in range(50):
+        if s.control.stream is None:
+            break
+        threading.Event().wait(0.1)
+    assert s.control.stream is None
+    assert any("is no longer this device's address" in line for line in lines)
+    with pytest.raises(control.ControlError, match=r"192\.168\.1\.73 is not in use now"):
+        s.start({"file": str(film)})
+    s.close()
+
+
+def test_in_use_is_what_windows_says_of_the_address() -> None:
+    states = {"192.168.1.73": network.PREFERRED, "172.16.0.184": 1, "10.0.0.2": 3}
+    assert network.in_use("192.168.1.73", lambda: states)
+    assert not network.in_use("10.0.0.2", lambda: states)  # Deprecated: the Wi-Fi is off
+    assert not network.in_use("172.16.0.184", lambda: states)  # Tentative: no cable
+    assert not network.in_use("10.9.9.9", lambda: states)  # not there at all
+
+
+def test_where_windows_cannot_be_asked_a_socket_is_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local, "is_mine", lambda address: address == "10.0.0.5")
+    assert network.in_use("10.0.0.5", dict) and not network.in_use("10.0.0.6", dict)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' own table")
+def test_windows_table_of_addresses_has_its_loopback() -> None:
+    states = network.address_states()
+    assert states.get("127.0.0.1") == network.PREFERRED, states
 
 
 # --- the gate and Caddy
