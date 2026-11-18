@@ -49,14 +49,37 @@ def path_hint(found: str | None, original_path: str) -> str:
     return f"; vpstream finds it there, but a terminal does not: add {folder} to PATH to use it"
 
 
-def check_tools(runner: Runner, original_path: str) -> list[Check]:
+def own_build(found: str, tools: Path) -> str:
+    """For a program vpstream installed: its version, and how to update an older one."""
+    from vpstream.platform.windows import install
+
+    for build in install.BUILDS.values():
+        folder = str(tools / build.folder).lower()
+        if ntpath.dirname(found).lower().rstrip("\\") == folder.rstrip("\\"):
+            have = install.installed_version(tools, build)
+            if have != build.version:
+                return f" (vpstream's {have or 'unknown version'}; {build.version} is out)"
+            return f" (vpstream's {have})"
+    return ""
+
+
+def check_tools(runner: Runner, original_path: str, tools: Path | None = None) -> list[Check]:
+    tools = tools or windows.tools_dir()
     checks = []
     for tool in TOOLS:
         check = check_tool(runner, tool)
-        if check.status == "ok" and tool.name.startswith("mkv"):
-            check = Check(check.name, "ok", check.detail + path_hint(check.detail, original_path))
+        if check.status == "ok":
+            extra = own_build(check.detail, tools)
+            if tool.name.startswith("mkv"):
+                extra = path_hint(check.detail, original_path)
+            fix = f"{windows.INSTALL} {install_name(tool.name)}" if "is out" in extra else ""
+            check = Check(check.name, "warning" if fix else "ok", check.detail + extra, fix)
         checks.append(check)
     return checks
+
+
+def install_name(program: str) -> str:
+    return windows.HINTS.packages.get(program, program)
 
 
 def check_config(path: Path) -> Check:
@@ -77,6 +100,7 @@ def run_checks(
     paths: config.Paths | None = None,
     original_path: str | None = None,
     find: Callable[[str], Any] = importlib.util.find_spec,
+    tools: Path | None = None,
     **_: Any,  # what only the Linux checks take
 ) -> list[Check]:
     """Run every check. Nothing here changes anything."""
@@ -84,6 +108,6 @@ def run_checks(
     if original_path is None:
         original_path = windows.ORIGINAL_PATH.get("PATH", os.environ.get("PATH", ""))
     checks = [check_python(python_version or tuple(sys.version_info[:3])), check_tkinter(find)]
-    checks += check_tools(runner, original_path)
+    checks += check_tools(runner, original_path, tools)
     checks.append(check_config(paths.config_file))
     return checks

@@ -809,7 +809,7 @@ def _password_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(windows: bool = False) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vpstream", description="On-demand video streaming from a VPS."
     )
@@ -1067,6 +1067,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         i.add_argument("--tmp", metavar="DIR", help="folder for the download (default: system)")
         i.set_defaults(func=cmd_install)
+    if windows:
+        from vpstream.platform.windows import commands
+
+        commands.add_parsers(sub)
     return p
 
 
@@ -1088,7 +1092,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from vpstream.platform.windows import prepare_process
 
         prepare_process()
-    parser = build_parser()
+    parser = build_parser(windows)
     args = parser.parse_args(argv)
     if windows:
         from vpstream.platform.windows import commands

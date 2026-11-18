@@ -352,6 +352,17 @@ def burn_hls(
     ]
 
 
+# What bench, caps and prepare use; each tuple needs one of its names. The installers check
+# a new ffmpeg for them (Linux's `vpstream install ffmpeg`, Windows' `windows-install`).
+REQUIRED_ENCODERS = (("libx264",), ("libx265",), ("libsvtav1", "libaom-av1"))
+REQUIRED_FILTERS = ("overlay", "scale2ref", "subtitles", "tonemap", "zscale")
+
+
+def missing_features(encoders: set[str], filters: set[str]) -> list[str]:
+    missing = [" or ".join(alts) for alts in REQUIRED_ENCODERS if not set(alts) & encoders]
+    return missing + [f for f in REQUIRED_FILTERS if f not in filters]
+
+
 def parse_ffmpeg_list(text: str) -> set[str]:
     """Names from `ffmpeg -encoders` or `ffmpeg -filters` output."""
     names: set[str] = set()

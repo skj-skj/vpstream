@@ -1,0 +1,438 @@
+"""`vpstream windows-install` and `windows-uninstall`, with downloads and programs faked: what
+is kept from a zip, the checks before anything changes, the swap, what uninstall removes,
+the desktop icon's PowerShell. The real downloads and Windows itself are tried on Windows."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import hashlib
+import io
+import json
+import types
+import zipfile
+from collections.abc import Callable, Sequence
+from pathlib import Path
+
+import pytest
+
+from vpstream import cli
+from vpstream.ffargs import REQUIRED_FILTERS
+from vpstream.platform import windows
+from vpstream.platform.common import SetupError
+from vpstream.platform.windows import commands, install, shortcut
+from vpstream.tests.fakes import FakeRunner
+from vpstream.tools import Result
+
+ENCODERS = " V....D libx264  x\n V....D libx265  x\n V....D libaom-av1  x\n"
+FILTERS = "".join(f" T.. {name}  V->V  x\n" for name in REQUIRED_FILTERS)
+
+
+def a_zip(files: dict[str, bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+    return out.getvalue()
+
+
+FFMPEG_ZIP = a_zip(
+    {
+        "ffmpeg-9/bin/ffmpeg.exe": b"ffmpeg",
+        "ffmpeg-9/bin/ffprobe.exe": b"ffprobe",
+        "ffmpeg-9/bin/ffplay.exe": b"not kept",
+        "ffmpeg-9/LICENSE": b"GPL",
+        "ffmpeg-9/doc/ffmpeg.html": b"not kept",
+    }
+)
+
+
+class Http:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.urls: list[str] = []
+
+    def get_json(self, url: str) -> object:
+        raise AssertionError("no API call")
+
+    def get_text(self, url: str) -> str:
+        raise AssertionError("no text")
+
+    def download(self, url: str, dest: Path, progress: Callable[[int, int], None]) -> str:
+        self.urls.append(url)
+        dest.write_bytes(self.data)
+        progress(len(self.data), len(self.data))
+        return hashlib.sha256(self.data).hexdigest()
+
+
+def pinned(data: bytes, build: install.Build = install.FFMPEG) -> install.Build:
+    return dataclasses.replace(build, sha256=hashlib.sha256(data).hexdigest(), size=len(data))
+
+
+class Programs(FakeRunner):
+    """A host whose ffmpeg lists `encoders` and every filter vpstream needs."""
+
+    def __init__(self, encoders: str = ENCODERS) -> None:
+        super().__init__(())
+        self.encoders = encoders
+
+    def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result:
+        lists = {"-encoders": self.encoders, "-filters": FILTERS}
+        if len(args) == 3 and args[1] == "-hide_banner" and args[2] in lists:
+            self.calls.append(list(args))
+            return Result(0, lists[args[2]], "")
+        return super().run(args, timeout=timeout)
+
+
+def said() -> tuple[list[tuple[str, int, int]], install.Progress]:
+    lines: list[tuple[str, int, int]] = []
+    return lines, lambda what, done, total: lines.append((what, done, total))
+
+
+# --- one pinned build
+
+
+def test_only_the_named_files_are_kept_wherever_the_zip_puts_them(tmp_path: Path) -> None:
+    archive = tmp_path / "f.zip"
+    files = {"../../evil/ffmpeg.exe": b"one", "x/ffmpeg.exe": b"two", "x/LICENSE": b"L"}
+    archive.write_bytes(a_zip({**files, "y\\ffprobe.exe": b"p", "x/ffplay.exe": b"-"}))
+    install.unpack(archive, install.FFMPEG, tmp_path / "staged")
+    out = tmp_path / "staged" / "ffmpeg" / "bin"
+    assert sorted(p.name for p in out.iterdir()) == ["LICENSE", "ffmpeg.exe", "ffprobe.exe"]
+    assert (out / "ffmpeg.exe").read_bytes() == b"one"  # the first of a name
+    assert not (tmp_path / "evil").exists()
+    archive.write_bytes(a_zip(files))
+    with pytest.raises(SetupError, match=r"does not have ffprobe\.exe"):
+        install.unpack(archive, install.FFMPEG, tmp_path / "again")
+
+
+def test_a_build_is_downloaded_checked_and_put_in_place(tmp_path: Path) -> None:
+    tools, http, runner = tmp_path / "tools", Http(FFMPEG_ZIP), Programs()
+    lines, progress = said()
+    done = install.install_build(pinned(FFMPEG_ZIP), tools, runner, http, progress)
+    assert done == f"ffmpeg 9.0.2 is installed in {tools / 'ffmpeg'}"
+    folder = tools / "ffmpeg" / "bin"
+    assert sorted(p.name for p in folder.iterdir()) == ["LICENSE", "ffmpeg.exe", "ffprobe.exe"]
+    marker = json.loads((tools / "ffmpeg" / install.MARKER).read_text())
+    assert marker["version"] == "9.0.2" and marker["url"] == install.FFMPEG.url
+    assert install.installed_version(tools, install.FFMPEG) == "9.0.2"
+    assert [p.name for p in tools.iterdir()] == ["ffmpeg"]  # no download, no staging left
+    assert [c[0] for c in runner.calls if c[0].endswith(".exe")] == [
+        str(tools / ".install-ffmpeg" / "staged" / "ffmpeg" / "bin" / name)
+        for name in ("ffmpeg.exe", "ffmpeg.exe", "ffprobe.exe")
+    ]  # run where it was unpacked, before it is put in place
+    assert lines[0] == ("downloading ffmpeg 9.0.2", 0, len(FFMPEG_ZIP))
+    assert ("checking the new ffmpeg", 0, 0) in lines
+
+
+def test_a_new_build_replaces_the_old(tmp_path: Path) -> None:
+    tools = tmp_path / "tools"
+    (tools / "ffmpeg" / "bin").mkdir(parents=True)
+    (tools / "ffmpeg" / "bin" / "old.dll").write_bytes(b"old")
+    install.install_build(pinned(FFMPEG_ZIP), tools, Programs(), Http(FFMPEG_ZIP), said()[1])
+    assert not (tools / "ffmpeg" / "bin" / "old.dll").exists()
+    assert sorted(p.name for p in tools.iterdir()) == ["ffmpeg"]
+
+
+@pytest.mark.parametrize(
+    ("why", "setup"),
+    [
+        ("does not match its SHA-256", lambda b: dataclasses.replace(b, sha256="0" * 64)),
+        ("lacks libx265", lambda b: b),
+    ],
+)
+def test_a_build_that_fails_a_check_changes_nothing(
+    tmp_path: Path, why: str, setup: Callable[[install.Build], install.Build]
+) -> None:
+    tools = tmp_path / "tools"
+    (tools / "ffmpeg").mkdir(parents=True)
+    (tools / "ffmpeg" / "kept").write_text("what was there")
+    runner = Programs(" V....D libx264  x\n V....D libaom-av1  x\n")
+    build = setup(pinned(FFMPEG_ZIP))
+    with pytest.raises(SetupError, match=why):
+        install.install_build(build, tools, runner, Http(FFMPEG_ZIP), said()[1])
+    assert [p.name for p in tools.iterdir()] == ["ffmpeg"]
+    assert (tools / "ffmpeg" / "kept").read_text() == "what was there"
+
+
+def test_a_build_that_does_not_run_says_so(tmp_path: Path) -> None:
+    runner = FakeRunner(())
+    staged = tmp_path / "tools" / ".install-caddy" / "staged" / "caddy" / "caddy.exe"
+    runner.on(str(staged), returncode=1, stderr="This app can't run on your PC")
+    data = a_zip({"caddy.exe": b"caddy", "LICENSE": b"Apache"})
+    with pytest.raises(SetupError, match=r"the new caddy\.exe does not run here: This app"):
+        install.install_build(
+            pinned(data, install.CADDY), tmp_path / "tools", runner, Http(data), said()[1]
+        )
+
+
+def running(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """`name` runs: Windows does not open it for writing."""
+    real = Path.open
+
+    def open_(path: Path, mode: str = "r", *args: object, **kw: object) -> object:
+        if path.name == name and mode == "r+b":
+            raise PermissionError(32, "The process cannot access the file")
+        return real(path, mode, *args, **kw)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", open_)
+
+
+def test_a_running_program_is_found_before_anything_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    (tools / "caddy").mkdir(parents=True)
+    (tools / "caddy" / "caddy.exe").write_bytes(b"old")
+    (tools / "caddy" / install.MARKER).write_text("{}")
+    assert install.in_use(tools / "caddy") is None and install.in_use(tmp_path / "no") is None
+    running(monkeypatch, "caddy.exe")
+    assert install.in_use(tools / "caddy") == "caddy.exe"
+    data = a_zip({"caddy.exe": b"new", "LICENSE": b"Apache"})
+    with pytest.raises(SetupError, match=r"caddy\.exe is running: stop the stream"):
+        install.install_build(pinned(data, install.CADDY), tools, Programs(), Http(data), said()[1])
+    with pytest.raises(SetupError, match=r"\(caddy was left as it was\)"):
+        install.uninstall(tools)
+    assert (tools / "caddy" / "caddy.exe").read_bytes() == b"old"
+    assert [p.name for p in tools.iterdir()] == ["caddy"]
+
+
+def test_too_little_room_is_seen_before_the_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http = Http(FFMPEG_ZIP)
+    monkeypatch.setattr(
+        install.shutil, "disk_usage", lambda p: types.SimpleNamespace(free=5_000_000)
+    )
+    with pytest.raises(SetupError, match="has 5 MB free; it needs 314 MB"):
+        install.install_build(install.FFMPEG, tmp_path / "tools", FakeRunner(()), http, said()[1])
+    assert http.urls == []
+
+
+def test_what_an_install_left_is_swept(tmp_path: Path) -> None:
+    tools = tmp_path / "tools"
+    for name in (".install-ffmpeg", ".old-caddy", "caddy"):
+        (tools / name).mkdir(parents=True)
+    install.sweep(tools)
+    assert [p.name for p in tools.iterdir()] == ["caddy"]
+    install.sweep(tmp_path / "none")
+
+
+# --- MKVToolNix
+
+
+def test_mkvtoolnix_comes_from_winget(tmp_path: Path) -> None:
+    runner = FakeRunner(("winget",))
+    assert install.install_mkvtoolnix(runner, Http(b""), tmp_path, said()[1]).endswith("winget)")
+    (call,) = runner.calls
+    assert call[:5] == ["winget", "install", "--id", "MoritzBunkus.MKVToolNix", "--exact"]
+    assert "--silent" in call and "--accept-package-agreements" in call
+    runner.on("winget", returncode=1, stdout="No package found")
+    with pytest.raises(SetupError, match="winget could not install MKVToolNix: No package"):
+        install.install_mkvtoolnix(runner, Http(b""), tmp_path, said()[1])
+
+
+def test_without_winget_mkvtoolnix_comes_from_its_pinned_installer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = b"MZ installer"
+    monkeypatch.setattr(install, "MKVTOOLNIX_SETUP", pinned(setup, install.MKVTOOLNIX_SETUP))
+    runner = FakeRunner(())
+    tools = tmp_path / "O'Brien" / "tools"
+    assert install.install_mkvtoolnix(runner, Http(setup), tools, said()[1]).startswith(
+        "MKVToolNix 102.0"
+    )
+    (call,) = runner.calls
+    assert call[:4] == ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+    exe = tools / ".install-mkvtoolnix" / "mkvtoolnix-setup.exe"
+    assert shortcut.quote(exe) in call[4] and "O''Brien" in call[4]
+    assert "-ArgumentList '/S' -Verb RunAs -Wait" in call[4]
+    assert not (tools / ".install-mkvtoolnix").exists()
+
+
+# --- what is missing, uninstall
+
+
+def test_what_is_missing_is_installed_when_nothing_is_named() -> None:
+    assert install.missing(FakeRunner(("ffmpeg", "ffprobe", "caddy", "mkvmerge"))) == []
+    assert install.missing(FakeRunner(("ffmpeg", "mkvmerge"))) == ["ffmpeg", "caddy"]
+
+
+def test_uninstall_removes_only_what_vpstream_installed(tmp_path: Path) -> None:
+    tools = tmp_path / "tools"
+    for top in ("ffmpeg", "caddy"):
+        (tools / top).mkdir(parents=True)
+    (tools / "ffmpeg" / install.MARKER).write_text("{}")
+    (tools / ".old-ffmpeg").mkdir()
+    assert install.uninstall(tools) == [f"ffmpeg ({tools / 'ffmpeg'})"]
+    assert [p.name for p in tools.iterdir()] == ["caddy"]  # not marked: not vpstream's
+    (tools / "caddy").rmdir()
+    assert install.uninstall(tools) == [] and not tools.exists()
+
+
+def test_the_plan_names_what_is_downloaded(tmp_path: Path) -> None:
+    text = install.plan_text(["ffmpeg", "mkvtoolnix"], tmp_path)
+    assert f"ffmpeg 9.0.2 (114 MB) into {tmp_path / 'ffmpeg'}" in text
+    assert "MKVToolNix, with winget" in text
+
+
+# --- the desktop icon
+
+
+def test_powershell_strings_are_taken_as_they_are() -> None:
+    assert shortcut.quote("C:\\Users\\O'Brien\\$x") == "'C:\\Users\\O''Brien\\$x'"
+
+
+def test_the_icon_runs_the_window_without_a_console(tmp_path: Path) -> None:
+    assert shortcut.pythonw("C:\\Py\\python.exe").name == "pythonw.exe"
+    runner = FakeRunner(())
+    runner.on("powershell", stdout="C:\\Users\\ana\\Desktop\\vpstream.lnk\r\n")
+    assert (
+        shortcut.create(runner, Path("C:/Py/pythonw.exe"))
+        == "C:\\Users\\ana\\Desktop\\vpstream.lnk"
+    )
+    script = runner.calls[0][4]
+    assert "GetFolderPath('Desktop')" in script and "'vpstream.lnk'" in script
+    assert f"$s.TargetPath = {shortcut.quote(Path('C:/Py/pythonw.exe'))}" in script
+    assert "$s.Arguments = '-P -m vpstream'" in script
+    assert f"{shortcut.ICON},0" in script and shortcut.ICON.is_file()
+
+
+def test_only_vpstreams_icon_is_removed() -> None:
+    assert "if ($s.Arguments -eq '-P -m vpstream') { Remove-Item" in shortcut.REMOVE_SCRIPT
+    runner = FakeRunner(())
+    assert shortcut.remove(runner) == ""
+    runner.on("powershell", returncode=1, stderr="Access denied")
+    with pytest.raises(SetupError, match="could not be removed: Access denied"):
+        shortcut.remove(runner)
+
+
+# --- the commands
+
+
+def test_the_windows_commands_are_only_on_windows(
+    on_windows: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(windows, "prepare_process", lambda: None)
+    with pytest.raises(SystemExit):
+        cli.main(["windows-install", "--help"])
+    assert "every one that is missing" in capsys.readouterr().out
+    assert "windows-install" not in cli.build_parser().format_help()
+
+
+def test_the_progress_on_a_terminal_is_a_line_a_tenth(capsys: pytest.CaptureFixture[str]) -> None:
+    show = commands.Printed()
+    show("unpacking", 0, 0)
+    for done in range(0, 101, 5):
+        show("downloading caddy", done * 1_000_000, 100_000_000)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:3] == [
+        "... unpacking",
+        "... downloading caddy",
+        "... downloading caddy: 10 of 100 MB",
+    ]
+    assert len(lines) == 12
+
+
+@pytest.fixture
+def faked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    done: list[str] = []
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr("vpstream.tools.SystemRunner", lambda: FakeRunner(("mkvmerge",)))
+    monkeypatch.setattr(install, "install_build", lambda b, *a: done.append(b.name) or "ok")
+    monkeypatch.setattr(install, "install_mkvtoolnix", lambda *a: done.append("mkv") or "ok")
+    monkeypatch.setattr(shortcut, "create", lambda runner: done.append("icon") or "D:\\i.lnk")
+    return done
+
+
+def test_install_with_no_program_installs_what_is_missing(
+    faked: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked: list[str] = []
+
+    def yes(question: str, given: bool) -> bool:
+        asked.append(question)
+        return True
+
+    args = argparse.Namespace(programs=[], yes=False)
+    assert commands.cmd_install(args, yes) == 0
+    assert faked == ["ffmpeg", "caddy", "icon"]  # mkvmerge is there
+    assert "ffmpeg 9.0.2" in asked[0] and "caddy 2.11.9" in asked[0]
+    assert "The desktop icon is at D:\\i.lnk" in capsys.readouterr().out
+
+
+def test_install_says_when_mkvtoolnix_is_there(
+    faked: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = argparse.Namespace(programs=["mkvtoolnix"], yes=True)
+    assert commands.cmd_install(args, lambda q, y: y) == 0
+    assert faked == ["icon"]
+    assert "MKVToolNix is already installed: /usr/bin/mkvmerge" in capsys.readouterr().out
+
+
+def test_install_refuses_what_it_does_not_know(
+    faked: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = argparse.Namespace(programs=["vlc"], yes=True)
+    assert commands.cmd_install(args, lambda q, y: y) == 2
+    assert "cannot install vlc: choose from ffmpeg, caddy, mkvtoolnix" in capsys.readouterr().err
+
+
+def test_a_no_installs_nothing(faked: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    assert commands.cmd_install(argparse.Namespace(programs=[], yes=False), lambda q, y: False) == 1
+    assert faked == [] and "nothing was changed" in capsys.readouterr().out
+
+
+def test_one_failure_does_not_stop_the_rest(
+    faked: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail(build: install.Build, *a: object) -> str:
+        raise SetupError("cannot download it")
+
+    monkeypatch.setattr(install, "install_build", fail)
+    args = argparse.Namespace(programs=["ffmpeg", "mkvtoolnix"], yes=True)
+    assert commands.cmd_install(args, lambda q, y: y) == 1
+    assert "error: ffmpeg: cannot download it" in capsys.readouterr().err
+    assert faked == ["icon"]
+
+
+def test_uninstall_says_what_it_removed_and_what_it_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr("vpstream.tools.SystemRunner", lambda: FakeRunner(()))
+    monkeypatch.setattr(shortcut, "remove", lambda runner: "D:\\i.lnk")
+    (tmp_path / "vpstream" / "tools" / "caddy").mkdir(parents=True)
+    (tmp_path / "vpstream" / "tools" / "caddy" / install.MARKER).write_text("{}")
+    assert commands.cmd_uninstall(argparse.Namespace(yes=True), lambda q, y: y) == 0
+    out = capsys.readouterr().out
+    assert "removed caddy" in out and "removed the desktop icon (D:\\i.lnk)" in out
+    assert "winget uninstall MoritzBunkus.MKVToolNix" in out
+    assert commands.cmd_uninstall(argparse.Namespace(yes=False), lambda q, y: False) == 1
+
+
+# --- doctor
+
+
+def test_doctor_says_which_programs_vpstream_installed_and_which_are_old(tmp_path: Path) -> None:
+    from vpstream.platform.windows import doctor
+
+    tools = tmp_path / "tools"
+    (tools / "caddy").mkdir(parents=True)
+    (tools / "caddy" / install.MARKER).write_text('{"version": "2.10.0"}')
+    (tools / "ffmpeg" / "bin").mkdir(parents=True)
+    (tools / "ffmpeg" / install.MARKER).write_text('{"version": "9.0.2"}')
+
+    class Found(FakeRunner):
+        def which(self, name: str) -> str | None:
+            folder = {"caddy": tools / "caddy", "mkvmerge": Path("C:/elsewhere")}
+            return str(folder.get(name, tools / "ffmpeg" / "bin") / f"{name}.exe")
+
+    checks = {c.name: c for c in doctor.check_tools(Found(()), "", tools)}
+    assert checks["ffmpeg"].status == "ok" and checks["ffmpeg"].detail.endswith(
+        "(vpstream's 9.0.2)"
+    )
+    assert checks["caddy"].status == "warning"
+    assert checks["caddy"].detail.endswith("(vpstream's 2.10.0; 2.11.9 is out)")
+    assert checks["caddy"].fix == "vpstream windows-install caddy"
+    assert checks["mkvmerge"].status == "ok" and "vpstream's" not in checks["mkvmerge"].detail

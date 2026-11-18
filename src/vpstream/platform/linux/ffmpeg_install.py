@@ -22,6 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Shared with Windows' installer; still named from here by the tests.
+from vpstream.ffargs import REQUIRED_ENCODERS as REQUIRED_ENCODERS
+from vpstream.ffargs import REQUIRED_FILTERS as REQUIRED_FILTERS
+from vpstream.ffargs import missing_features as missing_features
 from vpstream.ffargs import parse_ffmpeg_list
 from vpstream.files import read_json_object
 from vpstream.platform.linux.system_install import APT_GET, Cancelled, Installer, SetupError
@@ -47,9 +51,6 @@ APT_PACKAGES = (
     "fonts-liberation",
     "fonts-noto-cjk",
 )
-# What bench, caps and prepare use; each tuple needs one of its names.
-REQUIRED_ENCODERS = (("libx264",), ("libx265",), ("libsvtav1", "libaom-av1"))
-REQUIRED_FILTERS = ("overlay", "scale2ref", "subtitles", "tonemap", "zscale")
 INSTALLED_BYTES = 300_000_000  # ffmpeg and ffprobe, unpacked
 
 _ASSET = re.compile(
@@ -150,11 +151,6 @@ def parse_checksums(text: str) -> dict[str, str]:
         if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
             sums[parts[1].lstrip("*")] = parts[0]
     return sums
-
-
-def missing_features(encoders: set[str], filters: set[str]) -> list[str]:
-    missing = [" or ".join(alts) for alts in REQUIRED_ENCODERS if not set(alts) & encoders]
-    return missing + [f for f in REQUIRED_FILTERS if f not in filters]
 
 
 def glibc_problem(confstr: str | None) -> str | None:
