@@ -19,6 +19,7 @@ import os
 import pwd
 import re
 import shlex
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,9 @@ from pathlib import Path
 from vpstream import media
 from vpstream.files import read_json_object, write_atomic
 from vpstream.tools import Runner, require, tail
+
+if sys.platform == "win32":
+    raise ImportError("vpstream.platform.linux is for Linux; Windows has platform.windows")
 
 TOOL = "setfacl"
 READ_TOOL = "getfacl"  # from the same package

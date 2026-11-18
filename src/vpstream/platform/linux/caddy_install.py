@@ -15,6 +15,7 @@ before: a stopped one is stopped again, so it never holds the port Let's Encrypt
 from __future__ import annotations
 
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,9 @@ from pathlib import Path
 from vpstream import caddy
 from vpstream.platform.linux.system_install import APT_GET, Cancelled, Installer, SetupError
 from vpstream.tools import tail
+
+if sys.platform == "win32":
+    raise ImportError("vpstream.platform.linux is for Linux; Windows has platform.windows")
 
 REPOSITORY = "https://dl.cloudsmith.io/public/caddy/stable"
 KEY_URL = f"{REPOSITORY}/gpg.key"

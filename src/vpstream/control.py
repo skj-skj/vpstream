@@ -3,6 +3,7 @@ and the state file. The command line and the dashboard both end up here."""
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -805,6 +806,6 @@ def _apply(device: gate.Device, values: dict[str, Any], video: int | None, now: 
 def _path_option(options: dict[str, Any]) -> str | None:
     """The `path` of a request about prepares, which must be a full path, or None."""
     path = options.get("path")
-    if path is not None and not (isinstance(path, str) and path.startswith("/")):
+    if path is not None and not (isinstance(path, str) and os.path.isabs(path)):
         raise StreamError(f"give the full path of a file or a folder: {path!r}")
     return path

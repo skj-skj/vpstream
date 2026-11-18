@@ -27,6 +27,9 @@ from vpstream.files import read_json_object
 from vpstream.platform.linux.system_install import APT_GET, Cancelled, Installer, SetupError
 from vpstream.tools import Runner, tail
 
+if sys.platform == "win32":
+    raise ImportError("vpstream.platform.linux is for Linux; Windows has platform.windows")
+
 REPO = "FFmpeg-Builds/FFmpeg-Builds"  # formerly BtbN/FFmpeg-Builds
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases?per_page=10"
 PROGRAMS = ("ffmpeg", "ffprobe")

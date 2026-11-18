@@ -49,6 +49,15 @@ def on_termux(on_linux: None) -> None:
     platform.override(platform.TERMUX)
 
 
+@pytest.fixture
+def on_windows(on_linux: None) -> None:
+    """Act as on Windows: what the code decides there. What only a real Windows has
+    (ctypes.windll, netsh) is faked in each test, or tested on Windows."""
+    from vpstream import platform
+
+    platform.override(platform.WINDOWS)
+
+
 @pytest.fixture(autouse=True)
 def quick_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
     """The daemon's servers in a test notice a shutdown within 0.05 s, where werkzeug looks

@@ -139,10 +139,15 @@ ROOT_ENV = "VPSTREAM_ROOT"
 
 def default_paths() -> Paths:
     """The real paths, or the same layout under $VPSTREAM_ROOT for trying things out. On
-    Termux they are the person's own (see `platform.termux.paths`)."""
+    Termux and Windows they are the person's own (see `platform.termux.paths`,
+    `platform.windows.paths`)."""
     root = os.environ.get(ROOT_ENV)
     if root:
         return Paths.under(Path(root))
+    if platform.is_windows():
+        from vpstream.platform import windows
+
+        return Paths(*windows.paths())
     if platform.is_termux():
         from vpstream.platform import termux
 
@@ -200,7 +205,7 @@ _KEYS = {
     ("prepare", "encode_speed"): "encode_speed",
     ("media", "folder"): "media_folder",
 }
-# Only where local mode is set in the file (Termux).
+# Only where local mode is set in the file (Termux, Windows).
 _LOCAL_KEYS = {
     ("network", "mode"): "local",
     ("network", "address"): "local_address",
@@ -217,10 +222,10 @@ TERMUX_LIMITS = {
     "caddy_memory_mb": 192,
     "prepare_threads": 4,
 }
-# What Termux cannot do: it has no public address, no firewall and no port 80.
+# What Termux and Windows cannot do: they serve the local network only, over plain HTTP.
 _NOT_LOCAL = {
-    "dashboard_public": "the dashboard is on the local network only on Termux",
-    "stream_https": "streams are served over plain HTTP on the local network on Termux",
+    "dashboard_public": "the dashboard is on the local network only on {where}",
+    "stream_https": "streams are served over plain HTTP on the local network on {where}",
 }
 TERMUX_MEDIA = "/storage/emulated/0/Movies"
 
@@ -352,7 +357,8 @@ def _local_address_problem(name: str, value: Any) -> str | None:
 
 def _mode_problem(name: str, value: Any) -> str | None:
     if value != "local":
-        return f'{name} must be "local" (Termux serves the local network only), not {value!r}'
+        where = "Windows" if platform.is_windows() else "Termux"
+        return f'{name} must be "local" ({where} serves the local network only), not {value!r}'
     return None
 
 
@@ -363,8 +369,9 @@ def _bool_problem(name: str, value: Any) -> str | None:
 
 
 def _folder_problem(name: str, value: Any) -> str | None:
-    if not isinstance(value, str) or not value.startswith("/") or "\0" in value:
-        return f"{name} must be a full path, starting with /, not {value!r}"
+    if not isinstance(value, str) or not os.path.isabs(value) or "\0" in value:
+        start = ", starting with /" if os.sep == "/" else ""
+        return f"{name} must be a full path{start}, not {value!r}"
     return None
 
 
@@ -412,11 +419,14 @@ _CHECKS = {
 def parse(text: str, local_keys: bool | None = None) -> Config:
     """Read configuration text. Missing keys take their defaults; unknown keys are errors.
 
-    `[network]`, local mode, is read only with `local_keys` (by default: on Termux, where it
-    is always on). Elsewhere it is an unknown setting: Linux sets it with `init --local`.
+    `[network]`, local mode, is read only with `local_keys` (by default: on Termux and
+    Windows, where it is always on). Elsewhere it is an unknown setting: Linux sets it with
+    `init --local`. Termux's own defaults (TERMUX_LIMITS, its media folder) are not
+    Windows': a PC is not a phone.
     """
-    termux = platform.is_termux() if local_keys is None else local_keys
-    keys = {**_KEYS, **_LOCAL_KEYS} if termux else _KEYS
+    windows = platform.is_windows()
+    local = platform.per_user() if local_keys is None else local_keys
+    keys = {**_KEYS, **_LOCAL_KEYS} if local else _KEYS
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -434,12 +444,14 @@ def parse(text: str, local_keys: bool | None = None) -> Config:
                 problems.append(f"unknown setting {name!r}")
             elif problem := _CHECKS.get(field, _port_problem)(name, value):
                 problems.append(problem)
-            elif termux and value is True and field in _NOT_LOCAL:
-                problems.append(f"{name} cannot be true: {_NOT_LOCAL[field]}")
+            elif local and value is True and field in _NOT_LOCAL:
+                why = _NOT_LOCAL[field].format(where="Windows" if windows else "Termux")
+                problems.append(f"{name} cannot be true: {why}")
             else:
                 values[field] = value
-    if termux:
+    if local:
         values["local"] = True  # `mode` says so, or is left out
+    if local and not windows:
         values.setdefault("media_folder", TERMUX_MEDIA)
         values = {**TERMUX_LIMITS, **values}
     config = Config(**values)

@@ -537,6 +537,8 @@ def cmd_clients(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
+    if sys.platform == "win32":  # main refuses it there; this tells the type checker
+        return _error("the daemon is for Linux and Termux", 2)
     from vpstream import config, daemon
     from vpstream.platform.linux import firewall
     from vpstream.tools import SystemRunner
@@ -665,7 +667,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         if _given(args) and not (public or args.local):
             return _error("a password is for the public dashboard only (--no-tailscale)", 2)
         # Not asked for a password that a refusal for want of root would throw away.
-        ask = os.geteuid() == 0 and (
+        ask = _is_root() and (
             svc.wants_password(public, True) if args.local else svc.wants_password(public)
         )
         password = _password(args, ask)
@@ -698,7 +700,7 @@ def cmd_dash_pass(args: argparse.Namespace) -> int:
         return 0
     from vpstream.platform.linux import service
 
-    if os.geteuid() != 0:
+    if not _is_root():
         return _error("this needs root: sudo vpstream dash-pass")
     try:
         password = _password(args, ask=True)
@@ -746,7 +748,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
     what = "the vpstream service, its user, configuration and state"
     what += ", every prepared video and the ffmpeg it installed" if args.purge else ""
-    if os.geteuid() == 0 and not args.yes:
+    if _is_root() and not args.yes:
         if not sys.stdin.isatty():
             return _error("no terminal to ask on; pass --yes to proceed", 2)
         if not _ask(f"Remove {what} from this host?"):
@@ -1068,9 +1070,35 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _is_root() -> bool:
+    """Linux: whether this runs as root. (Windows never gets this far: see main.)"""
+    return sys.platform != "win32" and os.geteuid() == 0
+
+
+def _on_windows() -> bool:
+    try:
+        return platform.is_windows()
+    except platform.Unsupported:
+        return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    windows = _on_windows()
+    if windows:
+        from vpstream.platform.windows import prepare_process
+
+        prepare_process()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if windows:
+        from vpstream.platform.windows import commands
+
+        if (refused := commands.refusal(args.command)) is not None:
+            return _error(refused, 2)
+        if args.command is None:
+            return commands.open_window()
+        if args.command == "doctor":
+            return commands.doctor()
     if not getattr(args, "func", None):
         parser.print_help()
         return 2

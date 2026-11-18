@@ -31,6 +31,9 @@ from vpstream.files import write_atomic
 from vpstream.platform.common import FirewallError
 from vpstream.tools import Result, Runner, SystemRunner, tail
 
+if sys.platform == "win32":
+    raise ImportError("vpstream.platform.linux is for Linux; Windows has platform.windows")
+
 HELPER_NAME = "vpstream-fw"
 STREAM_ACTIONS = ("open", "close")
 DASHBOARD_ACTIONS = ("dash-open", "dash-close")
