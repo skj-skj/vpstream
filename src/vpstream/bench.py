@@ -8,6 +8,7 @@ import platform
 import re
 import resource
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -24,12 +25,16 @@ from vpstream.ffargs import (
     base_hls,
     burn_hls,
     copy_ok,
+    escape_filter_path,
 )
 from vpstream.files import dir_size
 from vpstream.prepare import load_factor
 from vpstream.probe import BURNED_IN, MediaInfo, SubtitleTrack, probe
 from vpstream.subtitles import filter_source
 from vpstream.tools import Runner, ffmpeg_names, low_priority_prefix, require
+
+if sys.platform == "win32":
+    raise ImportError("vpstream bench runs on Linux and Termux")
 
 # Builds a step's ffmpeg command for the folder it should write into.
 ArgsBuilder = Callable[[Path], list[str]]
@@ -273,6 +278,7 @@ def benchmark(
             image = burn.kind == "image"
             try:
                 link = filter_source(work, source)
+                escape_filter_path(link)  # bench names it in full (prepare need not)
             except (OSError, ValueError) as exc:
                 skip(
                     f"burn-in {preset}",

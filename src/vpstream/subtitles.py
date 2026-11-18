@@ -97,17 +97,28 @@ def extract_webvtt(runner: Runner, src: str, track: SubtitleTrack, out: Path) ->
 
 def filter_source(work: Path, path: Path) -> Path:
     """Link the source to a plain name in `work`, because ffmpeg's subtitles filter reads
-    the file by a name that goes into the filter graph (see `ffargs.escape_filter_path`).
+    the file by a name that goes into the filter graph (see `ffargs.escape_filter_path`
+    and `filter_path`).
 
-    Raises ValueError or OSError when `work` cannot be used for this.
+    Raises OSError when the link cannot be made.
     """
     link = work / ("source" + path.suffix.lower())
     if not re.fullmatch(r"\.[a-z0-9]+", link.suffix):
         link = work / "source"
-    escape_filter_path(link)
     link.unlink(missing_ok=True)
     os.symlink(path.resolve(), link)
     return link
+
+
+def filter_path(link: Path) -> tuple[Path, Path | None]:
+    """How the filter graph names `link`: by its full path when that is plain enough for it,
+    else by its plain name alone, with ffmpeg run in its folder (returned second). A path
+    such as C:\\Users\\Ana María\\... is not (the drive's colon, backslashes, a space)."""
+    try:
+        escape_filter_path(link)
+    except ValueError:
+        return Path(link.name), link.parent
+    return link, None
 
 
 _CUE_TIME = re.compile(r"(?:(\d+):)?([0-5]\d):([0-5]\d)\.(\d{3})")

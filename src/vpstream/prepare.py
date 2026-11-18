@@ -550,7 +550,7 @@ class Preparer:
             self._filters = ffmpeg_names(self.runner, "filters")
         return set(names) <= self._filters
 
-    def _ffmpeg(self, job: Job, args: list[str]) -> None:
+    def _ffmpeg(self, job: Job, args: list[str], cwd: Path | None = None) -> None:
         program = require(self.runner, "ffmpeg", "prepare")
 
         def seen(line: str) -> None:
@@ -559,7 +559,9 @@ class Preparer:
                 job.done_seconds = at
 
         full = ffargs.with_progress([program, *ffargs.thread_args(self.settings), *args[1:]])
-        code, output = run_cancellable([*low_priority_prefix(self.runner), *full], job.cancel, seen)
+        code, output = run_cancellable(
+            [*low_priority_prefix(self.runner), *full], job.cancel, seen, cwd=cwd
+        )
         if code != 0:
             raise PrepareError(f"ffmpeg failed (exit {code}): {ffmpeg_errors(output)}")
 
@@ -623,7 +625,7 @@ class Preparer:
         _fresh(part)
         _fresh(work)
         try:
-            link = subtitles.filter_source(work, Path(job.source))
+            link, cwd = subtitles.filter_path(subtitles.filter_source(work, Path(job.source)))
             args = ffargs.burn_hls(
                 job.source,
                 part,
@@ -634,7 +636,7 @@ class Preparer:
                 tonemap=v.hdr and self._has_filters("zscale", "tonemap"),
                 settings=self.settings,
             )
-            self._ffmpeg(job, args)
+            self._ffmpeg(job, args, cwd)
             own = prepared.master(part)
             if not own.is_file():
                 raise PrepareError("ffmpeg wrote no playlist")

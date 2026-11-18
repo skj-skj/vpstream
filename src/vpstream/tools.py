@@ -8,6 +8,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from vpstream.ffargs import parse_ffmpeg_list
@@ -126,11 +127,13 @@ def run_cancellable(
     cancel: threading.Event,
     on_line: Callable[[str], None] | None = None,
     poll: float = POLL_SECONDS,
+    cwd: Path | None = None,
 ) -> tuple[int, str]:
     """Run a long program until it ends or `cancel` is set.
 
     Its output (standard output and errors together) is read line by line as it comes and
-    each line goes to `on_line`. Returns the exit code and the last lines of the output.
+    each line goes to `on_line`; it runs in `cwd`, or where this process is. Returns the exit
+    code and the last lines of the output.
     Raises Cancelled, after the program has ended, when `cancel` was set first.
     """
     proc = subprocess.Popen(
@@ -140,6 +143,7 @@ def run_cancellable(
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
+        cwd=cwd,
     )
     last: collections.deque[str] = collections.deque(maxlen=OUTPUT_LINES)
 
