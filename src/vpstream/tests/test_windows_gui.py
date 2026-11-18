@@ -263,9 +263,11 @@ def test_the_jobs_of_the_chosen_videos() -> None:
     mine = model.jobs_of(jobs, ["film.mkv"])
     assert [model.job_line(j) for j in mine] == [
         "film.mkv: base version (copy), 42%, about 30s left",
-        "film.mkv: subtitle 5 (burned in): queued",
+        "film.mkv: subtitle 5 (burned in): waits for the one before",
     ]
     assert model.busy(mine) and not model.busy([{"state": "done"}])
+    starting = {"name": "a", "task": "t", "state": "running", "progress": 0.0}
+    assert model.job_line(starting) == "a: t: starting..."
     failed = {"name": "a", "task": "t", "state": "failed", "error": "ffmpeg failed"}
     assert model.job_line(failed) == "a: t: failed: ffmpeg failed"
 

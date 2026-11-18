@@ -31,6 +31,7 @@ class PreparePanel:
         self.subs: list[model.Track] = []
         self.checks: dict[int, tk.BooleanVar] = {}
         self.was_busy = False
+        self.job_rows: dict[tuple[str, str], tuple[ttk.Frame, ttk.Label, JobBar]] = {}
         row = ttk.Frame(self.frame)
         row.pack(fill="x", padx=8, pady=2)
         ttk.Label(row, text="Audio it starts with").pack(side="left")
@@ -112,7 +113,8 @@ class PreparePanel:
         for child in self.sub_box.winfo_children():
             child.destroy()
         self.checks = {}
-        for track in self.subs:
+        rows = (len(self.subs) + 1) // 2  # two columns: a file with many tracks fits
+        for at, track in enumerate(self.subs):
             var = tk.BooleanVar(value=False)
             self.checks[track.number] = var
             box = ttk.Checkbutton(
@@ -120,9 +122,9 @@ class PreparePanel:
             )
             if track.how == "unsupported":
                 box.state(["disabled"])  # type: ignore[no-untyped-call]
-            box.pack(anchor="w")
+            box.grid(row=at % rows, column=at // rows, sticky="w", padx=(0, 16))
         if not self.subs:
-            ttk.Label(self.sub_box, text="(this video has none)").pack(anchor="w")
+            ttk.Label(self.sub_box, text="(this video has none)").grid(row=0, column=0)
         self._subs_changed(plan=False)
 
     def _subs_changed(self, plan: bool = True) -> None:
@@ -162,22 +164,76 @@ class PreparePanel:
     def show(self, status: dict[str, Any]) -> None:
         names = [p["name"] for p in self.plans]
         jobs = model.jobs_of(status.get("prepare") or [], names)
-        for child in self.jobs.winfo_children():
-            child.destroy()
-        for job in jobs:
-            row = ttk.Frame(self.jobs)
-            row.pack(fill="x", pady=1)
-            ttk.Label(row, text=model.job_line(job), width=60).pack(side="left")
-            bar = ttk.Progressbar(row, length=180, maximum=1.0, value=job.get("progress") or 0)
-            bar.pack(side="left", padx=8)
+        # Each job keeps its row; only what it says changes. Rows made again every second
+        # make the window shrink and grow, which flickers.
+        keys = [(job["name"], job["task"]) for job in jobs]
+        for key in [k for k in self.job_rows if k not in keys]:
+            self.job_rows.pop(key)[0].destroy()
+        for key, job in zip(keys, jobs, strict=True):
+            if key not in self.job_rows:
+                row = ttk.Frame(self.jobs)
+                row.pack(fill="x", pady=1)
+                label = ttk.Label(row, width=60)
+                label.pack(side="left")
+                bar = JobBar(row)
+                self.job_rows[key] = (row, label, bar)
+            _, label, bar = self.job_rows[key]
+            line = model.job_line(job)
+            if label.cget("text") != line:
+                label.configure(text=line)
+            bar.show(str(job.get("state")), float(job.get("progress") or 0))
         now_busy = model.busy(jobs)
         if now_busy:
             self.prepare_button.state(["disabled"])  # type: ignore[no-untyped-call]
         else:
             self.prepare_button.state(["!disabled"])  # type: ignore[no-untyped-call]
+        if now_busy and not self.was_busy:
+            self.left.configure(text="Preparing: the bars below show each part.")
         if self.was_busy and not now_busy:
+            self.window.say("Prepared.")
             self.plan()  # done: is it ready now?
         self.was_busy = now_busy
+
+
+class JobBar:
+    """A job's bar. It moves while ffmpeg has not said how far it is yet (a busy bar), then
+    glides to each new value, 25 times a second, where the poll brings one a second."""
+
+    STEP_MS = 40
+
+    def __init__(self, parent: tk.Misc) -> None:
+        self.bar = ttk.Progressbar(parent, length=180, maximum=1.0)
+        self.bar.pack(side="left", padx=8)
+        self.target = self.value = 0.0
+        self.busy = False
+        self.gliding = False
+
+    def show(self, state: str, progress: float) -> None:
+        busy = state == "running" and progress <= 0.0
+        if busy != self.busy:
+            self.busy = busy
+            if busy:
+                self.bar.configure(mode="indeterminate")
+                self.bar.start(15)
+            else:
+                self.bar.stop()
+                self.bar.configure(mode="determinate", value=self.value)
+        self.target = 1.0 if state == "done" else progress
+        if not busy and not self.gliding:
+            self.gliding = True
+            self.bar.after(self.STEP_MS, self._glide)
+
+    def _glide(self) -> None:
+        if not self.bar.winfo_exists() or self.busy:
+            self.gliding = False
+            return
+        gap = self.target - self.value
+        self.value = self.target if abs(gap) < 0.002 else self.value + gap * 0.2
+        self.bar.configure(value=self.value)
+        if self.value == self.target:
+            self.gliding = False
+        else:
+            self.bar.after(self.STEP_MS, self._glide)
 
 
 class PlayerPanel:

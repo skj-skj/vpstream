@@ -93,6 +93,7 @@ class Window:
         self.closing = False
         self.destroyed = False
         self.starting = False
+        self.sized = False  # the window keeps its size once shown (see _fit)
         root.title("vpstream")
         root.minsize(820, 640)
         with contextlib.suppress(tk.TclError):
@@ -108,6 +109,15 @@ class Window:
     def _build(self) -> None:
         top = ttk.Frame(self.root)
         top.pack(fill="both", expand=True)
+        # The bottom line first: what is packed first keeps its room when the window is
+        # too small for everything (the rest is cut, never the status and the log).
+        bottom = ttk.Frame(top)
+        bottom.pack(fill="x", side="bottom", padx=PX, pady=PY)
+        self.said = ttk.Label(bottom, text="Starting...", wraplength=520)
+        self.said.pack(side="left")
+        ttk.Button(bottom, text="Open log", command=self._open_log).pack(side="right")
+        ttk.Label(bottom, text=f"Log: {self.log_path}", foreground="#555").pack(side="right")
+        ttk.Label(bottom, text=f"vpstream {__version__}").pack(side="right", padx=8)
         self.notice = ttk.Label(top, foreground="#b00020", wraplength=680, justify="left")
         self.notice.pack(fill="x", padx=PX, pady=PY)
         self.warn_box = ttk.Frame(top)
@@ -187,14 +197,6 @@ class Window:
         self.new_alias = tk.StringVar()
         ttk.Entry(row, textvariable=self.new_alias, width=16).pack(side="right")
         self.players = browser.PlayerPanel(self.live, self)
-
-        bottom = ttk.Frame(top)
-        bottom.pack(fill="x", side="bottom", padx=PX, pady=PY)
-        self.said = ttk.Label(bottom, text="Starting...", wraplength=520)
-        self.said.pack(side="left")
-        ttk.Button(bottom, text="Open log", command=self._open_log).pack(side="right")
-        ttk.Label(bottom, text=f"Log: {self.log_path}", foreground="#555").pack(side="right")
-        ttk.Label(bottom, text=f"vpstream {__version__}").pack(side="right", padx=8)
 
     # --- the window's own thread
 
@@ -523,6 +525,7 @@ class Window:
         if status is None or self.closing:
             return
         self.status = status
+        self.root.after_idle(self._fit)
         if self.browser_mode():
             self.prepare.show(status)
         running = status.get("stream")
@@ -550,12 +553,37 @@ class Window:
         self.lines.configure(text="\n".join(model.stream_lines(status)))
         rows = model.device_rows(running, status.get("now"))
         chosen = set(self.devices.selection())
-        self.devices.delete(*self.devices.get_children())
-        for row in rows:
-            self.devices.insert("", "end", iid=row.id, values=row.cells)
-        self.devices.selection_set([r.id for r in rows if r.id in chosen])
+        # Rows are changed where they are, not made again: no flicker, the selection stays.
+        ids = [row.id for row in rows]
+        gone = [i for i in self.devices.get_children() if i not in ids]
+        if gone:
+            self.devices.delete(*gone)
+        for at, row in enumerate(rows):
+            if self.devices.exists(row.id):
+                if tuple(self.devices.item(row.id, "values")) != row.cells:
+                    self.devices.item(row.id, values=row.cells)
+                if self.devices.index(row.id) != at:
+                    self.devices.move(row.id, "", at)
+            else:
+                self.devices.insert("", at, iid=row.id, values=row.cells)
         if running["mode"] == model.BROWSER:
-            self.players.show(status, [r.id for r in rows if r.id in chosen])
+            self.players.show(status, [i for i in ids if i in chosen])
+
+    def _fit(self) -> None:
+        """Tk sizes a window to what it holds, so a line that comes and goes made it shrink
+        and grow every second. Once it is open the window keeps its size, and only grows
+        (to at most the screen) when what it holds needs more room."""
+        if self.destroyed:
+            return
+        root = self.root
+        width, height = root.winfo_width(), root.winfo_height()
+        need = min(root.winfo_reqheight(), root.winfo_screenheight() - 80)
+        wide = min(root.winfo_reqwidth(), root.winfo_screenwidth())
+        if width <= 1:  # not shown yet
+            return
+        if need > height or wide > width or not self.sized:
+            root.geometry(f"{max(width, wide)}x{max(height, need)}")
+            self.sized = True
 
     def _awake(self, on: bool) -> None:
         if on != self.awake:

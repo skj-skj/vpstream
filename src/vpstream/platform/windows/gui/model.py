@@ -272,6 +272,8 @@ def jobs_of(prepare: Sequence[dict[str, Any]], names: Sequence[str]) -> list[dic
 def job_line(job: dict[str, Any]) -> str:
     state = job.get("state")
     what = f"{job['name']}: {job['task']}"
+    if state == "running" and not job.get("progress"):
+        return f"{what}: starting..."
     if state == "running":
         left = job.get("seconds_left")
         return f"{what}, {job['progress'] * 100:.0f}%" + (
@@ -279,6 +281,8 @@ def job_line(job: dict[str, Any]) -> str:
         )
     if state == "failed":
         return f"{what}: failed: {job.get('error') or 'see the log'}"
+    if state == "queued":
+        return f"{what}: waits for the one before"
     return f"{what}: {state}"
 
 
