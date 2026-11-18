@@ -23,7 +23,7 @@ from typing import Any
 from vpstream import __version__, local
 from vpstream.platform.common import UrlHttp
 from vpstream.platform.windows import firewall, install, network, processes, shortcut, tools_dir
-from vpstream.platform.windows.gui import model
+from vpstream.platform.windows.gui import browser, model
 from vpstream.platform.windows.session import Session
 from vpstream.tools import Runner
 
@@ -92,12 +92,14 @@ class Window:
         self.stopping_on_purpose = False
         self.closing = False
         self.destroyed = False
+        self.starting = False
         root.title("vpstream")
-        root.minsize(720, 560)
+        root.minsize(820, 640)
         with contextlib.suppress(tk.TclError):
             root.iconbitmap(default=str(shortcut.ICON))  # type: ignore[no-untyped-call]
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
+        self.update_start()
         root.after(DRAIN_MS, self._drain)
         self._poll()
 
@@ -131,10 +133,12 @@ class Window:
         ttk.Entry(form, textvariable=self.alias, width=24).grid(row=0, column=1, sticky="w")
         ttk.Label(form, text="Watch it with").grid(row=1, column=0, sticky="w")
         self.mode = tk.StringVar(value=model.MODES[model.DIRECT])
-        ttk.Combobox(
-            form, textvariable=self.mode, values=[model.MODES[model.DIRECT]], state="readonly",
+        mode = ttk.Combobox(
+            form, textvariable=self.mode, values=list(model.MODES.values()), state="readonly",
             width=40,
-        ).grid(row=1, column=1, sticky="w")  # fmt: skip
+        )  # fmt: skip
+        mode.grid(row=1, column=1, sticky="w")
+        mode.bind("<<ComboboxSelected>>", lambda e: self._mode_changed())
         ttk.Label(form, text="Who may watch").grid(row=2, column=0, sticky="w")
         self.policy = tk.StringVar(value=model.default_policy(model.DIRECT))
         ttk.Combobox(
@@ -149,8 +153,10 @@ class Window:
         ttk.Button(form, text="Look again", command=self._look).grid(row=3, column=2, padx=4)
         for child in form.winfo_children():
             child.grid_configure(pady=2, padx=4)
+        self.prepare = browser.PreparePanel(self.pick, self)
         self.start_button = ttk.Button(self.pick, text="Start", command=self._start)
         self.start_button.pack(anchor="e", padx=PX, pady=PY)
+        self.setup_missing = False
 
         self.live = ttk.LabelFrame(top, text="Streaming")
         row = ttk.Frame(self.live)
@@ -161,10 +167,11 @@ class Window:
         ttk.Button(row, text="Copy", command=self._copy).pack(side="left", padx=4)
         self.lines = ttk.Label(self.live, justify="left", wraplength=680)
         self.lines.pack(fill="x", padx=PX, pady=PY)
-        columns = ("name", "address", "what", "state", "sent", "seen")
-        heads = ("Device", "Address", "What", "State", "Sent", "Last seen")
+        columns = ("name", "address", "what", "state", "playing", "sent", "seen")
+        heads = ("Device", "Address", "What", "State", "Playing", "Sent", "Last seen")
+        widths = (130, 100, 110, 140, 200, 70, 80)
         self.devices = ttk.Treeview(self.live, columns=columns, show="headings", height=6)
-        for column, head, width in zip(columns, heads, (150, 110, 80, 160, 80, 90), strict=True):
+        for column, head, width in zip(columns, heads, widths, strict=True):
             self.devices.heading(column, text=head)
             self.devices.column(column, width=width, anchor="w")
         self.devices.pack(fill="both", expand=True, padx=PX, pady=PY)
@@ -179,6 +186,7 @@ class Window:
         ttk.Button(row, text="Change name", command=self._change_alias).pack(side="right", padx=4)
         self.new_alias = tk.StringVar()
         ttk.Entry(row, textvariable=self.new_alias, width=16).pack(side="right")
+        self.players = browser.PlayerPanel(self.live, self)
 
         bottom = ttk.Frame(top)
         bottom.pack(fill="x", side="bottom", padx=PX, pady=PY)
@@ -264,7 +272,8 @@ class Window:
         self.install_button = ttk.Button(self.setup, text="Install", command=self._install)
         self.install_button.pack(anchor="e", padx=PX, pady=PY)
         self.setup.pack(fill="x", before=self.pick, padx=PX, pady=PY)
-        enable(self.start_button, False)
+        self.setup_missing = True
+        self.update_start()
 
     def _install(self) -> None:
         enable(self.install_button, False)
@@ -321,7 +330,8 @@ class Window:
             self._offer_setup(missing)
             return
         self.setup.pack_forget()
-        enable(self.start_button, True)
+        self.setup_missing = False
+        self.update_start()
         caddy = self.runner.which("caddy")
         if caddy:
             self.worker.do(lambda: firewall.blocking_rules(self.runner, caddy), self._blocking)
@@ -397,33 +407,67 @@ class Window:
             filetypes=[("Videos", "*.mkv *.mp4 *.m4v *.mov *.avi *.webm *.ts"), ("All", "*.*")],
         )
         if found:
-            self.path.set(os.path.normpath(found))
-            self.kind = "file"
+            self._chosen(found, "file")
 
     def _pick_folder(self) -> None:
         found = filedialog.askdirectory(parent=self.root, title="A folder of videos")
         if found:
-            self.path.set(os.path.normpath(found))
-            self.kind = "dir"
+            self._chosen(found, "dir")
+
+    def _chosen(self, path: str, kind: str) -> None:
+        self.path.set(os.path.normpath(path))
+        self.kind = kind
+        if self.browser_mode():
+            self.prepare.source_changed()
+        self.update_start()
+
+    def browser_mode(self) -> bool:
+        return self.mode.get() == model.MODES[model.BROWSER]
+
+    def _mode_changed(self) -> None:
+        mode = model.BROWSER if self.browser_mode() else model.DIRECT
+        self.policy.set(model.default_policy(mode))
+        if mode == model.BROWSER:
+            self.prepare.frame.pack(fill="x", before=self.start_button, padx=PX, pady=PY)
+            self.prepare.source_changed()
+        else:
+            self.prepare.frame.pack_forget()
+        self.update_start()
+
+    def update_start(self) -> None:
+        """Start can go when a video is chosen, the programs are there, nothing is starting,
+        and in browser mode once everything it plays is prepared."""
+        ready = bool(self.path.get()) and not self.setup_missing and not self.starting
+        if self.browser_mode():
+            ready = ready and self.prepare.ready
+        enable(self.start_button, ready)
 
     def _start(self) -> None:
+        mode = model.BROWSER if self.browser_mode() else model.DIRECT
         try:
             options = model.start_options(
-                self.path.get(), self.kind, self.alias.get(), model.DIRECT, self.policy.get()
+                self.path.get(), self.kind, self.alias.get(), mode, self.policy.get()
             )
         except ValueError as exc:
             messagebox.showinfo("vpstream", str(exc), parent=self.root)
             return
-        enable(self.start_button, False)
+        if mode == model.BROWSER:
+            options = model.browser_start(
+                options, self.prepare.audio_number(), self.prepare.start_sub_number()
+            )
+        self.starting = True
+        self.update_start()
         self.say("Starting the stream...")
 
         def started(found: dict[str, Any]) -> None:
-            enable(self.start_button, True)
+            self.starting = False
+            self.update_start()
             self.say("The stream is on.")
             self._show(found)
 
         def failed(exc: Exception) -> None:
-            enable(self.start_button, True)
+            self.starting = False
+            self.update_start()
             self.failed(exc)
 
         self.worker.do(lambda: self.session.start(options), started, failed)
@@ -479,6 +523,8 @@ class Window:
         if status is None or self.closing:
             return
         self.status = status
+        if self.browser_mode():
+            self.prepare.show(status)
         running = status.get("stream")
         if running is None:
             if self.was_streaming:
@@ -494,6 +540,10 @@ class Window:
             self.pick.pack_forget()
             self.live.pack(fill="both", expand=True, padx=PX, pady=PY)
             self.new_alias.set(running["alias"])
+            if running["mode"] == model.BROWSER:
+                self.players.frame.pack(fill="x", padx=PX, pady=PY)
+            else:
+                self.players.frame.pack_forget()
             self._awake(True)
         self.was_streaming = True
         self.url.set(running["url"])
@@ -504,6 +554,8 @@ class Window:
         for row in rows:
             self.devices.insert("", "end", iid=row.id, values=row.cells)
         self.devices.selection_set([r.id for r in rows if r.id in chosen])
+        if running["mode"] == model.BROWSER:
+            self.players.show(status, [r.id for r in rows if r.id in chosen])
 
     def _awake(self, on: bool) -> None:
         if on != self.awake:

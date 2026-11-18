@@ -122,10 +122,12 @@ class DeviceRow:
     sent: str
     seen: str
     code: str  # what its waiting page shows, to tell devices apart
+    playing: str = ""  # a browser's: the video, where in it
 
     @property
     def cells(self) -> tuple[str, ...]:
-        return (self.name, self.address, self.what, self.state, self.sent, self.seen)
+        what = f"{self.what} {self.code}" if self.code else self.what
+        return (self.name, self.address, what, self.state, self.playing, self.sent, self.seen)
 
 
 def what_it_is(device: dict[str, Any]) -> str:
@@ -151,6 +153,7 @@ def device_rows(running: dict[str, Any], now: float | None = None) -> list[Devic
             sent=size(int(d.get("bytes") or 0)),
             seen=ago(now - float(d.get("last_seen") or now)),
             code=str(d.get("code") or ""),
+            playing=where_it_is(d) if d.get("kind") == gate.BROWSER else "",
         )
         for d in running.get("devices", [])
     ]
@@ -199,3 +202,136 @@ def warnings(address: Address | None, blocking: Sequence[str], other_admin: str 
             "its settings and prepared videos are that account's."
         )
     return found
+
+
+# --- browser mode: what to prepare, and whether it is ready
+
+
+@dataclass(frozen=True)
+class Track:
+    number: int
+    label: str
+    how: str = ""  # subtitles: probe's treatment (soft, burned in, unsupported)
+
+    @property
+    def text(self) -> str:
+        how = {
+            "soft": "shown by the player",
+            "burned in": "drawn into the picture: a slower prepare",
+            "unsupported": "cannot be shown",
+        }.get(self.how, "")
+        return f"{self.number}: {self.label}" + (f" ({how})" if how else "")
+
+
+def plan_tracks(plans: Sequence[dict[str, Any]]) -> tuple[list[Track], list[Track]]:
+    """The audio and subtitle tracks to offer: the first video's that has any (episodes of
+    a folder usually have the same; a number is chosen for all of them)."""
+    for plan in plans:
+        rows = plan.get("tracks") or []
+        if rows:
+            audio = [Track(r["number"], r["label"]) for r in rows if r["kind"] == "audio"]
+            subs = [
+                Track(r["number"], r["label"], r.get("treatment", ""))
+                for r in rows
+                if r["kind"] == "subtitle"
+            ]
+            return audio, subs
+    return [], []
+
+
+def sub_spec(numbers: Sequence[int]) -> str:
+    """The subtitles a prepare makes, as `prepare --sub` takes them."""
+    return ",".join(str(n) for n in sorted(set(numbers))) if numbers else "none"
+
+
+def what_is_left(plans: Sequence[dict[str, Any]]) -> list[str]:
+    """What still has to be made before a browser can play: one line per video, [] when
+    everything is ready."""
+    lines = []
+    for plan in plans:
+        tasks = plan.get("tasks") or []
+        if plan.get("tracks") == [] and plan.get("notes"):
+            lines.append(f"{plan['name']}: {'; '.join(plan['notes'])}")
+        elif tasks:
+            seconds = sum(t.get("seconds") or 0 for t in tasks)
+            names = ", ".join(t["task"] for t in tasks)
+            lines.append(f"{plan['name']}: {names} (about {text.duration(seconds)})")
+    return lines
+
+
+def jobs_of(prepare: Sequence[dict[str, Any]], names: Sequence[str]) -> list[dict[str, Any]]:
+    """The prepare jobs of these videos (by file name), the newest of each task."""
+    wanted = set(names)
+    newest: dict[tuple[str, str], dict[str, Any]] = {}
+    for job in prepare:
+        if job.get("name") in wanted:
+            newest[(job["name"], job["task"])] = job
+    return list(newest.values())
+
+
+def job_line(job: dict[str, Any]) -> str:
+    state = job.get("state")
+    what = f"{job['name']}: {job['task']}"
+    if state == "running":
+        left = job.get("seconds_left")
+        return f"{what}, {job['progress'] * 100:.0f}%" + (
+            f", about {text.duration(left)} left" if left is not None else ""
+        )
+    if state == "failed":
+        return f"{what}: failed: {job.get('error') or 'see the log'}"
+    return f"{what}: {state}"
+
+
+def busy(jobs: Sequence[dict[str, Any]]) -> bool:
+    return any(j.get("state") in ("queued", "running") for j in jobs)
+
+
+def browser_start(options: dict[str, Any], audio: int | None, sub: int | None) -> dict[str, Any]:
+    """A browser stream's start: the audio and subtitles each browser begins with."""
+    found = {**options, "mode": BROWSER}
+    if audio is not None:
+        found["audio"] = str(audio)
+    found["sub"] = str(sub) if sub is not None else "off"
+    return found
+
+
+# --- browser mode: the players
+
+
+def seconds_of(text_: str) -> float:
+    """`90`, `12:30` or `1:02:03` as seconds. Raises ValueError."""
+    parts = text_.strip().split(":")
+    if not text_.strip() or len(parts) > 3 or not all(p.strip().isdigit() for p in parts):
+        raise ValueError(f"not a time: {text_!r}. Write it as 12:30 or 1:02:03")
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return float(total)
+
+
+def clock(seconds: float) -> str:
+    whole = int(seconds)
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def where_it_is(device: dict[str, Any]) -> str:
+    """What a browser's player says it does: the video, where in it, playing or paused."""
+    client = device.get("client")
+    if not client or not client.get("video"):
+        return "not playing yet"
+    if not client.get("active"):
+        return f"video {client['video']}, gone quiet"
+    at = f"{clock(client.get('position') or 0)} of {clock(client.get('duration') or 0)}"
+    return f"video {client['video']}, {at}, {'paused' if client.get('paused') else 'playing'}"
+
+
+def menu_for(status: dict[str, Any], device: dict[str, Any] | None) -> dict[str, list[Any]]:
+    """The audio and subtitle choices for what `device` plays (video 1 when it plays
+    nothing yet), as the player names them."""
+    videos = status["stream"]["videos"]
+    number = ((device or {}).get("client") or {}).get("video") or 1
+    menu = videos[number - 1].get("menu") if 0 < number <= len(videos) else None
+    menu = menu or {"audio": [], "subs": []}
+    return {"audio": menu["audio"], "subs": [{"value": "off", "label": "Off"}, *menu["subs"]]}

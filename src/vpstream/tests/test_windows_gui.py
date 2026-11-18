@@ -103,10 +103,12 @@ def test_the_device_table() -> None:
         "192.168.1.50",
         "VLC",
         "Waiting for you",
+        "",
         "15.5 MB",
         "10 s ago",
     )
     assert rows[1].what == "Browser" and rows[1].code == "K7" and rows[1].name == "(no name)"
+    assert rows[1].cells[2:5] == ("Browser K7", "Waiting for you", "not playing yet")
     assert rows[2].what == "Player"
     assert [model.ago(s) for s in (1, 30, 600, 7200)] == [
         "now",
@@ -211,3 +213,94 @@ def test_an_answer_of_the_worker_runs_on_the_window_thread() -> None:
         answers.get(timeout=5)()
     assert got == [42, "ZeroDivisionError"] and worker.busy == 0
     assert "ZeroDivisionError" in lines[0]
+
+
+# --- browser mode
+
+PLAN = {
+    "name": "film.mkv",
+    "tasks": [
+        {"task": "base version (copy)", "kind": "base", "sub": 0, "seconds": 2.7},
+        {"task": "subtitle 5 (burned in)", "kind": "burn", "sub": 5, "seconds": 46.9},
+    ],
+    "notes": [],
+    "tracks": [
+        {"kind": "audio", "number": 1, "label": "English (AAC 2.0)", "treatment": "AAC"},
+        {"kind": "subtitle", "number": 2, "label": "Hindi (SRT)", "treatment": "soft"},
+        {"kind": "subtitle", "number": 5, "label": "Japanese (ASS)", "treatment": "burned in"},
+        {"kind": "subtitle", "number": 9, "label": "German (DVB)", "treatment": "unsupported"},
+    ],
+}
+
+
+def test_the_tracks_to_offer_and_what_is_left() -> None:
+    audio, subs = model.plan_tracks([{"name": "x", "tracks": [], "notes": []}, PLAN])
+    assert [t.text for t in audio] == ["1: English (AAC 2.0)"]
+    assert [t.text for t in subs] == [
+        "2: Hindi (SRT) (shown by the player)",
+        "5: Japanese (ASS) (drawn into the picture: a slower prepare)",
+        "9: German (DVB) (cannot be shown)",
+    ]
+    assert model.plan_tracks([]) == ([], [])
+    assert model.sub_spec([5, 2, 5]) == "2,5" and model.sub_spec([]) == "none"
+    assert model.what_is_left([PLAN]) == [
+        "film.mkv: base version (copy), subtitle 5 (burned in) (about 49s)"
+    ]
+    done = {**PLAN, "tasks": []}
+    assert model.what_is_left([done]) == []
+    unreadable = {"name": "bad.mkv", "tasks": [], "tracks": [], "notes": ["ffprobe cannot read it"]}
+    assert model.what_is_left([unreadable]) == ["bad.mkv: ffprobe cannot read it"]
+
+
+def test_the_jobs_of_the_chosen_videos() -> None:
+    jobs = [
+        {"name": "film.mkv", "task": "base version (copy)", "state": "failed", "error": "x"},
+        {"name": "film.mkv", "task": "base version (copy)", "state": "running",
+         "progress": 0.42, "seconds_left": 30.0},
+        {"name": "other.mkv", "task": "base version (copy)", "state": "queued"},
+        {"name": "film.mkv", "task": "subtitle 5 (burned in)", "state": "queued"},
+    ]  # fmt: skip
+    mine = model.jobs_of(jobs, ["film.mkv"])
+    assert [model.job_line(j) for j in mine] == [
+        "film.mkv: base version (copy), 42%, about 30s left",
+        "film.mkv: subtitle 5 (burned in): queued",
+    ]
+    assert model.busy(mine) and not model.busy([{"state": "done"}])
+    failed = {"name": "a", "task": "t", "state": "failed", "error": "ffmpeg failed"}
+    assert model.job_line(failed) == "a: t: failed: ffmpeg failed"
+
+
+def test_a_browser_start_names_what_each_browser_begins_with() -> None:
+    options = {"file": "C:\\a.mkv", "mode": "direct", "policy": "approval"}
+    assert model.browser_start(options, 2, 5) == {
+        "file": "C:\\a.mkv", "mode": "browser", "policy": "approval", "audio": "2", "sub": "5",
+    }  # fmt: skip
+    assert model.browser_start(options, None, None)["sub"] == "off"
+
+
+def test_times_to_go_to() -> None:
+    assert [model.seconds_of(t) for t in ("90", "12:30", "1:02:03", " 0:05 ")] == [
+        90.0, 750.0, 3723.0, 5.0,
+    ]  # fmt: skip
+    for bad in ("", "1:2:3:4", "ten", "-5", "1.5"):
+        with pytest.raises(ValueError, match="not a time"):
+            model.seconds_of(bad)
+    assert model.clock(3723) == "1:02:03" and model.clock(75) == "1:15"
+
+
+def test_where_a_browser_is_and_its_choices() -> None:
+    playing = {"client": {"video": 2, "position": 75, "duration": 1800, "paused": False,
+                          "active": True}}  # fmt: skip
+    assert model.where_it_is(playing) == "video 2, 1:15 of 30:00, playing"
+    assert model.where_it_is({"client": None}) == "not playing yet"
+    quiet = {"client": {**playing["client"], "active": False}}
+    assert model.where_it_is(quiet) == "video 2, gone quiet"
+    menu = {
+        "audio": [{"value": "1", "label": "English"}],
+        "subs": [{"value": "2-soft", "label": "Hindi"}],
+    }
+    status = {"stream": {"videos": [{"menu": None}, {"menu": menu}]}}
+    found = model.menu_for(status, playing)
+    assert found["audio"] == menu["audio"]
+    assert found["subs"] == [{"value": "off", "label": "Off"}, *menu["subs"]]
+    assert model.menu_for(status, None) == {"audio": [], "subs": [{"value": "off", "label": "Off"}]}
