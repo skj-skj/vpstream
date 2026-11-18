@@ -85,8 +85,6 @@ WINDOWS_SKIPS = {
     "test_control_browser.py::test_removing_the_stale_ones_keeps_what_cannot_be_looked_at": CHMOD,
     "test_control_https.py::test_the_record_keeps_https": POSIX_PATHS,
     "test_dashboard_ca.py::test_the_authority_cannot_vouch_for_another_site": MODES,
-    "test_ffargs.py::test_a_copy_keeps_the_video_and_tags_hevc_for_browsers": POSIX_PATHS,
-    "test_ffargs.py::test_hls_output_args_options": POSIX_PATHS,
     "test_gate.py::test_a_name_that_is_not_utf8_can_be_shown": NOT_UTF8,
     "test_listing.py::test_a_file_ffprobe_cannot_read_and_a_folder_that_cannot_be_entered": CHMOD,
     "test_listing.py::test_ls_lists_the_configured_folder_by_default": POSIX_PATHS,

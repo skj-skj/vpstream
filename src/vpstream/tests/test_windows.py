@@ -295,3 +295,14 @@ def test_under_takes_windows_paths_as_windows_does(monkeypatch: pytest.MonkeyPat
     assert files.under("C:\\Films\\a.mkv", "C:\\") and files.under("C:\\Films\\a.mkv", "C:")
     assert not files.under("C:\\Films2\\a.mkv", "C:\\Films")
     assert not files.under("D:\\Films\\a.mkv", "C:\\Films")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a path with \\ in it")
+def test_ffmpeg_is_given_hls_paths_with_slashes(tmp_path: Path) -> None:
+    """ffmpeg puts the init segment next to the playlist by cutting the playlist's path at
+    its last /: with only \\ in it, the init segment went to the folder ffmpeg ran in."""
+    from vpstream import ffargs
+
+    args = ffargs.hls_output_args(tmp_path / "base.part")
+    assert args[-1] == f"{tmp_path.as_posix()}/base.part/index.m3u8" and "\\" not in args[-1]
+    assert "\\" not in args[-2]
