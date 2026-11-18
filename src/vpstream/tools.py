@@ -27,6 +27,11 @@ class Runner(Protocol):
     def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result: ...
 
 
+# Windows: a console program (PowerShell, netsh, ffmpeg, Caddy) started from the window would
+# open a console window of its own; this keeps it hidden. 0 elsewhere, which changes nothing.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 class SystemRunner:
     """Runs real programs found on PATH."""
 
@@ -45,6 +50,7 @@ class SystemRunner:
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                creationflags=NO_WINDOW,
             )
         except subprocess.TimeoutExpired as exc:
             return Result(TIMEOUT_RETURNCODE, _text(exc.stdout), timed_out(timeout))
@@ -146,6 +152,7 @@ def run_cancellable(
         encoding="utf-8",
         errors="replace",
         cwd=cwd,
+        creationflags=NO_WINDOW,
     )
     last: collections.deque[str] = collections.deque(maxlen=OUTPUT_LINES)
 

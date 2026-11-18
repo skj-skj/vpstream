@@ -40,7 +40,7 @@ from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import write_atomic
 from vpstream.net import normal_ip, url_host
-from vpstream.tools import Runner, require
+from vpstream.tools import NO_WINDOW, Runner, require
 
 # Set by Caddy on the way in, whatever the viewer sent: the address the request came from,
 # and whether it came over HTTPS.
@@ -503,6 +503,7 @@ class CaddyProcess:
                 stderr=errors,
                 env=env,
                 cwd=str(self.work_dir),
+                creationflags=NO_WINDOW,
             )
         if self.reap:
             write_atomic(self.pid_file, f"{proc.pid}\n")
