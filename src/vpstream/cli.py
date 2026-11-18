@@ -1092,6 +1092,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from vpstream.platform.windows import prepare_process
 
         prepare_process()
+        given = list(sys.argv[1:] if argv is None else argv)
+        if given[:1] == ["--elevated-for"]:  # the window, started again as administrator
+            from vpstream.platform.windows import commands
+
+            return commands.open_window(given[1] if len(given) > 1 else "")
     parser = build_parser(windows)
     args = parser.parse_args(argv)
     if windows:

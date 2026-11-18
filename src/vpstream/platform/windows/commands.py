@@ -38,10 +38,12 @@ def doctor() -> int:
     return checks.exit_code(found)
 
 
-def open_window() -> int:
-    """`vpstream` with no command."""
-    print("The vpstream window is not in this version yet; see vpstream doctor.")
-    return 2
+def open_window(elevated_for: str | None = None) -> int:
+    """`vpstream` with no command (`elevated_for`: who asked, when Windows started it again
+    with administrator rights)."""
+    from vpstream.platform.windows import gui
+
+    return gui.main(elevated_for)
 
 
 def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

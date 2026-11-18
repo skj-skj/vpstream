@@ -197,6 +197,7 @@ def test_doctor_checks_tkinter_and_the_programs(on_windows: None, tmp_path: Path
     assert by_name["mkvmerge"].fix == "vpstream windows-install mkvtoolnix"
     assert by_name["config"].detail.endswith("the window writes it")
     assert [c.name for c in checks][:2] == ["python", "tkinter"]
+    assert by_name["log"].detail == str(tmp_path / "var" / "lib" / "vpstream.log")
 
 
 def test_mkvtoolnix_in_its_own_folder_gets_a_path_hint() -> None:

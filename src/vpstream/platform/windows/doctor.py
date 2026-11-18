@@ -110,4 +110,10 @@ def run_checks(
     checks = [check_python(python_version or tuple(sys.version_info[:3])), check_tkinter(find)]
     checks += check_tools(runner, original_path, tools)
     checks.append(check_config(paths.config_file))
+    checks.append(Check("log", "ok", str(log_file(paths))))
     return checks
+
+
+def log_file(paths: config.Paths) -> Path:
+    """The window's log, which the person sends when something went wrong."""
+    return paths.state_dir.parent / "vpstream.log"
