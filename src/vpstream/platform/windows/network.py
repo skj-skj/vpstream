@@ -17,14 +17,19 @@ from vpstream.platform.windows.shortcut import powershell
 from vpstream.tools import Runner, tail
 
 PUBLIC, PRIVATE, DOMAIN = 0, 1, 2  # NetworkCategory
+# AddressState: Windows keeps the address of an adapter that is off (Wi-Fi turned off, no
+# cable) as Tentative, and nothing can listen on it then; only a Preferred one is in use.
+PREFERRED = 4
 _APIPA = ipaddress.ip_network("169.254.0.0/16")  # no network handed out an address
 
 LOOK = (
     "$a = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
-    "Select-Object IPAddress, InterfaceAlias, InterfaceIndex); "
+    "Select-Object IPAddress, InterfaceAlias, InterfaceIndex, AddressState); "
+    "$u = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | "
+    "ForEach-Object { $_.ifIndex }); "
     "$p = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | "
     "Select-Object InterfaceIndex, NetworkCategory, Name); "
-    "ConvertTo-Json -Compress -Depth 3 @{addresses = $a; profiles = $p}"
+    "ConvertTo-Json -Compress -Depth 3 @{addresses = $a; profiles = $p; up = $u}"
 )
 
 
@@ -53,7 +58,8 @@ def _rows(value: Any) -> list[dict[str, Any]]:
 
 
 def parse(text: str) -> list[Address]:
-    """The private addresses PowerShell listed, those on a network Windows knows first."""
+    """The private addresses in use (Preferred, on an adapter that is up) that PowerShell
+    listed, those on a network Windows knows first."""
     try:
         data = json.loads(text)
     except ValueError as exc:
@@ -63,10 +69,16 @@ def parse(text: str) -> list[Address]:
     profiles = {
         p.get("InterfaceIndex"): p for p in _rows(data.get("profiles")) if "InterfaceIndex" in p
     }
+    up = data.get("up")
+    up_list = up if isinstance(up, list) else [up] if up is not None else None
     found = []
     for row in _rows(data.get("addresses")):
         ip, index = str(row.get("IPAddress") or ""), row.get("InterfaceIndex")
         if local.private_problem(ip) is not None or ipaddress.ip_address(ip) in _APIPA:
+            continue
+        if row.get("AddressState", PREFERRED) != PREFERRED:
+            continue  # its adapter is off
+        if up_list is not None and index not in up_list:
             continue
         profile = profiles.get(index, {})
         found.append(

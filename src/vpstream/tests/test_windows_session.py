@@ -405,6 +405,23 @@ def test_the_private_addresses_with_their_adapters() -> None:
     assert found[1].public is False
 
 
+def test_an_address_of_an_adapter_that_is_off_is_not_offered() -> None:
+    """Measured on Windows 10: an adapter with no cable (or its Wi-Fi off) keeps its
+    address, as Tentative (1), and is not Up."""
+    rows = [
+        {"IPAddress": "192.168.1.73", "InterfaceAlias": "Wi-Fi", "InterfaceIndex": 16,
+         "AddressState": 4},
+        {"IPAddress": "172.16.0.184", "InterfaceAlias": "Ethernet", "InterfaceIndex": 5,
+         "AddressState": 1},
+        {"IPAddress": "172.29.32.1", "InterfaceAlias": "vEthernet", "InterfaceIndex": 18,
+         "AddressState": 4},
+    ]  # fmt: skip
+    found = network.parse(json.dumps({"addresses": rows, "profiles": [], "up": [16]}))
+    assert [a.ip for a in found] == ["192.168.1.73"]
+    one = network.parse(json.dumps({"addresses": rows, "profiles": [], "up": 18}))
+    assert [a.ip for a in one] == ["172.29.32.1"]  # one adapter up: not a list
+
+
 def test_a_list_windows_did_not_give_is_said() -> None:
     for text in ("", "[1]", "nope"):
         with pytest.raises(network.NetworkError):
