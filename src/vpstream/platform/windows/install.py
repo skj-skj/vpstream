@@ -14,6 +14,7 @@ stays there when vpstream is uninstalled; doctor and the window find it there.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import shutil
@@ -184,16 +185,45 @@ def check_build(runner: Runner, build: Build, folder: Path) -> None:
         run("caddy.exe", "version")
 
 
-def in_use(folder: Path) -> str | None:
+# Windows Defender reads a program that was just written or run, and while it does nothing
+# can move it: what fails with "access is denied" is tried again for this long.
+SCAN_SECONDS = 30.0
+RUNNING_SECONDS = 5.0  # a program that stays locked this long is running, not being read
+_sleep = time.sleep
+
+
+def _retried(action: Callable[[], object], seconds: float | None = None) -> None:
+    deadline = time.monotonic() + (SCAN_SECONDS if seconds is None else seconds)
+    while True:
+        try:
+            action()
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            _sleep(0.5)
+
+
+def _locked(program: Path) -> bool:
+    try:
+        with program.open("r+b"):
+            return False
+    except PermissionError:
+        return True
+
+
+def in_use(folder: Path, seconds: float | None = None) -> str | None:
     """A program in `folder` that is running, or None. Windows renames a folder with a
     running program in it, and the program goes on running from the new place; but it
-    does not open a running program for writing. Opening it so changes nothing."""
+    does not open a running program for writing. Opening it so changes nothing. A program
+    the antivirus is reading is locked too, for a moment: it is asked again for `seconds`."""
+    wait = RUNNING_SECONDS if seconds is None else seconds
     for program in sorted(folder.rglob("*.exe")) if folder.is_dir() else ():
-        try:
-            with program.open("r+b"):
-                pass
-        except PermissionError:
-            return program.name
+        deadline = time.monotonic() + wait
+        while _locked(program):
+            if time.monotonic() >= deadline:
+                return program.name
+            _sleep(0.5)
     return None
 
 
@@ -211,9 +241,9 @@ def swap(tools: Path, staged: Path, top: str) -> None:
     target, old = tools / top, tools / f".old-{top}"
     _not_in_use(target, top)
     if target.exists():
-        os.replace(target, old)
+        _retried(lambda: os.replace(target, old))
     try:
-        os.replace(staged / top, target)
+        _retried(lambda: os.replace(staged / top, target))
     except OSError:
         if old.exists():
             os.replace(old, target)  # what was there, back
@@ -294,7 +324,7 @@ def uninstall(tools: Path) -> list[str]:
         folder = tools / build.top
         if (folder / MARKER).exists():
             _not_in_use(folder, build.name)
-            shutil.rmtree(folder)
+            _retried(functools.partial(shutil.rmtree, folder))
             removed.append(f"{build.name} ({folder})")
     with contextlib.suppress(OSError):
         tools.rmdir()  # only when nothing else is in it
