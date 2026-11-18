@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +7,7 @@ import pytest
 
 from vpstream import gate, stream
 from vpstream.stream import Stream, StreamError
+from vpstream.tests.fakes import IS_ROOT
 
 
 @pytest.fixture
@@ -81,7 +81,7 @@ def test_a_folder_without_videos_is_refused(tmp_path: Path) -> None:
         make(dir=str(tmp_path))
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
+@pytest.mark.skipif(IS_ROOT, reason="root reads everything")
 def test_a_file_the_service_cannot_read_is_refused_with_the_reason(film: Path) -> None:
     film.chmod(0)
     with pytest.raises(stream.Unreadable, match=r"cannot read .*a film\.mkv.*setfacl") as caught:
@@ -89,7 +89,7 @@ def test_a_file_the_service_cannot_read_is_refused_with_the_reason(film: Path) -
     assert caught.value.path == str(film) and caught.value.user
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root enters everything")
+@pytest.mark.skipif(IS_ROOT, reason="root enters everything")
 def test_a_folder_that_cannot_be_entered_is_unreadable_not_missing(tmp_path: Path) -> None:
     closed = tmp_path / "closed"
     closed.mkdir()
@@ -108,7 +108,7 @@ def test_a_folder_that_cannot_be_entered_is_unreadable_not_missing(tmp_path: Pat
     assert not isinstance(missing.value, stream.Unreadable)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
+@pytest.mark.skipif(IS_ROOT, reason="root reads everything")
 def test_a_folder_that_cannot_be_listed_is_unreadable(show: Path) -> None:
     show.chmod(0o300)
     try:

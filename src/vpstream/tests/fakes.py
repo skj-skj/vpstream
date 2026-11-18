@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,31 @@ from typing import Any
 from vpstream.caddy import CaddyError
 from vpstream.platform.common import FirewallError
 from vpstream.tools import Result, SystemRunner
+
+IS_ROOT = sys.platform != "win32" and os.geteuid() == 0  # root reads everything
+
+
+def make_program(path: Path, source: str) -> Path:
+    """A program at `path` that runs the Python `source` (which starts with a #! line), and
+    the path it can be run by. Windows runs no #! script: there it is `path`.exe, the
+    launcher pip makes for console scripts, with the source in it as a zip."""
+    if sys.platform != "win32":
+        path.write_text(source)
+        path.chmod(0o755)
+        return path
+    import io
+    import zipfile
+    from importlib.resources import files
+
+    launcher = files("pip._vendor.distlib").joinpath("t64.exe").read_bytes()
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("__main__.py", source.split("\n", 1)[1])
+    program = path.with_name(path.name + ".exe")
+    shebang = f'#!"{sys.executable}"\n'.encode()
+    program.write_bytes(launcher + shebang + packed.getvalue())
+    return program
+
 
 NAME = "host.example.ts.net"  # the fake host's name on its tailnet
 
@@ -155,9 +182,9 @@ class FakeMkvmerge(SystemRunner):
     def __init__(self, folder: Path, mode: str = "ok") -> None:
         import sys
 
-        self.program = folder / "mkvmerge"
-        self.program.write_text(FAKE_MKVMERGE.format(python=sys.executable))
-        self.program.chmod(0o755)
+        self.program = make_program(
+            folder / "mkvmerge", FAKE_MKVMERGE.format(python=sys.executable)
+        )
         self.mode = mode
 
     @property
@@ -241,9 +268,8 @@ class FakeFfmpeg(SystemRunner):
         import json
         import sys
 
-        self.program = folder / "ffmpeg"
-        self.program.write_text(FAKE_FFMPEG.format(python=sys.executable))
-        self.program.chmod(0o755)
+        source = FAKE_FFMPEG.format(python=sys.executable)
+        self.program = make_program(folder / "ffmpeg", source)
         self.mode = mode
         self.probe_json = json.dumps(probe)
         self.filters = "subtitles zscale tonemap overlay"

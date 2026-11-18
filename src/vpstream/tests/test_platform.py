@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vpstream import bench, platform
-from vpstream.platform.linux import ffmpeg_install
+from vpstream import platform
 
 
 @pytest.mark.parametrize(
@@ -54,6 +53,8 @@ def test_override_wins_and_is_checked() -> None:
 
 
 def test_the_package_does_not_shadow_the_standard_platform_module() -> None:
+    bench = pytest.importorskip("vpstream.bench", reason="bench is for Linux and Termux")
+    ffmpeg_install = pytest.importorskip("vpstream.platform.linux.ffmpeg_install")
     stdlib = Path(sysconfig.get_paths()["stdlib"]).resolve()
     for module in (bench, ffmpeg_install):
         assert Path(module.platform.__file__).resolve().parent == stdlib

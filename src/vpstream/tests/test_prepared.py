@@ -8,6 +8,7 @@ import pytest
 from vpstream import prepared
 from vpstream.files import source_key
 from vpstream.probe import parse_probe
+from vpstream.tests.fakes import IS_ROOT
 from vpstream.tests.test_probe import SAMPLE
 
 
@@ -264,7 +265,7 @@ def test_a_whole_version_has_no_problems(entry: Path) -> None:
 # --- found on the VPS: a file the service cannot look at is not stale
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root looks at everything")
+@pytest.mark.skipif(IS_ROOT, reason="root looks at everything")
 def test_a_file_that_cannot_be_looked_at_is_kept_not_stale(
     tmp_path: Path, entry: Path, film: Path
 ) -> None:

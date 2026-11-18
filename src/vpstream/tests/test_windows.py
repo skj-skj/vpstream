@@ -4,7 +4,9 @@ not plain). Run here as if on Windows; what only a real Windows has is tested th
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -50,8 +52,9 @@ def test_programs_are_found_in_vpstreams_folders_first() -> None:
         windows.tools_dir(env) / "caddy",
     ]
     assert [str(f) for f in folders[2:]] == list(windows.MKVTOOLNIX_DIRS)
-    joined = windows.search_path(f"/b{windows.os.pathsep}/a{windows.os.pathsep}/b", [Path("/a")])
-    assert joined.split(windows.os.pathsep) == ["/a", "/b", "/b"]  # the rest as it was
+    a, b = str(Path("/a")), str(Path("/b"))
+    joined = windows.search_path(windows.os.pathsep.join([b, a, b]), [Path(a)])
+    assert joined.split(windows.os.pathsep) == [a, b, b]  # the rest as it was
 
 
 def test_prepare_process_keeps_the_path_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,10 +126,12 @@ def test_an_unreadable_file_on_windows(on_windows: None, monkeypatch: pytest.Mon
     assert exc.details["code"] == stream.Unreadable.CODE
 
 
-def test_full_paths_are_this_systems() -> None:
-    assert stream._full_paths(["/a/b.mkv"]) and not stream._full_paths(["a/b.mkv", "/c"])
-    with pytest.raises(stream.StreamError, match="starting with /"):
+def test_full_paths_are_this_systems(tmp_path: Path) -> None:
+    full = str(tmp_path / "b.mkv")
+    assert stream._full_paths([full]) and not stream._full_paths(["a/b.mkv", full])
+    with pytest.raises(stream.StreamError, match="full path") as exc:
         stream.videos_of("file", Path("film.mkv"))
+    assert ("starting with /" in str(exc.value)) == (os.sep == "/")
 
 
 # --- the command line
@@ -213,6 +218,7 @@ def test_the_config_check_shows_the_address(on_windows: None, tmp_path: Path) ->
 # --- a filter path that is not plain (C:\Users\Ana María\...)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a path with a drive letter is never plain")
 def test_a_plain_filter_path_is_used_as_it_is(tmp_path: Path) -> None:
     link = tmp_path / "source.mkv"
     assert subtitles.filter_path(link) == (link, None)
@@ -227,8 +233,6 @@ def test_a_filter_path_that_is_not_plain_is_named_from_its_folder(tmp_path: Path
 
 
 def test_run_cancellable_runs_in_the_folder_it_is_given(tmp_path: Path) -> None:
-    import sys
-
     code, out = tools.run_cancellable(
         [sys.executable, "-c", "import os; print(os.getcwd())"], threading.Event(), cwd=tmp_path
     )
@@ -255,3 +259,17 @@ def test_a_burn_in_a_cache_whose_path_is_not_plain(sample: Path, tmp_path: Path)
     assert {j["state"] for j in jobs} == {"done"}, (jobs, log)
     assert prepared.versions(entry).burn == [2]
     preparer.shutdown()
+
+
+def test_every_test_skipped_on_windows_is_there() -> None:
+    """conftest's WINDOWS_SKIPS names tests by file and name: none may be stale."""
+    import ast
+
+    from vpstream.tests import conftest
+
+    here = Path(conftest.__file__).parent
+    for key in conftest.WINDOWS_SKIPS:
+        file, name = key.split("::")
+        tree = ast.parse((here / file).read_text(encoding="utf-8"))
+        names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        assert name.split("[")[0] in names, key
