@@ -1,9 +1,11 @@
 """What the window shows and sends, as plain data: the words for policies and devices, the
-address list, the warnings, the options of a start. No Tk here, so all of it is tested on
-any system; `app` only puts it on the screen."""
+address list, the warnings, the options of a start, every question the window asks, and how
+its bars move. No Qt here, so all of it is tested on any system; `app` and `browser` only put
+it on the screen."""
 
 from __future__ import annotations
 
+import math
 import ntpath
 import time
 from collections.abc import Sequence
@@ -182,26 +184,74 @@ def stream_lines(status: dict[str, Any]) -> list[str]:
 
 # --- warnings
 
+MAKE_PRIVATE = "Make it private"
+UNBLOCK = "Remove them"
 
-def warnings(address: Address | None, blocking: Sequence[str], other_admin: str = "") -> list[str]:
+
+@dataclass(frozen=True)
+class Notice:
+    text: str
+    button: str = ""  # MAKE_PRIVATE, UNBLOCK or none
+
+
+def warnings(
+    address: Address | None, blocking: Sequence[str], other_admin: str = ""
+) -> list[Notice]:
     found = []
     if address is not None and address.public:
         net = f' "{address.network}"' if address.network else ""
         found.append(
-            f"Windows treats the network{net} on {address.adapter} as Public, so phones and TVs "
-            "on it cannot reach this PC. If it is your home network, make it private."
+            Notice(
+                f"Windows treats the network{net} on {address.adapter} as Public, so phones "
+                "and TVs on it cannot reach this PC. If it is your home network, make it private.",
+                MAKE_PRIVATE,
+            )
         )
     if blocking:
         found.append(
-            "Windows Firewall has rules that block Caddy, the program that serves the stream "
-            "(Windows adds them when its question is answered Cancel). Remove them to stream."
+            Notice(
+                "Windows Firewall has rules that block Caddy, the program that serves the "
+                "stream (Windows adds them when its question is answered Cancel). Remove them "
+                "to stream.",
+                UNBLOCK,
+            )
         )
     if other_admin:
         found.append(
-            f"vpstream runs as {other_admin}, the administrator who allowed it, not as you: "
-            "its settings and prepared videos are that account's."
+            Notice(
+                f"vpstream runs as {other_admin}, the administrator who allowed it, not as you: "
+                "its settings and prepared videos are that account's."
+            )
         )
     return found
+
+
+# --- the programs vpstream needs
+
+SETUP_INTRO = (
+    "vpstream needs these programs. It downloads them from their own sites and checks each "
+    "one before it is used."
+)
+
+
+INSTALLED = "installed"
+
+
+def setup_line(name: str, what: str = "not installed") -> str:
+    return f"{name}: {what}"
+
+
+def failed_line(exc: Exception) -> str:
+    return f"failed: {exc}"
+
+
+def setup_target(what: str, done: int, total: int) -> float | None:
+    """Where an install's bar heads: None while the size is not known (a busy bar)."""
+    if what == INSTALLED:
+        return 1.0
+    if what.startswith("failed"):
+        return 0.0
+    return min(done / total, 1.0) if total else None
 
 
 # --- browser mode: what to prepare, and whether it is ready
@@ -259,6 +309,25 @@ def what_is_left(plans: Sequence[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def start_state(left: Sequence[str]) -> str:
+    """What the Stream tab says about a browser stream's video: ready, or what is left."""
+    if not left:
+        return "Prepared: it can start."
+    more = "\n..." if len(left) > 5 else ""
+    return "Not prepared yet:\n" + "\n".join(left[:5]) + more
+
+
+def left_text(left: Sequence[str]) -> str:
+    """What the Prepare tab says is still to make."""
+    return "All of it is prepared." if not left else "To prepare:\n" + "\n".join(left)
+
+
+def number_of(label: str) -> int | None:
+    """The track number a `Track.text` starts with; None for "Off" or nothing."""
+    head = label.split(":", 1)[0].strip()
+    return int(head) if head.isdigit() else None
+
+
 def browser_start(options: dict[str, Any], audio: int | None, sub: int | None) -> dict[str, Any]:
     """A browser stream's start: the audio and subtitles each browser begins with."""
     found = {**options, "mode": BROWSER}
@@ -308,6 +377,32 @@ def menu_for(status: dict[str, Any], device: dict[str, Any] | None) -> dict[str,
     menu = videos[number - 1].get("menu") if 0 < number <= len(videos) else None
     menu = menu or {"audio": [], "subs": []}
     return {"audio": menu["audio"], "subs": [{"value": "off", "label": "Off"}, *menu["subs"]]}
+
+
+def value_of(menu: Sequence[dict[str, Any]], label: str) -> str | None:
+    """What a player is sent for the choice named `label` of its menu; None for none."""
+    return next((str(m["value"]) for m in menu if m["label"] == label), None) if label else None
+
+
+def send_options(
+    devices: Sequence[str] | None, menu: dict[str, list[Any]], audio: str, sub: str, seek: str
+) -> dict[str, Any]:
+    """What `Control.set_clients` is sent from the player panel; `devices` None for all.
+    Raises ValueError with what to do first."""
+    if devices is not None and not devices:
+        raise ValueError(PICK_BROWSER)
+    options: dict[str, Any] = {"all": True} if devices is None else {"devices": list(devices)}
+    for key, found in (
+        ("audio", value_of(menu["audio"], audio)),
+        ("sub", value_of(menu["subs"], sub)),
+    ):
+        if found is not None:
+            options[key] = found
+    if seek.strip():
+        options["seek"] = seconds_of(seek)
+    if len(options) == 1:
+        raise ValueError("Choose audio, subtitles or a time to go to first.")
+    return options
 
 
 # --- the prepared videos (the library)
@@ -367,6 +462,11 @@ def prepared_subs(rows: Sequence[dict[str, Any]], source: str) -> list[int]:
         if ntpath.normcase(str(row.get("source"))) == ntpath.normcase(source):
             return sorted(set(row.get("soft") or []) | set(row.get("burn") or []))
     return []
+
+
+def streaming_what(running: dict[str, Any]) -> str:
+    """The running stream in a few words: its file's name, or its folder."""
+    return str(running["videos"][0]["name"] if running["kind"] == "file" else running["source"])
 
 
 def switch_options(running: dict[str, Any] | None, source: str) -> dict[str, Any]:
@@ -447,3 +547,78 @@ def _video_job(run: list[dict[str, Any]]) -> VideoJob:
     else:
         state, line, progress = "done", f"{name}: prepared ({parts})", 1.0
     return VideoJob(int(run[0]["id"]), str(run[0]["source"]), name, state, progress, line)
+
+
+def queued_said(parts: int) -> str:
+    return f"Queued: {parts} parts. Choose the next one any time."
+
+
+def prepared_said(active: int) -> str:
+    return "Prepared." if not active else f"{active} videos still to prepare."
+
+
+def cancelled_said(parts: int) -> str:
+    return f"Cancelled {parts} parts."
+
+
+# --- the questions and notes the window shows
+
+ASK_CLOSE = "A stream is running. Stop it and close vpstream?"
+PICK_DEVICE = "Select a device in the list first."
+PICK_BROWSER = "Select a browser in the list first."
+PICK_PREPARED = "Select a video in the list first."
+RENAME = "A name for this device:"
+KEPT = "It is streaming or being prepared, so it was kept."
+NOTHING_QUEUED = "Nothing is being prepared."
+SELECT_BROWSER = "Select a browser in the list."
+SWITCH_HINT = "Stream it while another streams: the next one plays at the same address."
+
+
+def ask_switch(now: str, source: str) -> str:
+    return f"Stop streaming {now} and stream {ntpath.basename(source)} at the same address?"
+
+
+def ask_remove(row: LibraryRow) -> str:
+    return f"Remove what was prepared of {row.name} ({row.size})? The video itself stays."
+
+
+def ask_long(reason: str) -> str:
+    """A prepare that takes longer than the film (`NeedsConfirm`)."""
+    return f"{reason}.\n\nPrepare it all the same?"
+
+
+def not_ready(row: LibraryRow) -> str:
+    return f"{row.name} is {row.state}."
+
+
+# --- the bars: they glide to each value the poll brings once a second, and a job that has
+# not said how far it is yet (ffmpeg's first seconds) shows a calm busy bar instead
+
+FRAME_SECONDS = 0.04  # 25 frames a second
+GLIDE = 0.2  # each frame covers this part of what is left
+BUSY_SECONDS = 2.4  # one sweep of the busy bar across
+BUSY_WIDTH = 0.25  # the busy bar's moving part, of the whole
+
+
+def bar_target(state: str, progress: float) -> float | None:
+    """Where a job's bar heads: None while it runs at 0% (a busy bar), 1 once done."""
+    if state == "running" and progress <= 0.0:
+        return None
+    if state == "done":
+        return 1.0
+    if not math.isfinite(progress):
+        return 0.0  # a bar heading for NaN would never arrive
+    return min(max(progress, 0.0), 1.0)
+
+
+def glide(value: float, target: float) -> float:
+    """The bar's next frame: a part of the way to `target`, there once close."""
+    gap = target - value
+    return target if abs(gap) < 0.002 else value + gap * GLIDE
+
+
+def busy_span(seconds: float) -> tuple[float, float]:
+    """The part of a busy bar that is filled, `seconds` after it began, as (start, end) in
+    0..1: a piece that slides in from the left and out at the right, again and again."""
+    at = (seconds % BUSY_SECONDS) / BUSY_SECONDS * (1 + BUSY_WIDTH) - BUSY_WIDTH
+    return max(at, 0.0), min(at + BUSY_WIDTH, 1.0)

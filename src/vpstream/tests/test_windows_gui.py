@@ -4,6 +4,7 @@ on Windows."""
 
 from __future__ import annotations
 
+import itertools
 import queue
 from typing import Any
 
@@ -151,9 +152,10 @@ def test_what_the_window_says_about_a_stream() -> None:
 def test_the_warnings() -> None:
     assert model.warnings(WIRED, []) == []
     public, blocked, other = model.warnings(WIFI, ["caddy.exe"], "Admin")
-    assert 'network "Home" on Wi-Fi as Public' in public
-    assert "block Caddy" in blocked
-    assert "runs as Admin" in other
+    assert 'network "Home" on Wi-Fi as Public' in public.text
+    assert public.button == model.MAKE_PRIVATE
+    assert "block Caddy" in blocked.text and blocked.button == model.UNBLOCK
+    assert "runs as Admin" in other.text and other.button == ""
 
 
 # --- starting
@@ -365,3 +367,99 @@ def test_a_video_that_failed_or_was_cancelled_says_so() -> None:
     assert cancelled[0].line == "a.mkv: cancelled"
     many = model.video_jobs([job(n, "done", "base", source=f"C:\\v{n}.mkv") for n in range(15)])
     assert [r.key for r in many] == list(range(14, 4, -1))  # the last 10 that ended
+
+
+# --- the bars
+
+
+def test_a_bar_is_busy_only_while_a_job_runs_at_nothing() -> None:
+    assert model.bar_target("running", 0.0) is None
+    assert model.bar_target("running", 0.4) == 0.4
+    assert model.bar_target("queued", 0.0) == 0.0
+    assert model.bar_target("done", 0.3) == 1.0
+    assert model.bar_target("failed", 1.7) == 1.0  # never past the end
+    assert model.bar_target("running", float("nan")) == 0.0
+    assert model.setup_target("downloading", 0, 0) is None
+    assert model.setup_target("downloading", 5, 10) == 0.5
+    assert model.setup_target(model.INSTALLED, 0, 0) == 1.0
+    assert model.setup_target(model.failed_line(OSError("no")), 3, 10) == 0.0
+
+
+def test_a_bar_glides_to_its_value_and_stops_there() -> None:
+    def frames(start: float, target: float) -> int:
+        value = start
+        for frame in range(1, 100):
+            value = model.glide(value, target)
+            if value == target:
+                return frame
+        raise AssertionError(f"{start} never arrived at {target}")
+
+    assert 10 < frames(0.0, 0.5) < 40  # about a second at 25 frames a second
+    assert 10 < frames(0.9, 0.2) < 40  # back too (a job started again)
+
+
+def test_the_busy_bar_slides_across_calmly() -> None:
+    start, end = model.busy_span(0.0)
+    assert start == 0.0 and end == 0.0  # it comes in from the left
+    assert model.busy_span(model.BUSY_SECONDS / 2) == pytest.approx((0.375, 0.625))
+    assert model.busy_span(model.BUSY_SECONDS * 0.999)[1] == 1.0
+    assert model.busy_span(model.BUSY_SECONDS * 3.5) == pytest.approx((0.375, 0.625))
+    spans = [model.busy_span(i * model.FRAME_SECONDS) for i in range(200)]
+    assert all(0.0 <= s <= e <= 1.0 for s, e in spans)
+    steps = [abs(b[0] - a[0]) for a, b in itertools.pairwise(spans) if b[0] >= a[0]]
+    assert max(steps) < 0.03  # each frame moves it a little: calm, not jumpy
+
+
+# --- the words
+
+
+def test_track_labels_and_menus_are_read_back() -> None:
+    assert model.number_of("5: Japanese (ASS)") == 5
+    assert model.number_of("Off") is None and model.number_of("") is None
+    menu = [{"value": "2", "label": "English"}, {"value": "off", "label": "Off"}]
+    assert model.value_of(menu, "Off") == "off"
+    assert model.value_of(menu, "") is None and model.value_of(menu, "Klingon") is None
+
+
+def test_what_the_player_panel_sends() -> None:
+    menu = {
+        "audio": [{"value": "1", "label": "English"}],
+        "subs": [{"value": "off", "label": "Off"}],
+    }
+    assert model.send_options(["a"], menu, "English", "", " 1:30 ") == {
+        "devices": ["a"], "audio": "1", "seek": 90.0,
+    }  # fmt: skip
+    assert model.send_options(None, menu, "", "Off", "") == {"all": True, "sub": "off"}
+    with pytest.raises(ValueError, match="Select a browser"):
+        model.send_options([], menu, "English", "", "")
+    with pytest.raises(ValueError, match="Choose audio"):
+        model.send_options(None, menu, "", "", "")
+    with pytest.raises(ValueError, match="not a time"):
+        model.send_options(None, menu, "", "", "soon")
+
+
+def test_what_the_start_panel_and_the_prepare_tab_say() -> None:
+    assert model.start_state([]) == "Prepared: it can start."
+    six = [f"{n}.mkv: base" for n in range(6)]
+    said = model.start_state(six)
+    assert said.startswith("Not prepared yet:\n0.mkv") and said.endswith("\n...")
+    assert "5.mkv" not in said
+    assert model.left_text([]) == "All of it is prepared."
+    assert model.left_text(["a.mkv: base"]) == "To prepare:\na.mkv: base"
+
+
+def test_the_questions() -> None:
+    file = {"kind": "file", "source": "C:\\F\\a.mkv", "videos": [{"name": "a.mkv"}]}
+    folder = {"kind": "dir", "source": "C:\\Show", "videos": [{"name": "1.mkv"}]}
+    assert model.streaming_what(file) == "a.mkv" and model.streaming_what(folder) == "C:\\Show"
+    assert model.ask_switch("a.mkv", "C:\\F\\Fïlm test\\épisode 1.mkv") == (
+        "Stop streaming a.mkv and stream épisode 1.mkv at the same address?"
+    )
+    row = model.library_rows([{"key": "k", "source": "C:\\b.mkv", "bytes": 2_000_000}])[0]
+    assert (
+        model.ask_remove(row)
+        == "Remove what was prepared of b.mkv (2.0 MB)? The video itself stays."
+    )
+    assert model.not_ready(row) == "b.mkv is not ready (no base version)."
+    assert model.ask_long("It takes 2h") == "It takes 2h.\n\nPrepare it all the same?"
+    assert model.prepared_said(0) == "Prepared." and model.prepared_said(2).startswith("2 videos")

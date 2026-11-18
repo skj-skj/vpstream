@@ -383,18 +383,18 @@ class Window:
             child.destroy()
         ip = self.session.control.host()
         address = model.network_of(self.addresses, ip)
-        for text in model.warnings(address, self.blocking, self.other_admin):
+        for notice in model.warnings(address, self.blocking, self.other_admin):
             row = ttk.Frame(self.warn_box)
             row.pack(fill="x", padx=PX, pady=PY)
-            ttk.Label(row, text=text, wraplength=540, foreground="#8a4b00").pack(side="left")
-            if "Public" in text and address is not None:
+            ttk.Label(row, text=notice.text, wraplength=540, foreground="#8a4b00").pack(side="left")
+            if notice.button == model.MAKE_PRIVATE and address is not None:
                 index = address.index
                 ttk.Button(
                     row,
                     text="Make it private",
                     command=functools.partial(self._make_private, index),
                 ).pack(side="right")
-            if "block Caddy" in text:
+            if notice.button == model.UNBLOCK:
                 ttk.Button(row, text="Remove them", command=self._unblock).pack(side="right")
 
     def _make_private(self, index: int) -> None:
