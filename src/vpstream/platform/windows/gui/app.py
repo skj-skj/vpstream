@@ -123,6 +123,15 @@ class Window:
         self.warn_box = ttk.Frame(top)
         self.warn_box.pack(fill="x")
 
+        # Two tabs: streaming, and preparing for browsers (a queue that runs meanwhile).
+        self.tabs = ttk.Notebook(top)
+        self.tabs.pack(fill="both", expand=True, padx=PX, pady=PY)
+        stream_tab = ttk.Frame(self.tabs)
+        prepare_tab = ttk.Frame(self.tabs)
+        self.tabs.add(stream_tab, text="Stream")
+        self.tabs.add(prepare_tab, text="Prepare for browsers")
+        self.stream_tab = stream_tab
+        top = stream_tab
         self.setup = ttk.LabelFrame(top, text="Programs vpstream needs")
         self.setup_rows: dict[str, tuple[ttk.Label, ttk.Progressbar]] = {}
 
@@ -163,7 +172,7 @@ class Window:
         ttk.Button(form, text="Look again", command=self._look).grid(row=3, column=2, padx=4)
         for child in form.winfo_children():
             child.grid_configure(pady=2, padx=4)
-        self.prepare = browser.PreparePanel(self.pick, self)
+        self.start_panel = browser.StartPanel(self.pick, self)
         self.start_button = ttk.Button(self.pick, text="Start", command=self._start)
         self.start_button.pack(anchor="e", padx=PX, pady=PY)
         self.setup_missing = False
@@ -197,6 +206,7 @@ class Window:
         self.new_alias = tk.StringVar()
         ttk.Entry(row, textvariable=self.new_alias, width=16).pack(side="right")
         self.players = browser.PlayerPanel(self.live, self)
+        self.prepare_tab = browser.PrepareTab(prepare_tab, self)
 
     # --- the window's own thread
 
@@ -420,7 +430,7 @@ class Window:
         self.path.set(os.path.normpath(path))
         self.kind = kind
         if self.browser_mode():
-            self.prepare.source_changed()
+            self.start_panel.check()
         self.update_start()
 
     def browser_mode(self) -> bool:
@@ -430,10 +440,10 @@ class Window:
         mode = model.BROWSER if self.browser_mode() else model.DIRECT
         self.policy.set(model.default_policy(mode))
         if mode == model.BROWSER:
-            self.prepare.frame.pack(fill="x", before=self.start_button, padx=PX, pady=PY)
-            self.prepare.source_changed()
+            self.start_panel.frame.pack(fill="x", before=self.start_button, padx=PX, pady=PY)
+            self.start_panel.check()
         else:
-            self.prepare.frame.pack_forget()
+            self.start_panel.frame.pack_forget()
         self.update_start()
 
     def update_start(self) -> None:
@@ -441,7 +451,7 @@ class Window:
         and in browser mode once everything it plays is prepared."""
         ready = bool(self.path.get()) and not self.setup_missing and not self.starting
         if self.browser_mode():
-            ready = ready and self.prepare.ready
+            ready = ready and self.start_panel.ready
         enable(self.start_button, ready)
 
     def _start(self) -> None:
@@ -455,7 +465,7 @@ class Window:
             return
         if mode == model.BROWSER:
             options = model.browser_start(
-                options, self.prepare.audio_number(), self.prepare.start_sub_number()
+                options, self.start_panel.audio_number(), self.start_panel.sub_number()
             )
         self.starting = True
         self.update_start()
@@ -473,6 +483,35 @@ class Window:
             self.failed(exc)
 
         self.worker.do(lambda: self.session.start(options), started, failed)
+
+    def stream_prepared(self, source: str) -> None:
+        """From the Prepare tab: stream a prepared file in browser mode. In place of a
+        running stream it keeps its address and policy, so a TV only reloads the page."""
+        running = (self.status or {}).get("stream")
+        now = ""
+        if running:
+            now = running["videos"][0]["name"] if running["kind"] == "file" else running["source"]
+        if running and not messagebox.askyesno(
+            "vpstream",
+            f"Stop streaming {now} and stream {os.path.basename(source)} at the same address?",
+            parent=self.root,
+        ):
+            return
+        options = model.switch_options(running, source)
+        self.tabs.select(self.stream_tab)  # type: ignore[no-untyped-call]
+        self.say("Starting the stream...")
+
+        def work() -> dict[str, Any]:
+            if running:
+                self.stopping_on_purpose = True
+                self.session.stop()
+            return self.session.start(options)
+
+        def started(found: dict[str, Any]) -> None:
+            self.say("The stream is on.")
+            self._show(found)
+
+        self.worker.do(work, started, self.failed)
 
     def _stop(self) -> None:
         self.stopping_on_purpose = True
@@ -526,8 +565,7 @@ class Window:
             return
         self.status = status
         self.root.after_idle(self._fit)
-        if self.browser_mode():
-            self.prepare.show(status)
+        self.prepare_tab.show(status)
         running = status.get("stream")
         if running is None:
             if self.was_streaming:

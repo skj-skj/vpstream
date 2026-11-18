@@ -339,3 +339,81 @@ def menu_for(status: dict[str, Any], device: dict[str, Any] | None) -> dict[str,
     menu = videos[number - 1].get("menu") if 0 < number <= len(videos) else None
     menu = menu or {"audio": [], "subs": []}
     return {"audio": menu["audio"], "subs": [{"value": "off", "label": "Off"}, *menu["subs"]]}
+
+
+# --- the prepared videos (the library)
+
+
+@dataclass(frozen=True)
+class LibraryRow:
+    key: str
+    source: str
+    name: str
+    subtitles: str
+    size: str
+    state: str
+    ready: bool  # a browser can play it now
+
+    @property
+    def cells(self) -> tuple[str, ...]:
+        return (self.name, self.subtitles, self.size, self.state)
+
+
+def library_rows(rows: Sequence[dict[str, Any]]) -> list[LibraryRow]:
+    """What `Control.prepared` lists, as the window shows it: ready ones first, by name."""
+    found = []
+    for row in rows:
+        burn = set(row.get("burn") or [])
+        subs = sorted(set(row.get("soft") or []) | burn)
+        said = ", ".join(f"{n} (drawn in)" if n in burn else str(n) for n in subs)
+        if row.get("stale"):
+            state = "the file changed or is gone"
+        elif row.get("busy"):
+            state = "being prepared"
+        elif not row.get("base"):
+            state = "not ready (no base version)"
+        elif row.get("in_use"):
+            state = "streaming now"
+        elif row.get("unchecked"):
+            state = "ready (the file cannot be looked at now)"
+        else:
+            state = "ready"
+        found.append(
+            LibraryRow(
+                key=str(row["key"]),
+                source=str(row["source"]),
+                name=ntpath.basename(str(row["source"])),
+                subtitles=said or "none",
+                size=size(int(row.get("bytes") or 0)),
+                state=state,
+                ready=bool(row.get("base")) and not row.get("stale") and not row.get("busy"),
+            )
+        )
+    return sorted(found, key=lambda r: (not r.ready, r.name.lower()))
+
+
+def prepared_subs(rows: Sequence[dict[str, Any]], source: str) -> list[int]:
+    """The subtitle tracks prepared for `source` (drawn by the player or drawn in)."""
+    for row in rows:
+        if ntpath.normcase(str(row.get("source"))) == ntpath.normcase(source):
+            return sorted(set(row.get("soft") or []) | set(row.get("burn") or []))
+    return []
+
+
+def switch_options(running: dict[str, Any] | None, source: str) -> dict[str, Any]:
+    """A browser stream of a prepared file; in place of a running stream, at its address
+    and with its policy, so a TV only reloads the page to get the next video."""
+    options: dict[str, Any] = {"file": source, "mode": BROWSER, "sub": "off"}
+    if running:
+        options["alias"] = running["alias"]
+        options["policy"] = running["policy"]
+    return options
+
+
+def all_jobs(prepare: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The queue as the Prepare tab shows it: what runs and waits, then the last 10 that
+    ended, newest first."""
+    active = [j for j in prepare if j.get("state") in ("queued", "running")]
+    ended = [j for j in prepare if j.get("state") not in ("queued", "running")]
+    ended.sort(key=lambda j: j.get("finished") or 0, reverse=True)
+    return active + ended[:10]

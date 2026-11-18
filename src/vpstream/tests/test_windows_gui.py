@@ -306,3 +306,48 @@ def test_where_a_browser_is_and_its_choices() -> None:
     assert found["audio"] == menu["audio"]
     assert found["subs"] == [{"value": "off", "label": "Off"}, *menu["subs"]]
     assert model.menu_for(status, None) == {"audio": [], "subs": [{"value": "off", "label": "Off"}]}
+
+
+# --- the prepared videos
+
+ROW = {
+    "key": "k1", "source": "C:\\Films\\B film.mkv", "stale": False, "unchecked": False,
+    "base": "copy", "soft": [2], "burn": [5], "bytes": 40_000_000, "in_use": False, "busy": False,
+}  # fmt: skip
+
+
+def test_the_prepared_videos_ready_ones_first() -> None:
+    rows = [
+        {**ROW, "key": "k2", "source": "C:\\Films\\a gone.mkv", "stale": True},
+        ROW,
+        {**ROW, "key": "k3", "source": "D:\\x\\c.mkv", "busy": True, "soft": [], "burn": []},
+        {**ROW, "key": "k4", "source": "D:\\x\\d.mkv", "in_use": True},
+        {**ROW, "key": "k5", "source": "D:\\x\\e.mkv", "base": ""},
+    ]
+    found = model.library_rows(rows)
+    assert [r.key for r in found] == ["k1", "k4", "k2", "k3", "k5"]
+    assert found[0].cells == ("B film.mkv", "2, 5 (drawn in)", "40.0 MB", "ready")
+    assert found[1].state == "streaming now" and found[1].ready
+    assert found[2].state == "the file changed or is gone" and not found[2].ready
+    assert found[3].state == "being prepared" and found[3].subtitles == "none"
+    assert found[4].state == "not ready (no base version)" and not found[4].ready
+
+
+def test_what_a_prepared_file_starts_with() -> None:
+    assert model.prepared_subs([ROW], "c:\\films\\B FILM.mkv") == [2, 5]  # either case
+    assert model.prepared_subs([ROW], "C:\\other.mkv") == []
+
+
+def test_the_next_video_takes_the_running_streams_address() -> None:
+    running = {"alias": "tv", "policy": gate.LOCKED}
+    assert model.switch_options(running, "C:\\b.mkv") == {
+        "file": "C:\\b.mkv", "mode": "browser", "sub": "off", "alias": "tv", "policy": "locked",
+    }  # fmt: skip
+    assert "alias" not in model.switch_options(None, "C:\\b.mkv")
+
+
+def test_the_queue_shows_what_runs_then_the_last_that_ended() -> None:
+    jobs = [{"id": n, "state": "done", "finished": float(n)} for n in range(15)]
+    jobs += [{"id": 99, "state": "queued"}, {"id": 98, "state": "running"}]
+    shown = model.all_jobs(jobs)
+    assert [j["id"] for j in shown] == [99, 98, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5]
