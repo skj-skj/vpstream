@@ -259,37 +259,6 @@ def what_is_left(plans: Sequence[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def jobs_of(prepare: Sequence[dict[str, Any]], names: Sequence[str]) -> list[dict[str, Any]]:
-    """The prepare jobs of these videos (by file name), the newest of each task."""
-    wanted = set(names)
-    newest: dict[tuple[str, str], dict[str, Any]] = {}
-    for job in prepare:
-        if job.get("name") in wanted:
-            newest[(job["name"], job["task"])] = job
-    return list(newest.values())
-
-
-def job_line(job: dict[str, Any]) -> str:
-    state = job.get("state")
-    what = f"{job['name']}: {job['task']}"
-    if state == "running" and not job.get("progress"):
-        return f"{what}: starting..."
-    if state == "running":
-        left = job.get("seconds_left")
-        return f"{what}, {job['progress'] * 100:.0f}%" + (
-            f", about {text.duration(left)} left" if left is not None else ""
-        )
-    if state == "failed":
-        return f"{what}: failed: {job.get('error') or 'see the log'}"
-    if state == "queued":
-        return f"{what}: waits for the one before"
-    return f"{what}: {state}"
-
-
-def busy(jobs: Sequence[dict[str, Any]]) -> bool:
-    return any(j.get("state") in ("queued", "running") for j in jobs)
-
-
 def browser_start(options: dict[str, Any], audio: int | None, sub: int | None) -> dict[str, Any]:
     """A browser stream's start: the audio and subtitles each browser begins with."""
     found = {**options, "mode": BROWSER}
@@ -410,10 +379,71 @@ def switch_options(running: dict[str, Any] | None, source: str) -> dict[str, Any
     return options
 
 
-def all_jobs(prepare: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The queue as the Prepare tab shows it: what runs and waits, then the last 10 that
-    ended, newest first."""
-    active = [j for j in prepare if j.get("state") in ("queued", "running")]
-    ended = [j for j in prepare if j.get("state") not in ("queued", "running")]
-    ended.sort(key=lambda j: j.get("finished") or 0, reverse=True)
-    return active + ended[:10]
+# --- the queue: one row for each video
+
+
+@dataclass(frozen=True)
+class VideoJob:
+    """The parts of one video queued by one Prepare (its jobs, by consecutive ids), as the
+    queue shows them: one line, one bar."""
+
+    key: int  # the first job's id
+    source: str
+    name: str
+    state: str  # running, queued, done, failed or cancelled
+    progress: float  # 0..1, the parts weighted by how long each is expected to take
+    line: str
+
+
+def video_jobs(prepare: Sequence[dict[str, Any]]) -> list[VideoJob]:
+    """What runs and waits first, then the last 10 videos that ended."""
+    by_source: dict[str, list[list[dict[str, Any]]]] = {}
+    for job in sorted(prepare, key=lambda j: int(j["id"])):
+        runs = by_source.setdefault(str(job["source"]), [])
+        if runs and int(job["id"]) == int(runs[-1][-1]["id"]) + 1:
+            runs[-1].append(job)
+        else:
+            runs.append([job])
+    found = [_video_job(run) for runs in by_source.values() for run in runs]
+    active = [v for v in found if v.state in ("queued", "running")]
+    ended = [v for v in found if v.state not in ("queued", "running")]
+    return sorted(active, key=lambda v: v.key) + sorted(ended, key=lambda v: -v.key)[:10]
+
+
+def _video_job(run: list[dict[str, Any]]) -> VideoJob:
+    states = [str(j.get("state")) for j in run]
+    weights = [max(float(j.get("estimate") or 0), 1.0) for j in run]
+    done = [
+        1.0 if s == "done" else float(j.get("progress") or 0)
+        for j, s in zip(run, states, strict=True)
+    ]
+    progress = sum(w * d for w, d in zip(weights, done, strict=True)) / sum(weights)
+    name = str(run[0]["name"])
+    parts = f"{len(run)} part" + ("s" if len(run) != 1 else "")
+    if "running" in states or "queued" in states:
+        state = "running" if "running" in states else "queued"
+        current = next((j for j in run if j.get("state") == "running"), None)
+        if current is None:
+            line = f"{name}: waits for the one before ({parts})"
+        else:
+            number = run.index(current) + 1
+            left = sum(
+                float(j.get("seconds_left") or 0)
+                for j in run
+                if j.get("state") in ("queued", "running")
+            )
+            what = f"part {number} of {len(run)}: {current['task']}"
+            line = (
+                f"{name}: {what}, starting..."
+                if not current.get("progress")
+                else f"{name}: {what}, {progress * 100:.0f}%, about {text.duration(left)} left"
+            )
+    elif "failed" in states:
+        state = "failed"
+        bad = next(j for j in run if j.get("state") == "failed")
+        line = f"{name}: {bad['task']} failed: {bad.get('error') or 'see the log'}"
+    elif "cancelled" in states:
+        state, line = "cancelled", f"{name}: cancelled"
+    else:
+        state, line, progress = "done", f"{name}: prepared ({parts})", 1.0
+    return VideoJob(int(run[0]["id"]), str(run[0]["source"]), name, state, progress, line)

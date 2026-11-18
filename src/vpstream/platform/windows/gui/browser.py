@@ -85,7 +85,7 @@ class PrepareTab:
         self.source = ""
         self.subs: list[model.Track] = []
         self.checks: dict[int, tk.BooleanVar] = {}
-        self.job_rows: dict[int, tuple[ttk.Frame, ttk.Label, JobBar]] = {}
+        self.job_rows: dict[int, tuple[ttk.Frame, ttk.Label, JobBar, ttk.Button]] = {}
         self.active = 0
         self.library: list[model.LibraryRow] = []
         self.library_raw: list[dict[str, Any]] = []
@@ -238,36 +238,48 @@ class PrepareTab:
     # --- the queue
 
     def show(self, status: dict[str, Any]) -> None:
-        jobs = model.all_jobs(status.get("prepare") or [])
-        ids = [int(job["id"]) for job in jobs]
+        jobs = model.video_jobs(status.get("prepare") or [])
+        ids = [job.key for job in jobs]
         for key in [k for k in self.job_rows if k not in ids]:
             self.job_rows.pop(key)[0].destroy()
-        for job in jobs:
-            key = int(job["id"])
-            if key not in self.job_rows:
+        for at, job in enumerate(jobs):
+            if job.key not in self.job_rows:
                 row = ttk.Frame(self.jobs)
-                row.pack(fill="x", pady=1)
-                label = ttk.Label(row, width=64)
+                label = ttk.Label(row, width=70)
                 label.pack(side="left")
                 bar = JobBar(row)
-                source = str(job["source"])
-                cancel = functools.partial(self.cancel, source)
-                ttk.Button(row, text="Cancel", command=cancel).pack(side="left")
-                self.job_rows[key] = (row, label, bar)
-            _, label, bar = self.job_rows[key]
-            line = model.job_line(job)
-            if label.cget("text") != line:
-                label.configure(text=line)
-            bar.show(str(job.get("state")), float(job.get("progress") or 0))
+                cancel = ttk.Button(
+                    row, text="Cancel", command=functools.partial(self.cancel, job.source)
+                )
+                self.job_rows[job.key] = (row, label, bar, cancel)
+            row, label, bar, cancel = self.job_rows[job.key]
+            if row.winfo_manager() and self.jobs.pack_slaves().index(row) != at:
+                row.pack_forget()
+            if not row.winfo_manager():
+                after = self.jobs.pack_slaves()
+                if at < len(after):
+                    row.pack(fill="x", pady=1, before=after[at])
+                else:
+                    row.pack(fill="x", pady=1)
+            if label.cget("text") != job.line:
+                label.configure(text=job.line)
+            starting = job.state == "running" and job.progress <= 0.0
+            bar.show("running" if starting else job.state, job.progress)
+            # Only a video with parts still to make can be cancelled.
+            can_cancel = job.state in ("queued", "running")
+            if can_cancel and not cancel.winfo_manager():
+                cancel.pack(side="left")
+            elif not can_cancel and cancel.winfo_manager():
+                cancel.pack_forget()
+        active = sum(1 for j in jobs if j.state in ("queued", "running"))
         if jobs and self.empty.winfo_manager():
             self.empty.pack_forget()
         elif not jobs and not self.empty.winfo_manager():
             self.empty.pack(anchor="w", padx=8, pady=2)
-        active = sum(1 for j in jobs if j.get("state") in ("queued", "running"))
         ended = active < self.active
         self.active = active
         if ended:
-            self.window.say("Prepared." if not active else f"{active} parts still to prepare.")
+            self.window.say("Prepared." if not active else f"{active} videos still to prepare.")
             self.plan()
         now = float(status.get("now") or 0)
         if ended or now - self.read_at >= LIBRARY_SECONDS:

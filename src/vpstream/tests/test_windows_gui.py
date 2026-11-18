@@ -252,26 +252,6 @@ def test_the_tracks_to_offer_and_what_is_left() -> None:
     assert model.what_is_left([unreadable]) == ["bad.mkv: ffprobe cannot read it"]
 
 
-def test_the_jobs_of_the_chosen_videos() -> None:
-    jobs = [
-        {"name": "film.mkv", "task": "base version (copy)", "state": "failed", "error": "x"},
-        {"name": "film.mkv", "task": "base version (copy)", "state": "running",
-         "progress": 0.42, "seconds_left": 30.0},
-        {"name": "other.mkv", "task": "base version (copy)", "state": "queued"},
-        {"name": "film.mkv", "task": "subtitle 5 (burned in)", "state": "queued"},
-    ]  # fmt: skip
-    mine = model.jobs_of(jobs, ["film.mkv"])
-    assert [model.job_line(j) for j in mine] == [
-        "film.mkv: base version (copy), 42%, about 30s left",
-        "film.mkv: subtitle 5 (burned in): waits for the one before",
-    ]
-    assert model.busy(mine) and not model.busy([{"state": "done"}])
-    starting = {"name": "a", "task": "t", "state": "running", "progress": 0.0}
-    assert model.job_line(starting) == "a: t: starting..."
-    failed = {"name": "a", "task": "t", "state": "failed", "error": "ffmpeg failed"}
-    assert model.job_line(failed) == "a: t: failed: ffmpeg failed"
-
-
 def test_a_browser_start_names_what_each_browser_begins_with() -> None:
     options = {"file": "C:\\a.mkv", "mode": "direct", "policy": "approval"}
     assert model.browser_start(options, 2, 5) == {
@@ -346,8 +326,42 @@ def test_the_next_video_takes_the_running_streams_address() -> None:
     assert "alias" not in model.switch_options(None, "C:\\b.mkv")
 
 
-def test_the_queue_shows_what_runs_then_the_last_that_ended() -> None:
-    jobs = [{"id": n, "state": "done", "finished": float(n)} for n in range(15)]
-    jobs += [{"id": 99, "state": "queued"}, {"id": 98, "state": "running"}]
-    shown = model.all_jobs(jobs)
-    assert [j["id"] for j in shown] == [99, 98, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5]
+def job(id: int, state: str, task: str, source: str = "C:\\a.mkv", **more: Any) -> dict[str, Any]:
+    name = source.rsplit("\\", 1)[-1]
+    found = {"id": id, "source": source, "name": name, "task": task, "state": state}
+    return {**found, "estimate": 10.0, "progress": 0.0, "seconds_left": None, **more}
+
+
+def test_the_queue_has_one_row_and_one_bar_for_each_video() -> None:
+    jobs = [
+        job(1, "done", "base version (copy)"),
+        job(2, "running", "subtitle 1 (soft)", progress=0.5, seconds_left=5.0),
+        job(3, "queued", "subtitle 4 (burned in)", estimate=30.0, seconds_left=30.0),
+        job(4, "queued", "base version (copy)", source="C:\\b.mkv"),
+        job(5, "done", "base version (copy)", source="C:\\c.mkv"),
+    ]
+    first, second, third = model.video_jobs(jobs)
+    assert (first.key, first.state, second.state, third.state) == (1, "running", "queued", "done")
+    assert first.progress == pytest.approx((10 * 1 + 10 * 0.5) / 50)  # by expected time
+    assert first.line == "a.mkv: part 2 of 3: subtitle 1 (soft), 30%, about 35s left"
+    assert second.line == "b.mkv: waits for the one before (1 part)"
+    assert (third.line, third.progress) == ("c.mkv: prepared (1 part)", 1.0)
+
+
+def test_a_video_prepared_again_is_a_row_of_its_own() -> None:
+    jobs = [job(1, "done", "base version (copy)"), job(2, "queued", "x", source="C:\\b.mkv"),
+            job(3, "running", "subtitle 2 (soft)")]  # fmt: skip
+    rows = model.video_jobs(jobs)
+    assert [(r.key, r.state) for r in rows] == [(2, "queued"), (3, "running"), (1, "done")]
+    assert rows[1].line.endswith("starting...")
+
+
+def test_a_video_that_failed_or_was_cancelled_says_so() -> None:
+    failed = model.video_jobs(
+        [job(1, "done", "base"), job(2, "failed", "subtitle 4", error="ffmpeg")]
+    )
+    assert failed[0].line == "a.mkv: subtitle 4 failed: ffmpeg" and failed[0].state == "failed"
+    cancelled = model.video_jobs([job(1, "cancelled", "base"), job(2, "cancelled", "sub")])
+    assert cancelled[0].line == "a.mkv: cancelled"
+    many = model.video_jobs([job(n, "done", "base", source=f"C:\\v{n}.mkv") for n in range(15)])
+    assert [r.key for r in many] == list(range(14, 4, -1))  # the last 10 that ended
