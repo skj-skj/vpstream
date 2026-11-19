@@ -451,6 +451,8 @@ def test_the_questions() -> None:
     assert model.close_question(False, False) is None
     assert "is running" in (model.close_question(True, True) or "")
     assert "is starting" in (model.close_question(True, False) or "")
+    assert "being downloaded" in (model.close_question(False, False, downloading=True) or "")
+    assert "Stop both" in (model.close_question(False, True, downloading=True) or "")
     assert model.cancelled_said(3) == "Cancelled 3 parts."
 
 
@@ -507,3 +509,28 @@ def test_the_tools_questions() -> None:
     )
     assert "in place of vpstream's copy" in model.ask_install("Caddy", "2.12.0", 0, "x", own=True)
     assert model.ask_remove_tool("Caddy").startswith("Remove vpstream's copy of Caddy?")
+
+
+def test_a_downloads_speed_is_over_the_last_seconds() -> None:
+    samples, rate = model.speed([], 100.0, 0)
+    assert rate is None  # one sample: no speed yet
+    samples, rate = model.speed(samples, 101.0, 4_000_000)
+    assert rate == 4_000_000.0
+    samples, rate = model.speed(samples, 105.0, 12_000_000)  # a slow line: 4 s apart
+    assert samples == [(101.0, 4_000_000), (105.0, 12_000_000)] and rate == 2_000_000.0
+    samples, rate = model.speed(samples, 106.0, 22_000_000)
+    assert rate == 10_000_000.0  # it follows the line, not the average since the start
+    samples, rate = model.speed(samples, 120.0, 22_000_000)
+    assert samples[0][0] == 106.0 and rate == 0.0  # stalled: 0, which is not shown
+    samples, rate = model.speed(samples, 106.5, 1_000)  # a new download: from its start
+    assert samples == [(106.5, 1_000)] and rate is None
+
+
+def test_what_a_download_says() -> None:
+    assert model.progress_said("unpacking ffmpeg", 0, 0, None) == "unpacking ffmpeg"
+    assert model.progress_said("downloading Caddy 2.11.9", 6_100_000, 18_400_000, 4_200_000) == (
+        "downloading Caddy 2.11.9: 6.1 MB of 18.4 MB, 4.2 MB/s"
+    )
+    assert model.progress_said("downloading x", 5, 10, None) == "downloading x: 5 B of 10 B"
+    assert model.progress_said("downloading x", 0, 10, 0.0) == "downloading x: 0 B of 10 B"
+    assert model.progress_said("downloading x", 10, 10, 9.0) == "downloading x: 10 B of 10 B"

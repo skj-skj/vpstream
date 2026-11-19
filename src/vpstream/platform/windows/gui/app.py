@@ -16,6 +16,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
@@ -189,6 +190,7 @@ class Window(QMainWindow):
         self.setup_missing = False
         self.kind = "file"
         self.setup_rows: dict[str, tuple[QLabel, widgets.Bar]] = {}
+        self.setup_samples: dict[str, list[model.Sample]] = {}  # for each download's speed
         self.setWindowTitle("vpstream")
         self.setWindowIcon(QIcon(str(shortcut.ICON)))
         self.resize(*SIZE)
@@ -469,9 +471,12 @@ class Window(QMainWindow):
 
         def progress(name: str) -> Callable[[str, int, int], None]:
             def show(what: str, done: int, total: int) -> None:
-                self.bridge.post(functools.partial(self._progress, name, what, done, total))
+                with contextlib.suppress(RuntimeError):  # the window is gone
+                    self.bridge.post(functools.partial(self._progress, name, what, done, total))
 
-            return show
+            return widgets.paced(show)
+
+        self.setup_samples = {name: [] for name in names}
 
         def work() -> tuple[list[str], list[str]]:
             problems = []
@@ -493,7 +498,9 @@ class Window(QMainWindow):
 
     def _progress(self, name: str, what: str, done: int, total: int) -> None:
         label, bar = self.setup_rows[name]
-        label.setText(model.setup_line(name, what))
+        samples = self.setup_samples.get(name, [])
+        self.setup_samples[name], rate = model.speed(samples, time.monotonic(), done)
+        label.setText(model.setup_line(name, model.progress_said(what, done, total, rate)))
         bar.set(model.setup_target(what, done, total))
 
     def _installed(self, found: tuple[list[str], list[str]]) -> None:
@@ -849,7 +856,7 @@ class Window(QMainWindow):
         if self.closing or self.asking_close:
             return
         streaming = bool(self.status and self.status.get("stream"))
-        question = model.close_question(self.starting, streaming)
+        question = model.close_question(self.starting, streaming, bool(self.tools_tab.busy))
         if question is None:
             self._close()
             return
@@ -872,7 +879,10 @@ class Window(QMainWindow):
         def end() -> None:
             # The job under way (a start, say) ends first, unless it takes long (a
             # download); the session's open, if it began, too (it starts the gate).
+            deadline = time.monotonic() + CLOSE_WAIT
             self.worker.thread.join(CLOSE_WAIT)
+            for thread in list(self.tools_tab.threads):  # an install ends its swap first
+                thread.join(max(deadline - time.monotonic(), 0.0))
             if self.open_begun.is_set() and not self.opened.wait(OPEN_WAIT):
                 self.session.log("WARNING: the session still opens; it is closed all the same")
             closing = threading.Thread(target=close_session, name="close-session", daemon=True)

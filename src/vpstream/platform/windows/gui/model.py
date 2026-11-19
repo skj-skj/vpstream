@@ -570,8 +570,15 @@ def cancelled_said(count: int) -> str:
 ONE_AT_A_TIME = "A stream is starting; try again in a moment."
 
 
-def close_question(starting: bool, streaming: bool) -> str | None:
+def close_question(starting: bool, streaming: bool, downloading: bool = False) -> str | None:
     """What closing asks first, None when it just closes."""
+    if downloading and streaming:
+        return (
+            "A stream is running and a program is being downloaded or installed. Stop both "
+            "and close vpstream?"
+        )
+    if downloading:
+        return "A program is being downloaded or installed. Stop it and close vpstream?"
     if streaming:
         return "A stream is running. Stop it and close vpstream?"
     if starting:
@@ -781,3 +788,32 @@ def tool_removed(title: str, removed: bool) -> str:
     if not removed:
         return f"vpstream has no copy of {title} to remove."
     return f"vpstream's copy of {title} is removed."
+
+
+# --- a download's speed: over the last few seconds, so it follows the line as it changes
+
+SPEED_SECONDS = 3.0
+Sample = tuple[float, int]  # (when, bytes done)
+
+
+def speed(samples: Sequence[Sample], now: float, done: int) -> tuple[list[Sample], float | None]:
+    """The samples of the last SPEED_SECONDS with (now, done) added, and the bytes a second
+    over them; None until they span a moment. With none that recent (a slow line, whose
+    count moves less often), the last older one is the start. A count that goes back (a
+    new download) starts again."""
+    usable = [s for s in samples if s[1] <= done]
+    recent = [s for s in usable if now - s[0] <= SPEED_SECONDS]
+    kept = [*(recent or usable[-1:]), (now, done)]
+    first = kept[0]
+    if now - first[0] < 0.5:
+        return kept, None
+    return kept, (done - first[1]) / (now - first[0])
+
+
+def progress_said(what: str, done: int, total: int, rate: float | None) -> str:
+    """`downloading Caddy 2.11.9: 6.1 of 18.4 MB, 4.2 MB/s`; the words alone while nothing
+    is counted (unpacking, checking)."""
+    if not total:
+        return what
+    said = f"{what}: {size(done)} of {size(total)}"
+    return f"{said}, {size(int(rate))}/s" if rate and done < total else said  # not 0 B/s

@@ -2,9 +2,9 @@
 whether a newer release is out, and vpstream's own copies: install one, update it, remove
 it (the one installed for the whole system is used after).
 
-What runs the programs, reads the disk or installs goes through the window's worker; the
-look for new releases (the network) runs on a thread of its own, so it never holds up a
-Start. What the tab says and offers is `model.tool_row`'s.
+The look at what is there goes through the window's worker. The look for new releases
+and each install or removal run on threads of their own: they never hold up a Start, and
+several programs download at once. What the tab says and offers is `model.tool_row`'s.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import functools
 import threading
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtWidgets import (
@@ -71,7 +73,9 @@ class ToolsTab(QWidget):
         self.latest: dict[str, str] = {}
         self.problems: dict[str, str] = {}
         self.checking = False
-        self.busy = ""  # the program being installed or removed
+        self.busy: set[str] = set()  # the programs being installed or removed
+        self.samples: dict[str, list[model.Sample]] = {}  # for each download's speed
+        self.threads: list[threading.Thread] = []  # the installs and removals, for the close
         self.looked = False  # looked for new releases once, when the tab first showed
         self.looking = False  # a look at what is there is queued
         page = QVBoxLayout(self)
@@ -187,16 +191,37 @@ class ToolsTab(QWidget):
             line.latest.setToolTip(row.latest)
             line.action.setText(row.action or model.UPDATE)
             line.action.setVisible(bool(row.action))
-            line.action.setEnabled(not self.busy and bool(self.found))
+            line.action.setEnabled(row.name not in self.busy and bool(self.found))
             line.remove.setVisible(row.can_remove)
-            line.remove.setEnabled(not self.busy)
+            line.remove.setEnabled(row.name not in self.busy)
         self.check_button.setEnabled(not self.checking)
 
-    # --- installing, updating and removing vpstream's copies
+    # --- installing, updating and removing vpstream's copies: each program on a thread of
+    # its own, so several download at once; only that program's buttons wait
+
+    def _run(self, name: str, work: Callable[[], Any], done: Callable[[Any], None]) -> None:
+        """`work` on this program's own thread; `done` with its answer (or the failure) on
+        the window's thread."""
+        log = self.main.session.log
+
+        def run() -> None:
+            try:
+                found = work()
+            except Exception as exc:
+                log(f"WARNING: {name}: {exc!r}")
+                answer = functools.partial(self._failed, name, exc)
+            else:
+                answer = functools.partial(done, found)
+            with contextlib.suppress(RuntimeError):  # the window is gone
+                self.main.bridge.post(answer)
+
+        thread = threading.Thread(target=run, name=f"tool-{name}", daemon=True)
+        self.threads = [t for t in self.threads if t.is_alive()] + [thread]
+        thread.start()
 
     def get_copy(self, name: str) -> None:
         """The latest release (looked up again now), then a question, then the download."""
-        if self.busy:
+        if name in self.busy:
             return
         tool = install.TOOLS[name]
         self._busy(name, model.CHECKING)
@@ -207,15 +232,20 @@ class ToolsTab(QWidget):
                 tool.title, build.version, build.size, row.path if row else None,
                 bool(row and row.own),
             )  # fmt: skip
-            self.main.ask(question, functools.partial(self._download, build), self._done)
+            no = functools.partial(self._done, name)
+            self.main.ask(question, functools.partial(self._download, build), no)
 
-        self.main.worker.do(lambda: install.latest(tool, windows.http()), asked, self._failed)
+        self._run(name, lambda: install.latest(tool, windows.http()), asked)
 
     def _download(self, build: install.Build) -> None:
         name = build.tool.name
 
-        def progress(what: str, done: int, total: int) -> None:
-            self.main.bridge.post(functools.partial(self._progress, name, what, done, total))
+        def post(what: str, done: int, total: int) -> None:
+            with contextlib.suppress(RuntimeError):
+                self.main.bridge.post(functools.partial(self._progress, name, what, done, total))
+
+        progress = widgets.paced(post)
+        self.samples[name] = []
 
         runner, log = self.main.runner, self.main.session.log
 
@@ -224,18 +254,18 @@ class ToolsTab(QWidget):
             log(said)
             return said
 
-        self.main.worker.do(work, self._done, self._failed)
+        self._run(name, work, functools.partial(self._done, name))
 
     def _progress(self, name: str, what: str, done: int, total: int) -> None:
         line = self.lines[name]
-        line.said.setText(what)
+        self.samples[name], rate = model.speed(self.samples[name], time.monotonic(), done)
+        line.said.setText(model.progress_said(what, done, total, rate))
         line.bar.set(model.setup_target(what, done, total))
 
     def remove_copy(self, name: str) -> None:
-        if self.busy:
+        if name in self.busy:
             return
         tool = install.TOOLS[name]
-
         log = self.main.session.log
 
         def work() -> str:
@@ -245,12 +275,12 @@ class ToolsTab(QWidget):
 
         def go() -> None:
             self._busy(name, "")
-            self.main.worker.do(work, self._done, self._failed)
+            self._run(name, work, functools.partial(self._done, name))
 
         self.main.ask(model.ask_remove_tool(tool.title), go)
 
     def _busy(self, name: str, said: str) -> None:
-        self.busy = name
+        self.busy.add(name)
         line = self.lines[name]
         line.said.setText(said)
         line.said.show()
@@ -258,17 +288,16 @@ class ToolsTab(QWidget):
         line.bar.show()
         self.show_rows()
 
-    def _done(self, said: Any = None) -> None:
-        if self.busy:
-            line = self.lines[self.busy]
-            line.bar.hide()
-            line.said.setText("")
-        self.busy = ""
+    def _done(self, name: str, said: Any = None) -> None:
+        line = self.lines[name]
+        line.bar.hide()
+        line.said.setText("")
+        self.busy.discard(name)
         if said:
             self.main.say(str(said))
         self.look()
         self.main.tools_changed()
 
-    def _failed(self, exc: Exception) -> None:
-        self._done()
+    def _failed(self, name: str, exc: Exception) -> None:
+        self._done(name)
         self.main.failed(exc)

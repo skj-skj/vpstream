@@ -21,11 +21,13 @@ import ntpath
 import os
 import re
 import shutil
+import threading
 import time
 import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from vpstream.ffargs import missing_features, parse_ffmpeg_list
 from vpstream.platform import windows
@@ -198,12 +200,37 @@ def missing(runner: Runner) -> list[str]:
     return [t.name for t in TOOLS.values() if not all(runner.which(p) for p in t.programs)]
 
 
+# One install or removal of a tool at a time, whoever asks (the window's Setup box, its
+# Tools tab, which installs several tools at once, the command line): a second is refused.
+_BUSY = {name: threading.Lock() for name in TOOLS}
+
+
+@contextlib.contextmanager
+def _only_one(tool: Tool) -> Any:
+    if not _BUSY[tool.name].acquire(blocking=False):
+        raise SetupError(f"{tool.title} is being installed or removed already")
+    try:
+        yield
+    finally:
+        _BUSY[tool.name].release()
+
+
 def sweep(tools: Path) -> None:
-    """What an install that was cut off left: half a download, an unpacked copy."""
+    """What an install that was cut off left: half a download, an unpacked copy; but not
+    what an install under way uses now. A copy that a swap cut off had moved aside comes
+    back (it is the one that worked)."""
     if not tools.is_dir():
         return
+    for tool in TOOLS.values():
+        old, top = tools / f".old-{tool.top}", tools / tool.top
+        if old.is_dir() and not top.exists() and not _BUSY[tool.name].locked():
+            with contextlib.suppress(OSError):
+                os.replace(old, top)
+    under_way = {f".{what}-{t.name if what == 'install' else t.top}"
+                 for t in TOOLS.values() if _BUSY[t.name].locked()
+                 for what in ("install", "old")}  # fmt: skip
     for path in tools.iterdir():
-        if path.name.startswith("."):
+        if path.name.startswith(".") and path.name not in under_way:
             shutil.rmtree(path, ignore_errors=True)
 
 
@@ -344,6 +371,11 @@ def swap(tools: Path, staged: Path, top: str) -> None:
 
 def install_build(build: Build, tools: Path, runner: Runner, http: Http, progress: Progress) -> str:
     """Download, check and install one release. Returns what was done."""
+    with _only_one(build.tool):
+        return _install(build, tools, runner, http, progress)
+
+
+def _install(build: Build, tools: Path, runner: Runner, http: Http, progress: Progress) -> str:
     tool = build.tool
     sweep(tools)
     _check_space(tools, (build.size or tool.unpacked) + tool.unpacked)  # size 0: not known
@@ -374,13 +406,14 @@ def install_build(build: Build, tools: Path, runner: Runner, http: Http, progres
 def remove_own(tools: Path, tool: Tool) -> bool:
     """Remove vpstream's copy of `tool` (one installed for the system is used after);
     False when there is none."""
-    folder = tools / tool.top
-    if not (folder / MARKER).exists():
-        return False
-    sweep(tools)
-    _not_in_use(folder, tool.title)
-    _retried(functools.partial(shutil.rmtree, folder))
-    return True
+    with _only_one(tool):
+        sweep(tools)
+        folder = tools / tool.top
+        if not (folder / MARKER).exists():
+            return False
+        _not_in_use(folder, tool.title)
+        _retried(functools.partial(shutil.rmtree, folder))
+        return True
 
 
 def uninstall(tools: Path) -> list[str]:

@@ -111,10 +111,11 @@ def tls_context() -> ssl.SSLContext:
 
 
 def http() -> UrlHttp:
-    """The downloads of vpstream on Windows: its programs and their releases."""
-    from vpstream.platform.common import UrlHttp
+    """The downloads of vpstream on Windows: its programs (in parts, see `fetch`) and
+    their releases."""
+    from vpstream.platform.windows.fetch import PartsHttp
 
-    return UrlHttp(tls_context())
+    return PartsHttp(tls_context())
 
 
 def on_windows() -> bool:

@@ -243,8 +243,19 @@ def test_what_an_install_left_is_swept(tmp_path: Path) -> None:
     tools = tmp_path / "tools"
     for name in (".install-ffmpeg", ".old-caddy", "caddy"):
         (tools / name).mkdir(parents=True)
+    (tools / ".install-caddy").mkdir()
+    with install._only_one(install.CADDY):  # Caddy's install is under way: its own stay
+        install.sweep(tools)
+        assert sorted(p.name for p in tools.iterdir()) == [".install-caddy", ".old-caddy", "caddy"]
+        with pytest.raises(SetupError, match="Caddy is being installed or removed already"):
+            install.install_build(
+                pinned(b"z", install.CADDY, "2"), tools, Programs(), Http(b"z"), said()[1]
+            )
     install.sweep(tools)
     assert [p.name for p in tools.iterdir()] == ["caddy"]
+    (tools / "caddy").rename(tools / ".old-caddy")  # a swap cut off by a close
+    install.sweep(tools)
+    assert [p.name for p in tools.iterdir()] == ["caddy"]  # the copy that worked, back
     install.sweep(tmp_path / "none")
 
 

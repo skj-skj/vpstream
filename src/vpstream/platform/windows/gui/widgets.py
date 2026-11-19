@@ -161,6 +161,24 @@ def _fill(
                 )
 
 
+PACE_SECONDS = 0.1
+
+
+def paced(show: Callable[[str, int, int], None]) -> Callable[[str, int, int], None]:
+    """An install's progress, called for every piece downloaded, passed on at most ten times
+    a second (and always when the words change or the download ends), so a fast line does
+    not flood the window's thread."""
+    last_at, last_what = [0.0], [""]
+
+    def progress(what: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if now - last_at[0] >= PACE_SECONDS or what != last_what[0] or done >= total:
+            last_at[0], last_what[0] = now, what
+            show(what, done, total)
+
+    return progress
+
+
 def pick(parent: QWidget, title: str, folder: bool, then: Callable[[str], None]) -> None:
     """Windows' own file or folder picker, opened without waiting: `then` gets the path."""
     dialog = QFileDialog(parent, title)

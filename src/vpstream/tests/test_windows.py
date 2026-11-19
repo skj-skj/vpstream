@@ -313,7 +313,10 @@ def test_windows_downloads_check_certificates_with_certifis() -> None:
     import ssl
 
     pytest.importorskip("certifi", reason="certifi comes with vpstream on Windows")
+    from vpstream.platform.windows.fetch import PartsHttp
+
     http = windows.http()
+    assert isinstance(http, PartsHttp)  # several connections where the server allows
     assert http.context is not None
     assert http.context.verify_mode == ssl.CERT_REQUIRED and http.context.check_hostname
     assert http.context.cert_store_stats()["x509_ca"] > 100  # Mozilla's roots, not the PC's

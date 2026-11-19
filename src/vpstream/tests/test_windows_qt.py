@@ -423,3 +423,48 @@ def test_the_tools_tab_offers_a_copy_an_update_and_a_removal(
     assert wait(
         qt, lambda: caddy.remove.isHidden() and caddy.action.text() == "Install vpstream's copy"
     )
+
+
+def test_two_programs_download_at_the_same_time(
+    qt: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vpstream.platform.windows import install
+
+    both = threading.Barrier(2, timeout=5)  # each install waits for the other to be under way
+    done: list[str] = []
+
+    def found(runner: Any, tools: Path) -> list[install.Found]:
+        return [install.Found(t, None, False, "", None) for t in install.TOOLS.values()]
+
+    def latest(tool: install.Tool, http: Any) -> install.Build:
+        return install.Build(tool, "1.0", "https://example.com/x.zip", "a" * 64, 1)
+
+    def install_build(build: install.Build, *a: Any) -> str:
+        both.wait()  # raises BrokenBarrierError if the other never starts meanwhile
+        done.append(build.name)
+        return f"{build.name} is installed"
+
+    for name, fake in (("found", found), ("latest", latest), ("install_build", install_build)):
+        monkeypatch.setattr(install, name, fake)
+    asked: list[str] = []
+    window = window_for(FakeSession(), tmp_path, answer=lambda t, q: asked.append(t) or True)
+    tab = window.tools_tab
+    tab.look()
+    assert wait(qt, lambda: bool(tab.found))
+    tab.lines["ffmpeg"].action.click()
+    assert tab.busy == {"ffmpeg"} and not tab.lines["ffmpeg"].action.isEnabled()
+    assert tab.lines["mkvtoolnix"].action.isEnabled()  # another program is not held up
+    tab.lines["mkvtoolnix"].action.click()
+    assert wait(qt, lambda: sorted(done) == ["ffmpeg", "mkvtoolnix"] and not tab.busy, 8)
+    assert not any("Barrier" in line for line in window.session.lines)
+
+
+def test_progress_is_passed_on_at_most_ten_times_a_second() -> None:
+    shown: list[tuple[str, int, int]] = []
+    progress = widgets.paced(lambda *a: shown.append(a))
+    for done in range(0, 1000, 10):
+        progress("downloading ffmpeg", done, 1000)
+    progress("downloading ffmpeg", 1000, 1000)  # the end always
+    progress("unpacking ffmpeg", 0, 0)  # and new words
+    assert shown[0] == ("downloading ffmpeg", 0, 1000) and len(shown) == 3
+    assert shown[1:] == [("downloading ffmpeg", 1000, 1000), ("unpacking ffmpeg", 0, 0)]
