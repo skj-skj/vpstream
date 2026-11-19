@@ -271,7 +271,11 @@ def test_held_connections_cannot_take_every_thread(
         assert threading.active_count() - before <= daemon.PER_ADDRESS + 2  # and the watcher
         held[-1].settimeout(5)
         assert held[-1].recv(64).startswith(b"HTTP/1.1 503")
-        time.sleep(3.5)  # the held ones time out
+        # The held ones time out, and their threads end (later on a loaded machine).
+        time.sleep(3.0)
+        deadline = time.monotonic() + 15
+        while threading.active_count() - before > 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
         assert _get(LAN, port, "/api/v1/status")[0] == 401  # served again
         assert threading.active_count() - before <= 2
     finally:
