@@ -262,9 +262,25 @@ def test_the_close_does_not_wait_for_a_job_that_hangs(
     window = window_for(session, tmp_path)
     window.show()
     ran: list[str] = []
-    window.worker.do(lambda: time.sleep(3))  # a download, say
+    under_way = threading.Event()
+    window.worker.do(lambda: under_way.set() or time.sleep(3))  # a download, say
     window.worker.do(lambda: ran.append("queued"))  # dropped: the window closes
+    assert under_way.wait(2)
     started = time.monotonic()
     window.close()
     assert wait(qt, lambda: window.closed, 2) and time.monotonic() - started < 1.5
-    assert session.order == ["close"] and ran == []
+    assert session.order == ["close"] and ran == [] and window.worker.busy == 1
+
+
+def test_a_switch_to_a_browser_stream_shows_the_player_panel(qt: Any, tmp_path: Path) -> None:
+    window = window_for(FakeSession(), tmp_path)
+    window.show()
+    window.show_status(status([], []))  # a direct stream
+    assert window.pages.currentIndex() == 1 and window.players.isHidden()
+    switched = status([], [])
+    switched["stream"] |= {"mode": "browser", "url": "http://192.168.1.73:1337/a", "alias": "a"}
+    window.show_status(switched)  # the same address, now for browsers: no poll between
+    assert not window.players.isHidden()
+    window.starting = True
+    window.update_start()
+    assert not window.live.isEnabled()  # no Stop while one starts

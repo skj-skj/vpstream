@@ -10,6 +10,7 @@ only that thread touches a widget. What the window says and decides is in `model
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import queue
@@ -51,7 +52,9 @@ from vpstream.platform.windows.session import Session
 from vpstream.tools import Runner
 
 POLL_SECONDS = 1.0
-CLOSE_WAIT = 15.0  # at most this long for the job under way (a start, say) before closing
+# How long the close waits for the worker's job under way (a download, say) before the
+# session closes; Control's own work (a start) is waited for all the same.
+CLOSE_WAIT = 15.0
 APP_ID = "vpstream"  # the taskbar's name for the window, not pythonw's
 SIZE = (1100, 760)  # at 125% on a 1920x1080 screen: 1375x950
 SMALLEST = (900, 640)
@@ -88,7 +91,8 @@ class Worker:
     def __init__(self, post: Callable[[Callable[[], None]], None], log: Callable[[str], None]):
         self.jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self.post, self.log = post, log
-        self.busy = 0
+        self.busy = 0  # jobs asked for and not answered (drives and tests wait on it)
+        self.ended = False
         self.thread = threading.Thread(target=self._run, name="window-worker", daemon=True)
         self.thread.start()
 
@@ -110,24 +114,29 @@ class Worker:
                 found = work()
             except Exception as exc:
                 self.log(f"WARNING: {exc!r}\n{traceback.format_exc()}")
-                self.post(functools.partial(self._end, failed, exc))
+                answer = functools.partial(self._end, failed, exc)
             else:
-                self.post(functools.partial(self._end, done, found))
+                answer = functools.partial(self._end, done, found)
+            with contextlib.suppress(RuntimeError):  # the window is gone (it outlived the close)
+                self.post(answer)
 
         self.jobs.put(job)
 
     def _end(self, then: Callable[[Any], None] | None, value: Any) -> None:
         self.busy -= 1
-        if then is not None:
+        if then is not None and not self.ended:  # after stop() no answer is shown
             then(value)
 
     def stop(self) -> None:
-        """No more jobs: the one under way ends, those waiting are dropped."""
+        """No more jobs: the one under way ends, those waiting are dropped, and no answer
+        is shown any more."""
+        self.ended = True
         while True:
             try:
                 self.jobs.get_nowait()
             except queue.Empty:
                 break
+            self.busy -= 1
         self.jobs.put(None)
 
 
@@ -160,6 +169,9 @@ class Window(QMainWindow):
         self.blocking: list[str] = []
         self.awake: threading.Event | None = None  # set to end the keep-awake thread
         self.polling = threading.Event()  # set to end the poll
+        self.opened = threading.Event()  # the session's open has ended (or never began)
+        self.opened.set()
+        self.shown: tuple[str, str] | None = None  # the stream the live page is set up for
         self.was_streaming = False
         self.stopping_on_purpose = False
         self.closing = False
@@ -290,7 +302,7 @@ class Window(QMainWindow):
     def _build_live(self) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
-        live = QGroupBox("Streaming")
+        live = self.live = QGroupBox("Streaming")
         outer.addWidget(live)
         box = QVBoxLayout(live)
         row = QHBoxLayout()
@@ -386,7 +398,15 @@ class Window(QMainWindow):
         the poll, what is missing, the networks, the firewall."""
         self.say(model.STARTING)
         threading.Thread(target=self._poll, name="poll", daemon=True).start()
-        self.worker.do(self.session.open, lambda _: self._opened(), self.failed)
+        self.opened.clear()
+
+        def work() -> None:
+            try:
+                self.session.open()
+            finally:
+                self.opened.set()
+
+        self.worker.do(work, lambda _: self._opened(), self.failed)
 
     def _poll(self) -> None:
         while not self.polling.is_set():
@@ -587,6 +607,7 @@ class Window(QMainWindow):
         if self.browser_mode():
             ready = ready and self.start_panel.ready
         self.start_button.setEnabled(ready)
+        self.live.setEnabled(not self.starting)  # no Stop or Let in while one starts
 
     def _start(self) -> None:
         mode = model.BROWSER if self.browser_mode() else model.DIRECT
@@ -644,9 +665,12 @@ class Window(QMainWindow):
         self.stopping_on_purpose = bool(running)
         self.update_start()
 
+        stopped: list[bool] = []  # written there before the answer is posted, read here
+
         def work() -> dict[str, Any]:
             if running:
                 self.session.stop()
+                stopped.append(True)
             return self.session.start(options)
 
         def started(found: dict[str, Any]) -> None:
@@ -656,7 +680,9 @@ class Window(QMainWindow):
             self.show_status(found)
 
         def failed(exc: Exception) -> None:
-            self.starting = self.stopping_on_purpose = False
+            self.starting = False
+            if not stopped:  # the old stream still runs; else the next status takes it
+                self.stopping_on_purpose = False
             self.update_start()
             self.failed(exc)
 
@@ -729,8 +755,6 @@ class Window(QMainWindow):
         self.prepare_tab.show_status(status)
         running = status.get("stream")
         if running is None:
-            if self.starting:
-                return  # a switch between its stop and its start: the page stays
             if self.was_streaming:
                 self.pages.setCurrentIndex(0)
                 why = self.session.stop_reason()
@@ -738,13 +762,16 @@ class Window(QMainWindow):
                     self.say(model.stopped_said(why))
                 self._awake(False)
             self.was_streaming = self.stopping_on_purpose = False
+            self.shown = None
             return
         if not self.was_streaming:
             self.pages.setCurrentIndex(1)
-            self.new_alias.setText(running["alias"])
-            self.players.setVisible(running["mode"] == model.BROWSER)
             self._awake(True)
         self.was_streaming = True
+        if self.shown != (running["url"], running["mode"]):  # a new stream (a switch too)
+            self.shown = (running["url"], running["mode"])
+            self.new_alias.setText(running["alias"])
+            self.players.setVisible(running["mode"] == model.BROWSER)
         if self.url.text() != running["url"]:
             self.url.setText(running["url"])
         lines = "\n".join(model.stream_lines(status))
@@ -789,8 +816,8 @@ class Window(QMainWindow):
         threading.Thread(target=work, name="open-log", daemon=True).start()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Closing asks first while a stream runs; the session then closes off this thread,
-        and the window goes once it has."""
+        """Closing asks first while a stream runs or starts; the session then closes off
+        this thread, and the window goes once it has."""
         if self.closed:
             event.accept()
             return
@@ -819,8 +846,9 @@ class Window(QMainWindow):
         self.worker.stop()
 
         def end() -> None:
-            # The job under way (a start, say) ends first, so nothing starts after the
-            # session closed; one that takes too long (a download) is not waited for.
+            # The session's open ends first (it starts the gate), and the job under way
+            # (a start, say) too, unless it takes long (a download).
+            self.opened.wait()
             self.worker.thread.join(CLOSE_WAIT)
             try:
                 self.session.close()
