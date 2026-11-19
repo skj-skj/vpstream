@@ -55,6 +55,7 @@ POLL_SECONDS = 1.0
 # How long the close waits for the worker's job under way (a download, say) before the
 # session closes; Control's own work (a start) is waited for all the same.
 CLOSE_WAIT = 15.0
+OPEN_WAIT = 60.0  # and for the session's open, which starts the gate (a stream taken up)
 APP_ID = "vpstream"  # the taskbar's name for the window, not pythonw's
 SIZE = (1100, 760)  # at 125% on a 1920x1080 screen: 1375x950
 SMALLEST = (900, 640)
@@ -106,7 +107,10 @@ class Worker:
         done: Callable[[Any], None] | None = None,
         failed: Callable[[Exception], None] | None = None,
     ) -> None:
-        """Run `work` here; `done` (or `failed`) then runs on the window's thread."""
+        """Run `work` here; `done` (or `failed`) then runs on the window's thread. Once
+        stopped, nothing more is run."""
+        if self.ended:
+            return
         self.busy += 1
 
         def job() -> None:
@@ -169,8 +173,8 @@ class Window(QMainWindow):
         self.blocking: list[str] = []
         self.awake: threading.Event | None = None  # set to end the keep-awake thread
         self.polling = threading.Event()  # set to end the poll
-        self.opened = threading.Event()  # the session's open has ended (or never began)
-        self.opened.set()
+        self.open_begun = threading.Event()  # the worker took up the session's open
+        self.opened = threading.Event()  # and it ended
         self.shown: tuple[str, str] | None = None  # the stream the live page is set up for
         self.was_streaming = False
         self.stopping_on_purpose = False
@@ -398,9 +402,9 @@ class Window(QMainWindow):
         the poll, what is missing, the networks, the firewall."""
         self.say(model.STARTING)
         threading.Thread(target=self._poll, name="poll", daemon=True).start()
-        self.opened.clear()
 
         def work() -> None:
+            self.open_begun.set()
             try:
                 self.session.open()
             finally:
@@ -755,6 +759,8 @@ class Window(QMainWindow):
         self.prepare_tab.show_status(status)
         running = status.get("stream")
         if running is None:
+            if self.starting and self.stopping_on_purpose:
+                return  # a switch, between its stop and its start: the page stays
             if self.was_streaming:
                 self.pages.setCurrentIndex(0)
                 why = self.session.stop_reason()
@@ -846,10 +852,11 @@ class Window(QMainWindow):
         self.worker.stop()
 
         def end() -> None:
-            # The session's open ends first (it starts the gate), and the job under way
-            # (a start, say) too, unless it takes long (a download).
-            self.opened.wait()
+            # The job under way (a start, say) ends first, unless it takes long (a
+            # download); the session's open, if it began, too (it starts the gate).
             self.worker.thread.join(CLOSE_WAIT)
+            if self.open_begun.is_set() and not self.opened.wait(OPEN_WAIT):
+                self.session.log("WARNING: closing while the session still opens")
             try:
                 self.session.close()
             except Exception as exc:

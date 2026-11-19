@@ -110,7 +110,7 @@ class FakeSession:
         self.lines.append(line)
 
     def stop_reason(self) -> str:
-        return ""
+        return "Caddy ended"
 
     def close(self) -> None:
         time.sleep(0.2)  # as the real one, it takes a moment: the window does not wait
@@ -119,6 +119,8 @@ class FakeSession:
 
     def start(self, options: dict[str, Any]) -> dict[str, Any]:
         time.sleep(0.3)  # a start takes a moment
+        if options.get("file") == "C:\\gone.mkv":
+            raise FileNotFoundError("C:\\gone.mkv")
         self.order.append(f"start {options.get('file')}")
         return status([], [])
 
@@ -284,3 +286,37 @@ def test_a_switch_to_a_browser_stream_shows_the_player_panel(qt: Any, tmp_path: 
     window.starting = True
     window.update_start()
     assert not window.live.isEnabled()  # no Stop while one starts
+
+
+def test_a_switch_whose_start_fails_says_only_that(qt: Any, tmp_path: Path) -> None:
+    session = FakeSession()
+    told: list[str] = []
+    window = window_for(session, tmp_path, answer=lambda t, q: told.append(t) or True)
+    window.show()
+    window.show_status(status([], []))
+    window.stream_prepared("C:\\gone.mkv")  # asked, then the old one stops, the new one fails
+    assert wait(qt, lambda: window.starting)
+    gap = {"now": 1000.0, "prepare": [], "stream": None}
+    window.show_status(gap)  # a poll between its stop and its start: the page stays
+    assert window.pages.currentIndex() == 1
+    assert wait(qt, lambda: not window.starting, 3)
+    assert session.order == ["stop"] and "gone.mkv" in told[-1]
+    window.show_status(gap)  # the next poll: the stop was the switch's, not Caddy's
+    assert window.pages.currentIndex() == 0 and "Caddy ended" not in window.said.text()
+    window.show_status(status([], []))
+    window.show_status(gap)  # a stream that stops by itself says why
+    assert window.said.text() == "The stream stopped: Caddy ended."
+
+
+def test_the_close_does_not_wait_for_an_open_that_never_began(qt: Any, tmp_path: Path) -> None:
+    session = FakeSession()
+    session.open = lambda: None  # type: ignore[method-assign]
+    window = window_for(session, tmp_path)
+    window.show()
+    window.worker.do(lambda: time.sleep(0.3))  # ahead of the open, which is then dropped
+    window.begin()
+    window.polling.set()
+    window.close()
+    assert wait(qt, lambda: window.closed, 3) and not window.open_begun.is_set()
+    window.worker.do(lambda: None)  # after the close: not taken
+    assert window.worker.busy == 0
