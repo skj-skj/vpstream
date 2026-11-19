@@ -584,6 +584,7 @@ def faked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr("vpstream.tools.SystemRunner", lambda: FakeRunner(("mkvmerge",)))
     monkeypatch.setattr(install, "install_build", lambda b, *a: done.append(b.name) or "ok")
+    monkeypatch.setattr(windows, "http", lambda: Http(b""))  # certifi is Windows' only
     versions = {"ffmpeg": "9.0.2", "caddy": "2.11.9", "mkvtoolnix": "103.0"}
     monkeypatch.setattr(
         install, "latest", lambda tool, http: pinned(b"z", tool, versions[tool.name])

@@ -254,7 +254,9 @@ def test_held_connections_cannot_take_every_thread(
 
     from vpstream import daemon
 
-    monkeypatch.setattr(daemon, "REQUEST_SECONDS", 1.0)
+    # Long enough that the 40 connections are open before the first is let go, also on a
+    # loaded machine (the tests run on every core).
+    monkeypatch.setattr(daemon, "REQUEST_SECONDS", 3.0)
     run = _running(short_tmp).start()
     held: list[socket.socket] = []
     try:
@@ -269,7 +271,7 @@ def test_held_connections_cannot_take_every_thread(
         assert threading.active_count() - before <= daemon.PER_ADDRESS + 2  # and the watcher
         held[-1].settimeout(5)
         assert held[-1].recv(64).startswith(b"HTTP/1.1 503")
-        time.sleep(1.5)  # the held ones time out
+        time.sleep(3.5)  # the held ones time out
         assert _get(LAN, port, "/api/v1/status")[0] == 401  # served again
         assert threading.active_count() - before <= 2
     finally:
