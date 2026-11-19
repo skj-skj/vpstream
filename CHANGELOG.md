@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.17.0 (2026-11-19)
+
+### Features
+
+- Added Windows support ([#31](https://github.com/skj-skj/vpstream/pull/31),
+  [`4fb730a`](https://github.com/skj-skj/vpstream/commit/4fb730a810bfdab1a6038d6b109efa169524a4b8))
+
+
 ## v0.16.1 (2026-11-17)
 
 ### Bug Fixes
