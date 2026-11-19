@@ -405,6 +405,7 @@ class LibraryRow:
     size: str
     state: str
     ready: bool  # a browser can play it now
+    bytes: int = 0
 
     @property
     def cells(self) -> tuple[str, ...]:
@@ -439,6 +440,7 @@ def library_rows(rows: Sequence[dict[str, Any]]) -> list[LibraryRow]:
                 size=size(int(row.get("bytes") or 0)),
                 state=state,
                 ready=bool(row.get("base")) and not row.get("stale") and not row.get("busy"),
+                bytes=int(row.get("bytes") or 0),
             )
         )
     return sorted(found, key=lambda r: (not r.ready, r.name.lower()))
@@ -489,7 +491,9 @@ class VideoJob:
 
 
 def video_jobs(prepare: Sequence[dict[str, Any]]) -> list[VideoJob]:
-    """What runs and waits first, then the last 10 videos that ended."""
+    """What runs and waits, then the last 5 videos that failed or were cancelled, to say
+    why, unless the video was queued again since. A video prepared leaves the queue: it is
+    in the list of prepared videos."""
     by_source: dict[str, list[list[dict[str, Any]]]] = {}
     for job in sorted(prepare, key=lambda j: int(j["id"])):
         runs = by_source.setdefault(str(job["source"]), [])
@@ -499,8 +503,9 @@ def video_jobs(prepare: Sequence[dict[str, Any]]) -> list[VideoJob]:
             runs.append([job])
     found = [_video_job(run) for runs in by_source.values() for run in runs]
     active = [v for v in found if v.active]
-    ended = [v for v in found if not v.active]
-    return sorted(active, key=lambda v: v.key) + sorted(ended, key=lambda v: -v.key)[:10]
+    latest = {v.source: v.key for v in sorted(found, key=lambda v: v.key)}
+    ended = [v for v in found if v.state in ("failed", "cancelled") and latest[v.source] == v.key]
+    return sorted(active, key=lambda v: v.key) + sorted(ended, key=lambda v: -v.key)[:5]
 
 
 def _video_job(run: list[dict[str, Any]]) -> VideoJob:
@@ -538,7 +543,7 @@ def _video_job(run: list[dict[str, Any]]) -> VideoJob:
     elif "cancelled" in states:
         state, line = "cancelled", f"{name}: cancelled"
     else:
-        state, line, progress = "done", f"{name}: prepared ({count})", 1.0
+        state, line, progress = "done", "", 1.0  # not shown: it left the queue
     return VideoJob(int(run[0]["id"]), str(run[0]["source"]), name, state, progress, line)
 
 
@@ -578,7 +583,7 @@ PICK_DEVICE = "Select a device in the list first."
 PICK_BROWSER = "Select a browser in the list first."
 PICK_PREPARED = "Select a video in the list first."
 RENAME = "A name for this device:"
-KEPT = "It is streaming or being prepared, so it was kept."
+PICK_ONE = "Select one video to stream."
 NOTHING_QUEUED = "Nothing is being prepared."
 SELECT_BROWSER = "Select a browser in the list."
 SWITCH_HINT = "Stream it while another streams: the next one plays at the same address."
@@ -588,8 +593,24 @@ def ask_switch(now: str, source: str) -> str:
     return f"Stop streaming {now} and stream {ntpath.basename(source)} at the same address?"
 
 
-def ask_remove(row: LibraryRow) -> str:
-    return f"Remove what was prepared of {row.name} ({row.size})? The video itself stays."
+def ask_remove(rows: Sequence[LibraryRow]) -> str:
+    """The question before removing what was prepared of the selected videos."""
+    if len(rows) == 1:
+        return (
+            f"Remove what was prepared of {rows[0].name} ({rows[0].size})? The video itself stays."
+        )
+    total = size(sum(r.bytes for r in rows))
+    return f"Remove what was prepared of {len(rows)} videos ({total})? The videos themselves stay."
+
+
+def kept_said(kept: Sequence[str]) -> str:
+    """After a remove: the videos kept because they stream or are being prepared."""
+    kept = list(dict.fromkeys(kept))  # a video can have two prepared versions
+    if not kept:
+        return ""
+    if len(kept) == 1:
+        return f"{ntpath.basename(kept[0])} is streaming or being prepared, so it was kept."
+    return f"{len(kept)} videos are streaming or being prepared, so they were kept."
 
 
 def ask_long(reason: str) -> str:

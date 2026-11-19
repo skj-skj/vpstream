@@ -313,38 +313,54 @@ class PrepareTab(QWidget):
         widgets.fill(self.table, self.rows, [(r.key, r.cells) for r in self.library])
         self.main.start_panel.library_changed()
 
-    def _selected(self) -> model.LibraryRow | None:
+    def _selected(self) -> list[model.LibraryRow]:
+        """The selected videos, top first; [] (and said) when none is."""
         chosen = widgets.selected(self.table)
-        row = next((r for r in self.library if chosen and r.key == chosen[0]), None)
-        if row is None:
+        rows = [r for key in chosen for r in self.library if r.key == key]
+        if not rows:
             self.main.tell(model.PICK_PREPARED)
-        return row
+        return rows
 
     def stream_it(self) -> None:
-        row = self._selected()
-        if row is None:
+        rows = self._selected()
+        if not rows:
             return
+        if len(rows) > 1:
+            self.main.tell(model.PICK_ONE)
+            return
+        row = rows[0]
         if not row.ready:
             self.main.tell(model.not_ready(row))
             return
         self.main.stream_prepared(row.source)
 
     def remove(self) -> None:
-        row = self._selected()
-        if row is not None:
-            self.main.ask(model.ask_remove(row), functools.partial(self._remove, row))
+        rows = self._selected()
+        if rows:
+            self.main.ask(model.ask_remove(rows), functools.partial(self._remove, rows))
 
-    def _remove(self, row: model.LibraryRow) -> None:
-        def removed(found: dict[str, Any]) -> None:
-            if found["kept"]:
-                self.main.say(model.KEPT)
+    def _remove(self, rows: list[model.LibraryRow]) -> None:
+        sources = list(dict.fromkeys(row.source for row in rows))
+
+        def work() -> tuple[list[str], list[str]]:
+            """Each one, even when one before it failed: what was kept, what failed."""
+            kept: list[str] = []
+            problems: list[str] = []
+            for source in sources:
+                try:
+                    kept += self.main.session.control.remove_prepared({"path": source})["kept"]
+                except Exception as exc:
+                    problems.append(f"{source or '?'}: {exc}")
+            return kept, problems
+
+        def removed(found: tuple[list[str], list[str]]) -> None:
+            kept, problems = found
+            self.main.say(model.kept_said(kept))
+            if problems:
+                self.main.tell("\n\n".join(problems), error=True)
             self.refresh_library()
 
-        self.main.worker.do(
-            lambda: self.main.session.control.remove_prepared({"path": row.source}),
-            removed,
-            self.main.failed,
-        )
+        self.main.worker.do(work, removed, self.main.failed)
 
 
 class StartPanel(QGroupBox):

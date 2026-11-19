@@ -337,3 +337,29 @@ def test_a_session_close_that_hangs_does_not_keep_the_window(
         assert any("did not close in time" in line for line in session.lines)
     finally:
         hung.set()  # the stand-in's thread ends with the test
+
+
+def test_remove_takes_every_selected_prepared_video(qt: Any, tmp_path: Path) -> None:
+    session = FakeSession()
+    rows = [{"key": k, "source": f"C:\\{k}.mkv", "base": True, "bytes": 1_000_000} for k in "abc"]
+    removed: list[str] = []
+
+    def remove_prepared(options: dict[str, Any]) -> dict[str, Any]:
+        removed.append(options["path"])
+        return {"removed": 1, "kept": [options["path"]] if "b" in options["path"] else []}
+
+    session.control.prepared = lambda: [r for r in rows if r["source"] not in removed]  # type: ignore[method-assign]
+    session.control.remove_prepared = remove_prepared  # type: ignore[attr-defined]
+    asked: list[str] = []
+    window = window_for(session, tmp_path, answer=lambda t, q: asked.append(t) or True)
+    tab = window.prepare_tab
+    tab._library(rows)
+    tab.table.selectAll()
+    tab.stream_it()  # several selected: one is asked for
+    assert asked == ["Select one video to stream."]
+    asked.clear()
+    tab.remove()
+    assert wait(qt, lambda: len(removed) == 3 and window.worker.busy == 0)
+    assert asked == ["Remove what was prepared of 3 videos (3.0 MB)? The videos themselves stay."]
+    assert removed == ["C:\\a.mkv", "C:\\b.mkv", "C:\\c.mkv"]
+    assert window.said.text() == "b.mkv is streaming or being prepared, so it was kept."

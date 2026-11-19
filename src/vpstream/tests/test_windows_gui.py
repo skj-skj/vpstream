@@ -325,20 +325,18 @@ def test_the_queue_has_one_row_and_one_bar_for_each_video() -> None:
         job(4, "queued", "base version (copy)", source="C:\\b.mkv"),
         job(5, "done", "base version (copy)", source="C:\\c.mkv"),
     ]
-    first, second, third = model.video_jobs(jobs)
-    assert (first.key, first.state, second.state, third.state) == (1, "running", "queued", "done")
+    first, second = model.video_jobs(jobs)  # c.mkv is prepared: it left the queue
+    assert (first.key, first.state, second.state) == (1, "running", "queued")
     assert first.progress == pytest.approx((10 * 1 + 10 * 0.5) / 50)  # by expected time
     assert first.line == "a.mkv: part 2 of 3: subtitle 1 (soft), 30%, about 35s left"
     assert second.line == "b.mkv: waits for the one before (1 part)" and second.active
-    assert (third.line, third.progress) == ("c.mkv: prepared (1 part)", 1.0)
-    assert not third.active
 
 
 def test_a_video_prepared_again_is_a_row_of_its_own() -> None:
     jobs = [job(1, "done", "base version (copy)"), job(2, "queued", "x", source="C:\\b.mkv"),
             job(3, "running", "subtitle 2 (soft)")]  # fmt: skip
     rows = model.video_jobs(jobs)
-    assert [(r.key, r.state) for r in rows] == [(2, "queued"), (3, "running"), (1, "done")]
+    assert [(r.key, r.state) for r in rows] == [(2, "queued"), (3, "running")]
     assert rows[1].line.endswith("starting...")
 
 
@@ -349,8 +347,12 @@ def test_a_video_that_failed_or_was_cancelled_says_so() -> None:
     assert failed[0].line == "a.mkv: subtitle 4 failed: ffmpeg" and failed[0].state == "failed"
     cancelled = model.video_jobs([job(1, "cancelled", "base"), job(2, "cancelled", "sub")])
     assert cancelled[0].line == "a.mkv: cancelled"
-    many = model.video_jobs([job(n, "done", "base", source=f"C:\\v{n}.mkv") for n in range(15)])
-    assert [r.key for r in many] == list(range(14, 4, -1))  # the last 10 that ended
+    many = model.video_jobs([job(n, "failed", "base", source=f"C:\\v{n}.mkv") for n in range(15)])
+    assert [r.key for r in many] == list(range(14, 9, -1))  # the last 5 that failed
+    again = model.video_jobs([job(1, "failed", "base"), job(5, "done", "base")])
+    assert again == []  # failed, then prepared after all: nothing left to say
+    done = model.video_jobs([job(n, "done", "base", source=f"C:\\v{n}.mkv") for n in range(3)])
+    assert done == []  # prepared: in the list of prepared videos, not in the queue
 
 
 # --- the bars
@@ -428,9 +430,18 @@ def test_the_questions() -> None:
         "Stop streaming a.mkv and stream épisode 1.mkv at the same address?"
     )
     row = model.library_rows([{"key": "k", "source": "C:\\b.mkv", "bytes": 2_000_000}])[0]
-    assert (
-        model.ask_remove(row)
-        == "Remove what was prepared of b.mkv (2.0 MB)? The video itself stays."
+    assert model.ask_remove([row]) == (
+        "Remove what was prepared of b.mkv (2.0 MB)? The video itself stays."
+    )
+    other = model.library_rows([{"key": "j", "source": "C:\\c.mkv", "bytes": 500_000_000}])[0]
+    assert model.ask_remove([row, other]) == (
+        "Remove what was prepared of 2 videos (502.0 MB)? The videos themselves stay."
+    )
+    assert model.kept_said([]) == ""
+    assert model.kept_said(["C:\\b.mkv", "C:\\b.mkv"]).startswith("b.mkv is streaming")
+    assert model.kept_said(["C:\\F\\b.mkv"]).startswith("b.mkv is streaming")
+    assert model.kept_said(["a", "b"]) == (
+        "2 videos are streaming or being prepared, so they were kept."
     )
     assert model.not_ready(row) == "b.mkv is not ready (no base version)."
     assert model.ask_long("It takes 2h") == "It takes 2h.\n\nPrepare it all the same?"
