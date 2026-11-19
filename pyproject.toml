@@ -29,7 +29,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-xdist>=3.8"]  # -n auto: the tests on every core
 
 [project.scripts]
 vpstream = "vpstream.cli:main"

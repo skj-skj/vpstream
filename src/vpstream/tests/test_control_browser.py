@@ -317,8 +317,12 @@ def test_a_video_being_prepared_is_not_removed_and_can_be_cancelled(rig: Rig) ->
     rig.runner.mode = "slow"
     rig.control.prepare({"file": str(rig.film), "sub": "1"})
     deadline = time.monotonic() + 10
-    while not rig.control.prepared() and time.monotonic() < deadline:
-        time.sleep(0.05)  # the folder is made when the first job starts
+    # The folder is made when the first job starts, and what it was made from a moment
+    # after: until then the row has no source (a loaded machine shows it).
+    while time.monotonic() < deadline and not any(
+        r["source"] == str(rig.film) for r in rig.control.prepared()
+    ):
+        time.sleep(0.05)
     (row,) = rig.control.prepared()
     assert row["busy"] and not row["stale"] and row["source"] == str(rig.film)
     assert rig.control.remove_prepared({"all": True})["kept"] == [str(rig.film)]

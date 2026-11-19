@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -214,9 +215,8 @@ def test_a_stream_stops_when_windows_no_longer_uses_its_address(
     s.open()
     s.start({"file": str(film)})
     wifi[0] = False
-    for _ in range(50):
-        if s.control.stream is None:
-            break
+    deadline = time.monotonic() + 15  # the check runs each second, later on a loaded machine
+    while s.control.stream is not None and time.monotonic() < deadline:
         threading.Event().wait(0.1)
     assert s.control.stream is None
     assert any("is no longer this device's address" in line for line in lines)

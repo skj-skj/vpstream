@@ -348,7 +348,7 @@ newer, for ACME profiles; Ubuntu 24.04 has 2.6.2, so run `vpstream install caddy
 
 ```text
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest [--integration]
+.venv/bin/pytest -n auto [--integration]    # -n auto: on every core
 git config core.hooksPath .githooks
 ```
 
