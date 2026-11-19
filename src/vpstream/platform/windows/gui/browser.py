@@ -98,7 +98,7 @@ class JobRow(QWidget):
             self.label.setText(job.line)
             self.label.setToolTip(job.line)
         self.bar.set(model.bar_target(job.state, job.progress))
-        self.cancel.setVisible(job.state in ("queued", "running"))
+        self.cancel.setVisible(job.active)
 
 
 class PrepareTab(QWidget):
@@ -175,7 +175,7 @@ class PrepareTab(QWidget):
     # --- choosing what to prepare
 
     def _pick(self, folder: bool) -> None:
-        title = "A folder of videos" if folder else "A video to prepare"
+        title = model.PICK_FOLDER if folder else model.PICK_TO_PREPARE
         widgets.pick(self, title, folder, lambda path: self.load(path, "dir" if folder else "file"))
 
     def load(self, path: str, kind: str) -> None:
@@ -282,12 +282,14 @@ class PrepareTab(QWidget):
                 self.jobs.insertWidget(at, row)
             row.show_job(job)
         self.empty.setVisible(not jobs)
-        active = sum(1 for j in jobs if j.state in ("queued", "running"))
+        active = sum(1 for j in jobs if j.active)
         ended = active < self.active
         self.active = active
         if ended:
             self.main.say(model.prepared_said(active))
             self.plan()
+            if self.main.browser_mode() and not self.main.start_panel.ready:
+                self.main.start_panel.check()  # what it waited for may be ready now
         now = float(status.get("now") or 0)
         if ended or now - self.read_at >= LIBRARY_SECONDS:
             self.read_at = now
@@ -353,6 +355,7 @@ class StartPanel(QGroupBox):
         super().__init__("For browsers and TVs")
         self.main = main
         self.ready = False
+        self.checked = ""  # the path the choices are for
         self.tracks: tuple[list[model.Track], list[model.Track]] = ([], [])
         box = QVBoxLayout(self)
         self.state = note()
@@ -408,7 +411,10 @@ class StartPanel(QGroupBox):
         left = model.what_is_left(plans)
         self.ready = not left
         self.tracks = model.plan_tracks(plans)
-        set_choices(self.audio, [(t.text, t.number) for t in self.tracks[0]])
+        # Another video starts on its own first track, not on the number chosen before.
+        same = path == self.checked
+        self.checked = path
+        set_choices(self.audio, [(t.text, t.number) for t in self.tracks[0]], keep=same)
         self.library_changed()
         self.state.setText(model.start_state(left))
         self.to_prepare.setVisible(not self.ready)

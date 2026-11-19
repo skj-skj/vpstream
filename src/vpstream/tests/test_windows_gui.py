@@ -329,8 +329,9 @@ def test_the_queue_has_one_row_and_one_bar_for_each_video() -> None:
     assert (first.key, first.state, second.state, third.state) == (1, "running", "queued", "done")
     assert first.progress == pytest.approx((10 * 1 + 10 * 0.5) / 50)  # by expected time
     assert first.line == "a.mkv: part 2 of 3: subtitle 1 (soft), 30%, about 35s left"
-    assert second.line == "b.mkv: waits for the one before (1 part)"
+    assert second.line == "b.mkv: waits for the one before (1 part)" and second.active
     assert (third.line, third.progress) == ("c.mkv: prepared (1 part)", 1.0)
+    assert not third.active
 
 
 def test_a_video_prepared_again_is_a_row_of_its_own() -> None:
@@ -434,5 +435,6 @@ def test_the_questions() -> None:
     assert model.not_ready(row) == "b.mkv is not ready (no base version)."
     assert model.ask_long("It takes 2h") == "It takes 2h.\n\nPrepare it all the same?"
     assert model.prepared_said(0) == "Prepared." and model.prepared_said(2).startswith("2 videos")
+    assert model.prepared_said(1) == "1 video still to prepare."
     assert model.queued_said(1).startswith("Queued: 1 part.")
     assert model.cancelled_said(3) == "Cancelled 3 parts."

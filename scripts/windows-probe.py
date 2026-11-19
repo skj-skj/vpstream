@@ -273,7 +273,7 @@ def main() -> None:
     fact("user", lambda: os.environ.get("USERNAME"))
     fact("administrator", is_admin)
     fact("in a job", in_job)
-    fact("tkinter", lambda: __import__("tkinter").TkVersion)
+    fact("PySide6", lambda: __import__("PySide6").__version__)
     fact("vpstream", vpstream_imports)
     fact("socket.AF_UNIX", lambda: hasattr(socket, "AF_UNIX"))
     fact("socket.fromfd", fromfd)

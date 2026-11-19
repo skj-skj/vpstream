@@ -134,15 +134,18 @@ def fill(
             item = found.item(at, column)
             if item.text() != cell:
                 item.setText(cell)
-    if moved:  # a row taken out and put back is no longer selected
-        view.clearSelection()
+    if moved:  # a row taken out and put back is no longer selected: select it again
         model_ = view.selectionModel()
+        model_.blockSignals(True)
+        model_.clearSelection()
         for at, key in enumerate(keys_of(found)):
             if key in chosen:
                 model_.select(
                     found.index(at, 0),
                     model_.SelectionFlag.Select | model_.SelectionFlag.Rows,
                 )
+        model_.blockSignals(False)
+        view.viewport().update()
 
 
 def pick(parent: QWidget, title: str, folder: bool, then: Callable[[str], None]) -> None:

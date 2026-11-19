@@ -482,6 +482,11 @@ class VideoJob:
     progress: float  # 0..1, the parts weighted by how long each is expected to take
     line: str
 
+    @property
+    def active(self) -> bool:
+        """It has parts still to make: it can be cancelled."""
+        return self.state in ("queued", "running")
+
 
 def video_jobs(prepare: Sequence[dict[str, Any]]) -> list[VideoJob]:
     """What runs and waits first, then the last 10 videos that ended."""
@@ -493,8 +498,8 @@ def video_jobs(prepare: Sequence[dict[str, Any]]) -> list[VideoJob]:
         else:
             runs.append([job])
     found = [_video_job(run) for runs in by_source.values() for run in runs]
-    active = [v for v in found if v.state in ("queued", "running")]
-    ended = [v for v in found if v.state not in ("queued", "running")]
+    active = [v for v in found if v.active]
+    ended = [v for v in found if not v.active]
     return sorted(active, key=lambda v: v.key) + sorted(ended, key=lambda v: -v.key)[:10]
 
 
@@ -546,7 +551,9 @@ def queued_said(count: int) -> str:
 
 
 def prepared_said(active: int) -> str:
-    return "Prepared." if not active else f"{active} videos still to prepare."
+    if not active:
+        return "Prepared."
+    return f"{active} video{'s' if active != 1 else ''} still to prepare."
 
 
 def cancelled_said(count: int) -> str:
@@ -632,6 +639,9 @@ LOOKING_VIDEO = "Looking at the video..."
 LOOKING_PREPARED = "Looking at what is prepared..."
 NO_SUBS = "(none in this video)"
 OFF = "Off"
+PICK_VIDEO = "A video to stream"
+PICK_FOLDER = "A folder of videos"
+PICK_TO_PREPARE = "A video to prepare"
 VIDEO_FILTERS = ("Videos (*.mkv *.mp4 *.m4v *.mov *.avi *.webm *.ts)", "All files (*)")
 
 

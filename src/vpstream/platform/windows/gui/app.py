@@ -55,7 +55,9 @@ APP_ID = "vpstream"  # the taskbar's name for the window, not pythonw's
 SIZE = (1100, 760)  # at 125% on a 1920x1080 screen: 1375x950
 SMALLEST = (900, 640)
 
-Answer = Callable[[str], bool]  # a drive's stand-in for the person: the question, yes or no
+# A drive's stand-in for the person: (the text, whether it is a question) -> yes or no; a
+# note's answer is not used.
+Answer = Callable[[str, bool], bool]
 
 
 class Bridge(QObject):
@@ -337,7 +339,7 @@ class Window(QMainWindow):
         """A question with Yes and No that does not wait: `yes` or `no` runs once it is
         answered. A drive answers it through `answer` instead."""
         if self.answer is not None:
-            then = yes if self.answer(text) else no
+            then = yes if self.answer(text, True) else no
             if then is not None:
                 self.bridge.post(then)
             return
@@ -357,7 +359,7 @@ class Window(QMainWindow):
     def tell(self, text: str, error: bool = False) -> None:
         """A note or an error, in a box that does not wait."""
         if self.answer is not None:
-            self.answer(text)
+            self.answer(text, False)
             return
         icon = QMessageBox.Icon.Warning if error else QMessageBox.Icon.Information
         box = QMessageBox(icon, "vpstream", text, parent=self)
@@ -391,7 +393,7 @@ class Window(QMainWindow):
         if self.session.notice:
             self.notice.setText(self.session.notice)
             self.notice.show()
-        self.worker.do(lambda: install.missing(self.runner), self._missing)
+        self.worker.do(lambda: install.missing(self.runner), self._offer_setup)
         self._look()
         self._check_firewall()
         self.say(model.READY)
@@ -403,11 +405,9 @@ class Window(QMainWindow):
 
         self.worker.do(work, self._blocking)
 
-    def _missing(self, missing: list[str]) -> None:
-        if missing:
-            self._offer_setup(missing)
-
     def _offer_setup(self, missing: list[str]) -> None:
+        if not missing:
+            return
         while self.setup_list.rowCount():
             self.setup_list.removeRow(0)
         self.setup_rows = {}
@@ -548,7 +548,7 @@ class Window(QMainWindow):
     # --- starting and stopping
 
     def _pick(self, folder: bool) -> None:
-        title = "A folder of videos" if folder else "A video to stream"
+        title = model.PICK_FOLDER if folder else model.PICK_VIDEO
         kind = "dir" if folder else "file"
         widgets.pick(self, title, folder, lambda path: self.chosen(path, kind))
 
@@ -612,29 +612,44 @@ class Window(QMainWindow):
     def stream_prepared(self, source: str) -> None:
         """From the Prepare tab: stream a prepared file in browser mode. In place of a
         running stream it keeps its address and policy, so a TV only reloads the page."""
+        if self.starting:
+            return  # one start at a time
         running = (self.status or {}).get("stream")
         if running:
             question = model.ask_switch(model.streaming_what(running), source)
-            self.ask(question, functools.partial(self._switch, running, source))
+            self.ask(question, functools.partial(self._switch, source))
         else:
-            self._switch(None, source)
+            self._switch(source)
 
-    def _switch(self, running: dict[str, Any] | None, source: str) -> None:
+    def _switch(self, source: str) -> None:
+        """The stream as it is now (it may have stopped while the question was open)."""
+        if self.starting:
+            return
+        running = (self.status or {}).get("stream")
         options = model.switch_options(running, source)
         self.tabs.setCurrentWidget(self.stream_page)
         self.say(model.STARTING_STREAM)
+        self.starting = True
+        self.stopping_on_purpose = bool(running)
+        self.update_start()
 
         def work() -> dict[str, Any]:
             if running:
-                self.stopping_on_purpose = True
                 self.session.stop()
             return self.session.start(options)
 
         def started(found: dict[str, Any]) -> None:
+            self.starting = False
+            self.update_start()
             self.say(model.STREAM_ON)
             self.show_status(found)
 
-        self.worker.do(work, started, self.failed)
+        def failed(exc: Exception) -> None:
+            self.starting = False
+            self.update_start()
+            self.failed(exc)
+
+        self.worker.do(work, started, failed)
 
     def _stop(self) -> None:
         self.stopping_on_purpose = True
@@ -743,10 +758,15 @@ class Window(QMainWindow):
     # --- the end
 
     def _open_log(self) -> None:
-        try:
-            os.startfile(self.log_path)  # type: ignore[attr-defined,unused-ignore]
-        except OSError as exc:
-            self.tell(f"{self.log_path}: {exc}", error=True)
+        """The log in the program Windows opens .log files with. The one program the window
+        starts itself, and on purpose with a window of its own; on the worker, since
+        ShellExecute can take a moment."""
+        path = self.log_path
+
+        def work() -> None:
+            os.startfile(path)  # type: ignore[attr-defined,unused-ignore]
+
+        self.worker.do(work, None, lambda exc: self.tell(f"{path}: {exc}", error=True))
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Closing asks first while a stream runs; the session then closes off this thread,
@@ -757,7 +777,7 @@ class Window(QMainWindow):
         event.ignore()
         if self.closing:
             return
-        if self.status and self.status.get("stream"):
+        if self.starting or (self.status and self.status.get("stream")):
             self.ask(model.ASK_CLOSE, self._close)
         else:
             self._close()
@@ -768,16 +788,17 @@ class Window(QMainWindow):
         self.central.setEnabled(False)
         self.polling.set()
         self._awake(False)
-        self.worker.stop()
 
         def end() -> None:
             try:
                 self.session.close()
             except Exception as exc:
                 self.session.log(f"WARNING: closing: {exc!r}")
-            self.bridge.post(self._closed)
 
-        threading.Thread(target=end, name="close", daemon=True).start()
+        # The worker's last job: what it was doing (a start, say) ends first, so nothing
+        # starts again after the session closed.
+        self.worker.do(end, lambda _: self._closed())
+        self.worker.stop()
 
     def _closed(self) -> None:
         self.closed = True
@@ -842,10 +863,13 @@ def run(
         session.log(f"WARNING: the window: {lines}")
         window.tell(model.bug_said(value), error=True)
 
-    sys.excepthook = bug
+    before, sys.excepthook = sys.excepthook, bug
     window.show()
     window.bridge.post(window.begin)
     if then is not None:
         window.bridge.post(functools.partial(then, window))
-    app.exec()
+    try:
+        app.exec()
+    finally:
+        sys.excepthook = before
     return 0

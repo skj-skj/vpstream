@@ -104,6 +104,7 @@ class FakeSession:
         self.notice = ""
         self.closed = threading.Event()
         self.lines: list[str] = []
+        self.order: list[str] = []
 
     def log(self, line: str) -> None:
         self.lines.append(line)
@@ -113,7 +114,17 @@ class FakeSession:
 
     def close(self) -> None:
         time.sleep(0.2)  # as the real one, it takes a moment: the window does not wait
+        self.order.append("close")
         self.closed.set()
+
+    def start(self, options: dict[str, Any]) -> dict[str, Any]:
+        time.sleep(0.3)  # a start takes a moment
+        self.order.append(f"start {options.get('file')}")
+        return status([], [])
+
+    def stop(self) -> dict[str, Any]:
+        self.order.append("stop")
+        return {"now": 1000.0, "prepare": [], "stream": None}
 
 
 class FakeRunner:
@@ -161,7 +172,7 @@ def test_the_window_shows_a_stream_and_closes_after_asking(
     session = FakeSession()
     window = app.Window(
         session, FakeRunner(), tmp_path / "vpstream.log", "",  # type: ignore[arg-type]
-        answer=lambda text: asked.append(text) or answers.pop(0),
+        answer=lambda text, asking: asked.append(text) or answers.pop(0),
     )  # fmt: skip
     window.show()
     queue = [
@@ -189,3 +200,47 @@ def test_the_window_shows_a_stream_and_closes_after_asking(
     assert wait(qt, lambda: window.closed, 5) and session.closed.is_set()
     assert not window.isVisible()
     assert awake == [(True, "awake"), (False, "awake")]
+
+
+def window_for(session: FakeSession, tmp_path: Path, **over: Any) -> Any:
+    return app.Window(session, FakeRunner(), tmp_path / "vpstream.log", "", **over)  # type: ignore[arg-type]
+
+
+def test_a_question_box_does_not_wait_and_its_button_answers(qt: Any, tmp_path: Path) -> None:
+    window = window_for(FakeSession(), tmp_path)
+    window.show()
+    said: list[str] = []
+    window.ask("Remove it?", lambda: said.append("yes"), lambda: said.append("no"))
+    box = window.findChild(QtWidgets.QMessageBox)
+    assert box is not None and box.isVisible() and said == []  # open, and nothing waited
+    box.button(QtWidgets.QMessageBox.StandardButton.Yes).click()
+    assert wait(qt, lambda: said == ["yes"])
+    window.ask("Remove it?", lambda: said.append("yes"), lambda: said.append("no"))
+    assert wait(qt, lambda: window.findChild(QtWidgets.QMessageBox) is not None)
+    window.findChild(QtWidgets.QMessageBox).button(QtWidgets.QMessageBox.StandardButton.No).click()
+    assert wait(qt, lambda: said == ["yes", "no"])
+
+
+def test_notes_do_not_take_a_drives_answers(qt: Any, tmp_path: Path) -> None:
+    heard: list[tuple[str, bool]] = []
+    window = window_for(FakeSession(), tmp_path, answer=lambda t, q: heard.append((t, q)) or True)
+    window.tell("Select a device in the list first.")
+    window.ask("Remove it?", lambda: heard.append(("yes", True)))
+    assert wait(qt, lambda: len(heard) == 3)
+    assert heard == [
+        ("Select a device in the list first.", False),
+        ("Remove it?", True),
+        ("yes", True),
+    ]
+
+
+def test_one_start_at_a_time_and_the_close_waits_for_it(qt: Any, tmp_path: Path) -> None:
+    session = FakeSession()
+    window = window_for(session, tmp_path, answer=lambda t, q: True)
+    window.show()
+    window.stream_prepared("C:\\a.mkv")
+    window.stream_prepared("C:\\a.mkv")  # a double click: one start
+    assert window.starting
+    window.close()  # while it starts: asked, then closed once the start is done
+    assert wait(qt, lambda: window.closed, 5)
+    assert session.order == ["start C:\\a.mkv", "close"]
