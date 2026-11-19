@@ -226,6 +226,20 @@ def test_too_little_room_is_seen_before_the_download(
     assert http.urls == []
 
 
+def test_an_install_another_vpstream_runs_is_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = tmp_path / "tools"
+    (tools / ".install-caddy").mkdir(parents=True)
+    monkeypatch.setattr(install, "sweep", lambda tools: None)  # its download is open there
+    data = a_zip({"caddy.exe": b"new", "LICENSE": b"Apache"})
+    with pytest.raises(SetupError, match="being installed by another vpstream"):
+        install.install_build(
+            pinned(data, install.CADDY, "2"), tools, Programs(), Http(data), said()[1]
+        )
+    assert (tools / ".install-caddy").is_dir()  # left to the one that runs
+
+
 def test_a_download_of_unknown_size_counts_the_room_it_may_need(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

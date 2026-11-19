@@ -7,13 +7,20 @@ writing its own part of the file; any other, or a small file, is fetched as ever
 The SHA-256 is of the whole file, after, as `UrlHttp.download` gives it. Each part asks
 the first address again (not the one it was sent on to), since GitHub's signed addresses
 do not last.
+
+Each connection tries the server's addresses in a race (`first_connect`), as browsers do:
+GitHub's download host has four, and one that does not answer from a line made every
+request wait out Windows' 21 s before Python tried the next.
 """
 
 from __future__ import annotations
 
 import hashlib
 import http.client
+import queue
 import re
+import socket
+import ssl
 import threading
 import urllib.error
 import urllib.request
@@ -30,6 +37,106 @@ RETRIES = 2  # a part that is cut off goes on from where it was, this many times
 PIECE = 1 << 20
 SMALL_PIECE = 64 << 10  # read at a time: a slow line still says often how far it is
 TICK = 0.25  # how often the progress is said while the parts run
+STAGGER = 0.25  # the next address is tried when the one before has not answered by then
+
+
+def first_connect(
+    address: tuple[str, int],
+    timeout: float | None = None,
+    source_address: tuple[str, int] | None = None,
+    *,
+    resolve: Callable[..., list[Any]] = socket.getaddrinfo,
+) -> socket.socket:
+    """`socket.create_connection`, but trying the addresses of the host in a race: the next
+    one STAGGER after the last if it has not connected yet; the first to connect is used,
+    the others are closed. One address that does not answer no longer holds up the rest."""
+    host, port = address
+    infos = resolve(host, port, type=socket.SOCK_STREAM)
+    if not infos:
+        raise OSError(f"no address for {host}")
+    answers: queue.Queue[socket.socket | OSError] = queue.Queue()
+    lock = threading.Lock()
+    over = [False]  # the race is decided (or lost): a socket that connects now is closed
+
+    def attempt(family: int, kind: int, proto: int, sockaddr: Any) -> None:
+        sock = None
+        try:
+            sock = socket.socket(family, kind, proto)  # an address family the PC lacks fails
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            answers.put(exc)
+            return
+        with lock:
+            if over[0]:
+                sock.close()
+                return
+            answers.put(sock)
+
+    def end() -> None:
+        """The race is over: close every socket that connected but was not taken."""
+        with lock:
+            over[0] = True
+        while True:
+            try:
+                late = answers.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(late, socket.socket):
+                late.close()
+
+    started, failed = 0, 0
+    try:
+        while True:
+            if started < len(infos):
+                family, kind, proto, _, sockaddr = infos[started]
+                args = (family, kind, proto, sockaddr)
+                threading.Thread(target=attempt, args=args, daemon=True).start()
+                started += 1
+            wait = STAGGER if started < len(infos) else timeout
+            try:
+                found = answers.get(timeout=wait)
+            except queue.Empty:
+                if started < len(infos):
+                    continue
+                raise TimeoutError(f"cannot connect to {host}: no address answered") from None
+            if isinstance(found, socket.socket):
+                return found
+            failed += 1
+            if failed == len(infos):
+                raise found
+    finally:
+        end()
+
+
+class _RacingHTTPS(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = first_connect  # set by __init__ itself: after it
+
+
+class _RacingHTTP(http.client.HTTPConnection):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = first_connect
+
+
+class _RacingHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, context: ssl.SSLContext | None) -> None:
+        super().__init__(context=context)
+        self.racing_context = context
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_RacingHTTPS, req, context=self.racing_context)
+
+
+class _RacingHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_RacingHTTP, req)
 
 
 def parts(total: int, count: int = PARTS) -> list[tuple[int, int]]:
@@ -39,13 +146,20 @@ def parts(total: int, count: int = PARTS) -> list[tuple[int, int]]:
 
 
 class PartsHttp(UrlHttp):
+    def __init__(self, context: ssl.SSLContext | None = None) -> None:
+        self.context = context  # the certificates trusted (certifi's: windows.tls_context)
+        self.opener = urllib.request.build_opener(
+            _RacingHTTPSHandler(context), _RacingHTTPHandler()
+        )
+
+    def _urlopen(self, request: urllib.request.Request) -> Any:
+        return self.opener.open(request, timeout=self.timeout)
+
     def _range(self, url: str, first: int, last: int) -> Any:
         headers = {"User-Agent": f"vpstream/{__version__}", "Range": f"bytes={first}-{last}"}
         request = urllib.request.Request(url, headers=headers)
         try:
-            if self.context is None:
-                return urllib.request.urlopen(request, timeout=self.timeout)
-            return urllib.request.urlopen(request, timeout=self.timeout, context=self.context)
+            return self._urlopen(request)
         except urllib.error.HTTPError as exc:
             raise SetupError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
         except (urllib.error.URLError, OSError) as exc:

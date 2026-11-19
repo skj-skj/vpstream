@@ -8,6 +8,7 @@ import hashlib
 import http.server
 import re
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
@@ -157,3 +158,98 @@ def test_a_server_that_refuses_the_probe_gets_one_connection(
     assert fetch.PartsHttp().download(server, dest, lambda d, t: None) == (
         hashlib.sha256(DATA).hexdigest()
     )
+
+
+# --- a host's addresses in a race
+
+
+class Sock:
+    """A socket whose connect to "dead" hangs (as an address that does not answer), to
+    "refused" fails at once, and to any other succeeds."""
+
+    made: ClassVar[list[Sock]] = []
+
+    def __init__(self, family: int, kind: int, proto: int) -> None:
+        if family == 10:  # AF_INET6 on a PC without it
+            raise OSError(97, "Address family not supported by protocol")
+        self.closed, self.addr = False, None
+        Sock.made.append(self)
+
+    def settimeout(self, value: float | None) -> None:
+        self.timeout = value
+
+    def connect(self, addr: tuple[str, int]) -> None:
+        self.addr = addr
+        if addr[0] == "dead":
+            time.sleep(min(self.timeout or 30, 2.0))
+            raise TimeoutError("timed out")
+        if addr[0] == "refused":
+            raise ConnectionRefusedError("refused")
+        if addr[0] == "late":
+            time.sleep(0.6)  # connects, but after the winner
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def addresses(*names: str) -> Any:
+    return lambda host, port, type=0: [(2, 1, 6, "", (name, port)) for name in names]
+
+
+@pytest.fixture
+def socks(monkeypatch: pytest.MonkeyPatch) -> list[Sock]:
+    Sock.made = []
+    monkeypatch.setattr(fetch.socket, "socket", Sock)
+    return Sock.made
+
+
+def test_an_address_that_does_not_answer_does_not_hold_up_the_rest(socks: list[Sock]) -> None:
+    started = time.monotonic()
+    sock = fetch.first_connect(("h", 443), 30, resolve=addresses("dead", "good", "other"))
+    assert sock.addr == ("good", 443) and time.monotonic() - started < 1.0  # not 21 s
+    assert [s.addr[0] for s in socks if s.addr] == ["dead", "good"]  # the third not needed
+
+
+def test_a_refused_address_goes_on_to_the_next_at_once(socks: list[Sock]) -> None:
+    sock = fetch.first_connect(("h", 443), 30, resolve=addresses("refused", "good"))
+    assert sock.addr == ("good", 443)
+
+
+def test_when_no_address_answers_the_last_error_is_raised(socks: list[Sock]) -> None:
+    with pytest.raises(ConnectionRefusedError):
+        fetch.first_connect(("h", 443), 30, resolve=addresses("refused", "refused"))
+    with pytest.raises(OSError, match="no address"):
+        fetch.first_connect(("h", 443), 30, resolve=addresses())
+
+
+def test_the_downloads_connect_through_the_race(
+    server: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raced: list[tuple[str, int]] = []
+    real = fetch.first_connect
+
+    def counted(address: tuple[str, int], *args: Any, **kw: Any) -> Any:
+        raced.append(address)
+        return real(address, *args, **kw)
+
+    monkeypatch.setattr(fetch, "first_connect", counted)
+    fetch.PartsHttp().download(server, tmp_path / "f.zip", lambda done, total: None)
+    assert len(raced) == 1 + fetch.PARTS  # the probe and each part
+
+
+def test_a_socket_that_connects_after_the_winner_is_closed(socks: list[Sock]) -> None:
+    sock = fetch.first_connect(("h", 443), 30, resolve=addresses("late", "good"))
+    assert sock.addr == ("good", 443)
+    time.sleep(0.8)  # the late one connects meanwhile
+    late = next(s for s in socks if s.addr == ("late", 443))
+    assert late.closed and not sock.closed
+
+
+def test_an_address_family_the_pc_lacks_fails_at_once(socks: list[Sock]) -> None:
+    def v6(host: str, port: int, type: int = 0) -> list[Any]:
+        return [(10, 1, 6, "", ("::1", port)), (2, 1, 6, "", ("refused", port))]
+
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        fetch.first_connect(("h", 443), 30, resolve=v6)
+    assert time.monotonic() - started < 1.0  # not the 30 s timeout

@@ -380,7 +380,12 @@ def _install(build: Build, tools: Path, runner: Runner, http: Http, progress: Pr
     sweep(tools)
     _check_space(tools, (build.size or tool.unpacked) + tool.unpacked)  # size 0: not known
     work = tools / f".install-{tool.name}"
-    work.mkdir(parents=True)
+    try:
+        work.mkdir(parents=True)
+    except FileExistsError:  # in use: another vpstream (the window, a terminal) installs it
+        raise SetupError(
+            f"{tool.title} is being installed by another vpstream already ({work} is in use)"
+        ) from None
     try:
         archive = work / "download.zip"  # not the URL's name: nothing it says lands elsewhere
         _download(http, build, archive, progress)
