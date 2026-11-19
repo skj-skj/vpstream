@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,6 +11,10 @@ import pytest
 
 from vpstream.caps import clips, server
 from vpstream.tests.fakes import FakeRunner
+
+# The capability test is a Linux tool. On Windows its socket tests race (a reset while a
+# too-long body is still being sent reads as aborted), so they are not run there.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the capability test runs on Linux")
 
 
 @pytest.mark.parametrize(

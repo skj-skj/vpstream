@@ -1,33 +1,29 @@
 """What `vpstream install` shares between the programs it installs: running a step as root
-(directly, or through sudo), apt without questions, and fetching over HTTPS."""
+(directly, or through sudo) and apt without questions. Fetching over HTTPS is shared with
+Windows (`platform.common.UrlHttp`)."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-import urllib.error
-import urllib.parse
-import urllib.request
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
 
-from vpstream import __version__
+# Shared with Windows; still named from here by the Linux installers and their tests.
+from vpstream.platform.common import API_HOST as API_HOST
+from vpstream.platform.common import TOKEN_ENV as TOKEN_ENV
+from vpstream.platform.common import Http as Http
+from vpstream.platform.common import SetupError as SetupError
+from vpstream.platform.common import UrlHttp as UrlHttp
 from vpstream.tools import Runner, tail
 
+if sys.platform == "win32":
+    raise ImportError("vpstream.platform.linux is for Linux; Windows has platform.windows")
+
 COMMAND_TIMEOUT = 900  # apt-get on a slow mirror
-# GitHub allows 60 API calls an hour from one address without a token, which hosts behind a
-# shared address (CI runners) use up. A token in this variable is sent to the API only.
-TOKEN_ENV = "GITHUB_TOKEN"
-API_HOST = "api.github.com"
 # No questions: commands run without a terminal on stdin.
 APT_GET = ("env", "DEBIAN_FRONTEND=noninteractive", "apt-get")
-
-
-class SetupError(RuntimeError):
-    pass
 
 
 class Cancelled(Exception):
@@ -53,16 +49,6 @@ def as_root(runner: Runner, is_root: bool | None, *args: str | Path, what: str) 
     return res.stdout
 
 
-class Http(Protocol):
-    def get_json(self, url: str) -> Any: ...
-
-    def get_text(self, url: str) -> str: ...
-
-    def download(self, url: str, dest: Path, progress: Callable[[int, int], None]) -> str:
-        """Save `url` to `dest` and return its sha256."""
-        ...
-
-
 @dataclass
 class Installer:
     """What installing one program needs: programs to run, files to fetch, a question and a
@@ -79,52 +65,3 @@ class Installer:
     def _root(self, *args: str | Path, what: str) -> str:
         """Run one step as root (see `as_root`)."""
         return as_root(self.runner, self.is_root, *args, what=what)
-
-
-class UrlHttp:
-    timeout = 60
-
-    def _open(self, url: str, accept: str = "*/*") -> Any:
-        headers = {"User-Agent": f"vpstream/{__version__}", "Accept": accept}
-        api = urllib.parse.urlsplit(url).hostname == API_HOST
-        token = os.environ.get(TOKEN_ENV) if api else None
-        # A stale or narrow token makes GitHub refuse (401) even what it gives anyone, so it
-        # is asked once more without one.
-        for attempt in (token, None) if token else (None,):
-            request = urllib.request.Request(url, headers=headers)
-            if attempt:
-                # Unredirected: a redirect to another host never carries it.
-                request.add_unredirected_header("Authorization", f"Bearer {attempt}")
-            try:
-                return urllib.request.urlopen(request, timeout=self.timeout)
-            except urllib.error.HTTPError as exc:
-                if attempt and exc.code == 401:
-                    continue
-                if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0":
-                    msg = "GitHub's API limit for this IP is used up; try again in an hour"
-                    raise SetupError(msg) from exc
-                raise SetupError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
-            except (urllib.error.URLError, OSError) as exc:
-                reason = getattr(exc, "reason", exc)
-                raise SetupError(f"cannot download {url}: {reason}") from exc
-        raise AssertionError("unreachable: the last attempt has no token")
-
-    def get_json(self, url: str) -> Any:
-        with self._open(url, "application/vnd.github+json") as resp:
-            return json.load(resp)
-
-    def get_text(self, url: str) -> str:
-        with self._open(url) as resp:
-            return str(resp.read().decode("utf-8", errors="replace"))
-
-    def download(self, url: str, dest: Path, progress: Callable[[int, int], None]) -> str:
-        digest = hashlib.sha256()
-        with self._open(url) as resp, dest.open("wb") as out:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            while chunk := resp.read(1 << 20):
-                out.write(chunk)
-                digest.update(chunk)
-                done += len(chunk)
-                progress(done, total)
-        return digest.hexdigest()

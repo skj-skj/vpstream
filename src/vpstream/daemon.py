@@ -17,6 +17,7 @@ import dataclasses
 import os
 import secrets
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -75,6 +76,8 @@ class DashboardServer(Server, Protocol):
 def socket_in_use(path: Path) -> bool:
     """Whether something answers on the unix socket at `path`. A file left by a daemon that
     is gone refuses the connection."""
+    if sys.platform == "win32":
+        raise DaemonError("unix sockets are for Linux and Termux")
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(PROBE_SECONDS)
     try:
@@ -91,6 +94,8 @@ def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
 
     A socket that another daemon still listens on is never taken over.
     """
+    if sys.platform == "win32":
+        raise DaemonError("unix sockets are for Linux and Termux")
     try:
         if path.is_socket():
             if socket_in_use(path):
@@ -248,6 +253,25 @@ def _bound_threads(server: Any, most: int, per_address: int) -> None:
     server.process_request = process_request
 
 
+def make_control(
+    config: Config,
+    paths: Paths,
+    runner: Runner,
+    firewall: Firewall | None,
+    server: StreamServer | None,
+    log: Callable[[str], None],
+    **more: Any,
+) -> Control:
+    """The Control of a daemon, with a Preparer set up from the configuration. The daemon
+    and the Windows window both build theirs here; `more` goes to Control as it is."""
+    speeds = prepare.Speeds(config.copy_speed, config.encode_speed)
+    settings = ffargs.DEFAULT_SETTINGS
+    if config.prepare_threads:
+        settings = dataclasses.replace(settings, threads=config.prepare_threads)
+    preparer = prepare.Preparer(paths.cache_dir, runner, log, settings=settings, speeds=speeds)
+    return Control(config, paths, firewall, server, log, runner=runner, preparer=preparer, **more)
+
+
 @dataclass
 class Daemon:
     config: Config
@@ -280,21 +304,13 @@ class Daemon:
                 auth.Limiter(self.paths.login_record, log=self.log),
                 device_secret=self._device_secret(),
             )
-        speeds = prepare.Speeds(self.config.copy_speed, self.config.encode_speed)
-        settings = ffargs.DEFAULT_SETTINGS
-        if self.config.prepare_threads:
-            settings = dataclasses.replace(settings, threads=self.config.prepare_threads)
-        preparer = prepare.Preparer(
-            self.paths.cache_dir, self.runner, self.log, settings=settings, speeds=speeds
-        )
-        self.control = Control(
+        self.control = make_control(
             self.config,
             self.paths,
+            self.runner,
             self.firewall,
             self.server,
             self.log,
-            runner=self.runner,
-            preparer=preparer,
             certificates=self.certificates,
         )
 

@@ -33,6 +33,9 @@ from vpstream.files import remove_path, write_atomic
 from vpstream.platform.linux import SYSTEM_INSTALL, doctor, ffmpeg_install, firewall, tailscale
 from vpstream.tools import Result, Runner, tail
 
+if sys.platform == "win32":
+    raise ImportError("vpstream.platform.linux is for Linux; Windows has platform.windows")
+
 USER = "vpstream"  # the service user, and its group
 UNIT = "vpstream.service"
 TIMEOUT = 120.0

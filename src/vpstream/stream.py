@@ -18,7 +18,6 @@ from typing import Any
 from vpstream import clients, gate, media, platform, player, prepared, tracks
 from vpstream.certificate import LONGEST_STREAM_SECONDS
 from vpstream.checks import is_number
-from vpstream.platform.linux import access
 
 DIRECT = "direct"  # the files as they are, for players such as VLC
 BROWSER = "browser"  # prepared HLS versions and a player page, for TV browsers
@@ -95,7 +94,6 @@ class Unreadable(StreamError):
 
     def __init__(self, path: Path | str, prepared: bool = False) -> None:
         self.path = str(path)
-        self.user = access.service_user()
         self.prepared = prepared
         hint = (
             "It is prepared for browser mode, which plays what was prepared and needs no "
@@ -103,6 +101,18 @@ class Unreadable(StreamError):
             if prepared
             else ""
         )
+        if platform.is_windows():
+            self.user = os.environ.get("USERNAME", "")
+            super().__init__(
+                f"vpstream cannot read {path}. {hint}A drive letter of a network drive is not "
+                "seen by the vpstream window (it runs as administrator): use its \\\\server\\share "
+                "path instead"
+            )
+            return
+        # Linux only: who the daemon runs as (pwd), and how to grant it access.
+        from vpstream.platform.linux import access
+
+        self.user = access.service_user()
         if platform.is_termux():
             super().__init__(
                 f"Termux cannot read {path}. {hint}Allow Termux to read the phone's storage "
@@ -170,7 +180,8 @@ def videos_of(kind: str, path: Path, needs_read: Callable[[str], bool] = _always
     Raises StreamError (Unreadable when the daemon's user cannot read one of them that
     `needs_read`)."""
     if not path.is_absolute():
-        raise StreamError(f"give the full path, starting with /: {path}")
+        start = ", starting with /" if os.sep == "/" else ""
+        raise StreamError(f"give the full path{start}: {path}")
     if kind == "file":
         if not _is(path, "is_file"):
             raise StreamError(f"not a file: {path}")
@@ -204,7 +215,7 @@ def videos_of(kind: str, path: Path, needs_read: Callable[[str], bool] = _always
 
 
 def _full_paths(values: list[Any]) -> bool:
-    return all(isinstance(v, str) and v.startswith("/") for v in values)
+    return all(isinstance(v, str) and os.path.isabs(v) for v in values)
 
 
 def _ttl_seconds(value: Any, https: bool = False) -> float | None:

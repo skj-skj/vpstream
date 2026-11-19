@@ -28,6 +28,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -39,7 +40,7 @@ from vpstream.checks import is_whole
 from vpstream.config import Config, Paths
 from vpstream.files import write_atomic
 from vpstream.net import normal_ip, url_host
-from vpstream.tools import Runner, require
+from vpstream.tools import NO_WINDOW, Runner, require
 
 # Set by Caddy on the way in, whatever the viewer sent: the address the request came from,
 # and whether it came over HTTPS.
@@ -70,14 +71,15 @@ def link_videos(folder: Path, videos: Sequence[str | None]) -> None:
     folder.mkdir(mode=0o750, parents=True)
     for number, video in enumerate(videos, 1):
         if video is not None:
-            (folder / str(number)).symlink_to(video)
+            # A folder (browser mode) needs a folder link on Windows; elsewhere it is the same.
+            (folder / str(number)).symlink_to(video, target_is_directory=os.path.isdir(video))
 
 
 def link_video(folder: Path, number: int, video: str) -> None:
     """Point one number at `video`, in one step: a request sees the old link or the new."""
     part = folder / f".{number}.new"
     part.unlink(missing_ok=True)
-    part.symlink_to(video)
+    part.symlink_to(video, target_is_directory=os.path.isdir(video))
     os.replace(part, folder / str(number))
 
 
@@ -416,8 +418,9 @@ class CaddyProcess:
     def stop_left_over(self) -> None:
         """Stop the Caddy an earlier daemon of this install left running, if any: only a
         process whose command line names this Caddy's configuration file. Only on Termux
-        (`reap`); a race with its own end is harmless."""
-        if not self.reap:
+        (`reap`); a race with its own end is harmless. Windows has its own (see
+        `platform.windows.processes`)."""
+        if not self.reap or sys.platform == "win32":
             return
         try:
             pid = int(self.pid_file.read_text(encoding="ascii").strip())
@@ -500,6 +503,7 @@ class CaddyProcess:
                 stderr=errors,
                 env=env,
                 cwd=str(self.work_dir),
+                creationflags=NO_WINDOW,
             )
         if self.reap:
             write_atomic(self.pid_file, f"{proc.pid}\n")

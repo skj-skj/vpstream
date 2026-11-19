@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,8 @@ class _UnixConnection(http.client.HTTPConnection):
         self._path = path
 
     def connect(self) -> None:
+        if sys.platform == "win32":  # no daemon there: the window runs the stream
+            raise OSError("there is no vpstream daemon on Windows")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
         try:

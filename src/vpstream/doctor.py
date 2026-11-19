@@ -1,7 +1,8 @@
 """`vpstream doctor`: check this host for everything vpstream needs, and say what is missing.
 
 Every check runs, so one report lists all the problems at once. What is checked depends on
-the platform (`platform.linux.doctor`, `platform.termux.doctor`); the checks and the report
+the platform (`platform.linux.doctor`, `platform.termux.doctor`, `platform.windows.doctor`);
+the checks and the report
 they share are here.
 """
 
@@ -67,6 +68,10 @@ def check_config(path: Path) -> Check:
 
 def run_checks(runner: Runner, **options: Any) -> list[Check]:
     """Run every check of this platform. Nothing here changes the host or needs root."""
+    if platform.is_windows():
+        from vpstream.platform.windows import doctor as windows
+
+        return windows.run_checks(runner, **options)
     if platform.is_termux():
         from vpstream.platform.termux import doctor as termux
 

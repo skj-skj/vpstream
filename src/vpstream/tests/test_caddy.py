@@ -10,7 +10,7 @@ import pytest
 
 from vpstream import caddy, config
 from vpstream.certificate import Certificate
-from vpstream.tests.fakes import FakeRunner, free_port
+from vpstream.tests.fakes import FakeRunner, free_port, make_program
 from vpstream.tools import ToolMissing
 
 # A stand-in for the caddy program: it listens where the configuration says, as Caddy does.
@@ -62,10 +62,8 @@ class Which(FakeRunner):
 
 @pytest.fixture
 def program(tmp_path: Path) -> Path:
-    path = tmp_path / "bin" / "caddy"
-    path.parent.mkdir()
-    path.write_text(FAKE_CADDY.format(python=sys.executable))
-    path.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    path = make_program(tmp_path / "bin" / "caddy", FAKE_CADDY.format(python=sys.executable))
     Path(f"{path}.mode").write_text("ok")
     return path
 

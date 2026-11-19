@@ -8,6 +8,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from vpstream.ffargs import parse_ffmpeg_list
@@ -26,6 +27,11 @@ class Runner(Protocol):
     def run(self, args: Sequence[str], *, timeout: float | None = None) -> Result: ...
 
 
+# Windows: a console program (PowerShell, netsh, ffmpeg, Caddy) started from the window would
+# open a console window of its own; this keeps it hidden. 0 elsewhere, which changes nothing.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 class SystemRunner:
     """Runs real programs found on PATH."""
 
@@ -40,9 +46,11 @@ class SystemRunner:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",  # what ffmpeg writes; Windows would read its own code page
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                creationflags=NO_WINDOW,
             )
         except subprocess.TimeoutExpired as exc:
             return Result(TIMEOUT_RETURNCODE, _text(exc.stdout), timed_out(timeout))
@@ -126,11 +134,13 @@ def run_cancellable(
     cancel: threading.Event,
     on_line: Callable[[str], None] | None = None,
     poll: float = POLL_SECONDS,
+    cwd: Path | None = None,
 ) -> tuple[int, str]:
     """Run a long program until it ends or `cancel` is set.
 
     Its output (standard output and errors together) is read line by line as it comes and
-    each line goes to `on_line`. Returns the exit code and the last lines of the output.
+    each line goes to `on_line`; it runs in `cwd`, or where this process is. Returns the exit
+    code and the last lines of the output.
     Raises Cancelled, after the program has ended, when `cancel` was set first.
     """
     proc = subprocess.Popen(
@@ -139,7 +149,10 @@ def run_cancellable(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
         errors="replace",
+        cwd=cwd,
+        creationflags=NO_WINDOW,
     )
     last: collections.deque[str] = collections.deque(maxlen=OUTPUT_LINES)
 

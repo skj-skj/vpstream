@@ -13,13 +13,10 @@ Wi-Fi was turned off, the phone moved to mobile data) the stream is stopped.
 from __future__ import annotations
 
 import array
-import contextlib
 import ipaddress
 import socket
 import struct
-
-with contextlib.suppress(ImportError):  # Windows: interface_addresses finds none
-    import fcntl
+import sys
 
 from vpstream import net
 
@@ -99,13 +96,17 @@ _LOCAL_KINDS = ("wlan", "wl", "eth", "en", "br")
 def interface_addresses() -> list[tuple[str, str]]:
     """(interface, IPv4 address) of every interface that has one, from the kernel's list
     (SIOCGIFCONF, which Android allows where it hides netlink and /sys/class/net). Empty
-    where that cannot be asked."""
+    where that cannot be asked (Windows)."""
+    if sys.platform == "win32":
+        return []
+    import fcntl
+
     buffer = array.array("B", bytes(_IFREQ * 64))
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             asked = struct.pack("iL", len(buffer), buffer.buffer_info()[0])
             length = struct.unpack("iL", fcntl.ioctl(probe.fileno(), _SIOCGIFCONF, asked))[0]
-    except (OSError, NameError):  # NameError: no fcntl (Windows)
+    except OSError:
         return []
     raw = buffer.tobytes()[:length]
     found = []

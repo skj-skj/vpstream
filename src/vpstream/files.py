@@ -63,6 +63,11 @@ def has_room(folder: Path, need: int) -> bool:
 
 
 def under(path: str, folder: str) -> bool:
-    """Whether `path` is `folder` itself or anything inside it (paths as text, absolute)."""
-    top = folder.rstrip("/") or "/"
-    return path == top or path.startswith(top if top == "/" else top + "/")
+    """Whether `path` is `folder` itself or anything inside it (paths as text, absolute,
+    with this system's separator: / or \\). Windows also takes /, and either case."""
+    sep = os.sep
+    path, folder = os.path.normcase(path), os.path.normcase(folder)  # as they are on POSIX
+    top = folder.rstrip(sep) or sep
+    if os.path.splitdrive(top)[1] == "":  # a drive alone, C: (Windows)
+        top += sep
+    return path == top or path.startswith(top if top.endswith(sep) else top + sep)

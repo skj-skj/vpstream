@@ -3,6 +3,7 @@ and the state file. The command line and the dashboard both end up here."""
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -88,6 +89,9 @@ class Control:
     runner: Runner | None = None  # for `ss`, mkvmerge and ffprobe
     preparer: prepare.Preparer | None = None  # makes the versions browser mode plays
     certificates: Certificates | None = None  # the HTTPS certificate, with `[stream] https`
+    # Local mode: whether this host still has an address (None: `local.is_mine`). Windows
+    # keeps a turned-off Wi-Fi's address, so it asks Windows whether it is still in use.
+    has_address: Callable[[str], bool] | None = None
     _traffic: Traffic | None = None
     _indexer: threading.Thread | None = None
     _cancel: threading.Event = field(default_factory=threading.Event)
@@ -152,13 +156,21 @@ class Control:
             self._host = net.public_host(self.config.stream_host)
         return self._host
 
+    def _has(self, address: str) -> bool:
+        return (self.has_address or local.is_mine)(address)
+
     def _local_address(self) -> str:
         """Local mode: the private address a stream listens on, looked up at each start (a
         new network may have given another). Raises ControlError when there is none."""
         try:
-            return local.find(self.config.local_address)
+            address = local.find(self.config.local_address)
         except local.LocalError as exc:
             raise ControlError(f"no stream on the local network: {exc}") from exc
+        if not self._has(address):
+            raise ControlError(
+                f"no stream on the local network: {address} is not in use now; is the Wi-Fi on?"
+            )
+        return address
 
     def base_url(self) -> str:
         """The running stream's address; without one, what a stream would get."""
@@ -417,7 +429,7 @@ class Control:
                 why = "its time limit is over"
             elif self.server is not None and not self.server.running():
                 why = "Caddy stopped unexpectedly"
-            elif self.config.local and not local.is_mine(self._host):
+            elif self.config.local and not self._has(self._host):
                 why = (
                     f"{self._host} is no longer this device's address: the Wi-Fi is off or "
                     "it is on another network"
@@ -805,6 +817,6 @@ def _apply(device: gate.Device, values: dict[str, Any], video: int | None, now: 
 def _path_option(options: dict[str, Any]) -> str | None:
     """The `path` of a request about prepares, which must be a full path, or None."""
     path = options.get("path")
-    if path is not None and not (isinstance(path, str) and path.startswith("/")):
+    if path is not None and not (isinstance(path, str) and os.path.isabs(path)):
         raise StreamError(f"give the full path of a file or a folder: {path!r}")
     return path

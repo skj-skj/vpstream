@@ -12,7 +12,7 @@ import pytest
 from vpstream import api, config, prepare, prepared, public
 from vpstream.control import Control, ControlError
 from vpstream.stream import NeedsConfirm, StreamError
-from vpstream.tests.fakes import FakeFfmpeg, FakeFirewall, FakeServer
+from vpstream.tests.fakes import IS_ROOT, FakeFfmpeg, FakeFirewall, FakeServer
 from vpstream.tests.test_prepare import probe_json
 
 
@@ -189,7 +189,7 @@ def test_a_file_ffprobe_cannot_read_is_noted_not_fatal(rig: Rig) -> None:
     assert answer["jobs"] == [] and "no video track" in answer["plans"][0]["notes"][0]
 
 
-needs_no_root = pytest.mark.skipif(os.geteuid() == 0, reason="root reads everything")
+needs_no_root = pytest.mark.skipif(IS_ROOT, reason="root reads everything")
 
 
 @needs_no_root
@@ -288,7 +288,7 @@ def test_remove_by_folder_and_the_stale_ones(rig: Rig) -> None:
     assert rig.control.remove_prepared({"path": str(rig.media)})["removed"] == 1
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root looks at everything")
+@pytest.mark.skipif(IS_ROOT, reason="root looks at everything")
 def test_removing_the_stale_ones_keeps_what_cannot_be_looked_at(rig: Rig) -> None:
     # Found on the VPS: after its access was taken back, the service could not enter the
     # folder, and "remove the stale ones" would have removed good versions.
@@ -317,8 +317,12 @@ def test_a_video_being_prepared_is_not_removed_and_can_be_cancelled(rig: Rig) ->
     rig.runner.mode = "slow"
     rig.control.prepare({"file": str(rig.film), "sub": "1"})
     deadline = time.monotonic() + 10
-    while not rig.control.prepared() and time.monotonic() < deadline:
-        time.sleep(0.05)  # the folder is made when the first job starts
+    # The folder is made when the first job starts, and what it was made from a moment
+    # after: until then the row has no source (a loaded machine shows it).
+    while time.monotonic() < deadline and not any(
+        r["source"] == str(rig.film) for r in rig.control.prepared()
+    ):
+        time.sleep(0.05)
     (row,) = rig.control.prepared()
     assert row["busy"] and not row["stale"] and row["source"] == str(rig.film)
     assert rig.control.remove_prepared({"all": True})["kept"] == [str(rig.film)]

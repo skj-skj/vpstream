@@ -93,7 +93,10 @@ def hls_output_args(
     playlist: str = "index.m3u8",
     extra: Sequence[str] = (),
 ) -> list[str]:
-    """VOD HLS output into `out_dir`. `extra` goes before the file names, for variant maps."""
+    """VOD HLS output into `out_dir`. `extra` goes before the file names, for variant maps.
+    The paths are written with / on Windows too: ffmpeg puts the init segment next to the
+    playlist by cutting its path at the last /, and with only \\ it lands in the folder
+    ffmpeg runs in."""
     out = Path(out_dir)
     ext = "m4s" if fmp4 else "ts"
     return [
@@ -109,8 +112,8 @@ def hls_output_args(
         "fmp4" if fmp4 else "mpegts",
         *extra,
         "-hls_segment_filename",
-        str(out / f"{segment}.{ext}"),
-        str(out / playlist),
+        (out / f"{segment}.{ext}").as_posix(),
+        (out / playlist).as_posix(),
     ]
 
 
@@ -350,6 +353,17 @@ def burn_hls(
         "-dn",
         *rendition_output_args(out_dir, variant_map(())),
     ]
+
+
+# What bench, caps and prepare use; each tuple needs one of its names. The installers check
+# a new ffmpeg for them (Linux's `vpstream install ffmpeg`, Windows' `windows-install`).
+REQUIRED_ENCODERS = (("libx264",), ("libx265",), ("libsvtav1", "libaom-av1"))
+REQUIRED_FILTERS = ("overlay", "scale2ref", "subtitles", "tonemap", "zscale")
+
+
+def missing_features(encoders: set[str], filters: set[str]) -> list[str]:
+    missing = [" or ".join(alts) for alts in REQUIRED_ENCODERS if not set(alts) & encoders]
+    return missing + [f for f in REQUIRED_FILTERS if f not in filters]
 
 
 def parse_ffmpeg_list(text: str) -> set[str]:
