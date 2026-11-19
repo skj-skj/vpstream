@@ -452,3 +452,58 @@ def test_the_questions() -> None:
     assert "is running" in (model.close_question(True, True) or "")
     assert "is starting" in (model.close_question(True, False) or "")
     assert model.cancelled_said(3) == "Cancelled 3 parts."
+
+
+# --- the Tools tab
+
+
+def test_which_release_is_newer() -> None:
+    assert model.newer("103.0", "102.0") and model.newer("2.11.10", "2.11.9")
+    assert model.newer("9.1", "9.0.2") and not model.newer("9.0", "9.0.0")
+    assert not model.newer("2.11.9", "2.11.9") and not model.newer("7.1", "9.0.2")
+    assert model.newer("1.0", "")  # anything is newer than an unknown version
+
+
+def row(**over: Any) -> model.ToolRow:
+    given: dict[str, Any] = {
+        "name": "caddy", "title": "Caddy", "path": "C:\\t\\caddy\\caddy.exe", "own": True,
+        "version": "2.11.9", "own_version": "2.11.9", "latest": None,
+    }  # fmt: skip
+    return model.tool_row(**{**given, **over})
+
+
+def test_update_is_offered_only_for_vpstreams_own_copy_when_a_newer_one_is_out() -> None:
+    assert row().latest == "not looked up yet" and row().action == ""
+    assert row().where == "C:\\t\\caddy\\caddy.exe (vpstream's copy)" and row().can_remove
+    assert (
+        row(latest="2.11.9").latest == "2.11.9 (up to date)" and row(latest="2.11.9").action == ""
+    )
+    out = row(latest="2.12.0")
+    assert (out.latest, out.action) == ("2.12.0 is out", model.UPDATE)
+    system = row(path="C:\\Program Files\\caddy.exe", own=False, own_version=None, latest="2.12.0")
+    assert system.where.endswith("(installed for the whole system)")
+    assert (system.latest, system.action, system.can_remove) == ("2.12.0", model.INSTALL_OWN, False)
+    missing = row(path=None, own=False, version="", own_version=None)
+    assert (missing.where, missing.version, missing.action) == (
+        "not found",
+        "unknown",
+        model.INSTALL_OWN,
+    )
+    unmarked = row(own_version=None)  # a folder copied there by hand: not vpstream's to remove
+    assert not unmarked.can_remove and unmarked.version == "2.11.9"
+    assert model.tool_removed("Caddy", True) == "vpstream's copy of Caddy is removed."
+    assert model.tool_removed("Caddy", False) == "vpstream has no copy of Caddy to remove."
+    assert row(checking=True).latest == "looking..."
+    assert row(problem="HTTP 403").latest == "cannot look it up: HTTP 403"
+
+
+def test_the_tools_questions() -> None:
+    assert model.ask_install("Caddy", "2.12.0", 18_384_117, "C:\\caddy.exe", own=False) == (
+        "Download Caddy 2.12.0 (18 MB) into vpstream's folder? vpstream uses it in place of "
+        "C:\\caddy.exe."
+    )
+    assert model.ask_install("MKVToolNix", "103.0", 0, None, own=False).endswith(
+        "? vpstream uses it."
+    )
+    assert "in place of vpstream's copy" in model.ask_install("Caddy", "2.12.0", 0, "x", own=True)
+    assert model.ask_remove_tool("Caddy").startswith("Remove vpstream's copy of Caddy?")

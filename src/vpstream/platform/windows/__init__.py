@@ -16,8 +16,13 @@ reached inside functions, after a check of `sys.platform`.
 from __future__ import annotations
 
 import os
+import ssl
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vpstream.platform.common import UrlHttp
 
 from vpstream.platform.common import Hints
 
@@ -70,7 +75,8 @@ def program_dirs(environ: os._Environ[str] | dict[str, str] | None = None) -> li
     """The folders vpstream looks in for its programs, before PATH: its own tools, then
     MKVToolNix where its installer puts it."""
     tools = tools_dir(environ)
-    return [tools / "ffmpeg" / "bin", tools / "caddy", *map(Path, MKVTOOLNIX_DIRS)]
+    own = [tools / "ffmpeg" / "bin", tools / "caddy", tools / "mkvtoolnix"]
+    return [*own, *map(Path, MKVTOOLNIX_DIRS)]
 
 
 def search_path(current: str, folders: list[Path]) -> str:
@@ -91,6 +97,24 @@ def prepare_process(environ: os._Environ[str] | dict[str, str] | None = None) ->
     ORIGINAL_PATH.setdefault("PATH", env.get("PATH", ""))
     env["PATH"] = search_path(env.get("PATH", ""), program_dirs(env))
     env["NoDefaultCurrentDirectoryInExePath"] = "1"
+
+
+def tls_context() -> ssl.SSLContext:
+    """TLS for vpstream's downloads on Windows, with certifi's certificates (Mozilla's).
+    Python on Windows trusts the PC's store of intermediate certificates too, where old
+    cross-signed ones that have expired are kept (ISRG Root X2 by X1, 2025): OpenSSL then
+    picks one of those over the chain the server sends and refuses a site that is fine
+    (mkvtoolnix.download). Hostname, chain and dates are checked as ever."""
+    import certifi
+
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def http() -> UrlHttp:
+    """The downloads of vpstream on Windows: its programs and their releases."""
+    from vpstream.platform.common import UrlHttp
+
+    return UrlHttp(tls_context())
 
 
 def on_windows() -> bool:

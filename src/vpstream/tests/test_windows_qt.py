@@ -363,3 +363,63 @@ def test_remove_takes_every_selected_prepared_video(qt: Any, tmp_path: Path) -> 
     assert asked == ["Remove what was prepared of 3 videos (3.0 MB)? The videos themselves stay."]
     assert removed == ["C:\\a.mkv", "C:\\b.mkv", "C:\\c.mkv"]
     assert window.said.text() == "b.mkv is streaming or being prepared, so it was kept."
+
+
+def test_the_tools_tab_offers_a_copy_an_update_and_a_removal(
+    qt: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vpstream.platform.windows import install
+
+    own = {"caddy": "2.11.8"}
+    done: list[str] = []
+
+    def found(runner: Any, tools: Path) -> list[install.Found]:
+        rows = []
+        for tool in install.TOOLS.values():
+            if tool.name in own:
+                path, version = f"C:\\v\\{tool.name}.exe", own[tool.name]
+                rows.append(install.Found(tool, path, True, version, version))
+            else:
+                rows.append(install.Found(tool, f"C:\\sys\\{tool.name}.exe", False, "1.0", None))
+        return rows
+
+    def latest(tool: install.Tool, http: Any) -> install.Build:
+        version = {"ffmpeg": "9.0.2", "caddy": "2.11.9", "mkvtoolnix": "103.0"}[tool.name]
+        return install.Build(tool, version, "https://example.com/x.zip", "a" * 64, 5_000_000)
+
+    def install_build(build: install.Build, *a: Any) -> str:
+        own[build.name] = build.version
+        done.append(f"{build.name} {build.version}")
+        return f"{build.tool.title} {build.version} is installed"
+
+    def remove_own(tools: Path, tool: install.Tool) -> bool:
+        done.append(f"removed {tool.name}")
+        return own.pop(tool.name, None) is not None
+
+    for name, fake in (("found", found), ("latest", latest), ("install_build", install_build),
+                       ("remove_own", remove_own)):  # fmt: skip
+        monkeypatch.setattr(install, name, fake)
+    asked: list[str] = []
+    window = window_for(FakeSession(), tmp_path, answer=lambda t, q: asked.append(t) or True)
+    window.show()
+    tab = window.tools_tab
+    window.tabs.setCurrentWidget(window.tools_page)  # shown: it looks, and for new releases
+    assert wait(qt, lambda: tab.found and tab.latest and not tab.checking, 5)
+    caddy, ffmpeg = tab.lines["caddy"], tab.lines["ffmpeg"]
+    assert caddy.latest.text() == "2.11.9 is out" and caddy.action.text() == "Update"
+    assert not caddy.action.isHidden() and not caddy.remove.isHidden()
+    assert ffmpeg.action.text() == "Install vpstream's copy" and ffmpeg.remove.isHidden()
+    assert ffmpeg.where.text() == "C:\\sys\\ffmpeg.exe (installed for the whole system)"
+
+    caddy.action.click()
+    assert wait(qt, lambda: done == ["caddy 2.11.9"] and not tab.busy and window.worker.busy == 0)
+    assert asked[-1] == "Download Caddy 2.11.9 (5 MB) and use it in place of vpstream's copy?"
+    assert wait(qt, lambda: tab.lines["caddy"].latest.text() == "2.11.9 (up to date)")
+    assert caddy.action.isHidden() and window.said.text() == "Caddy 2.11.9 is installed"
+
+    caddy.remove.click()
+    assert wait(qt, lambda: "removed caddy" in done and window.worker.busy == 0)
+    assert asked[-1].startswith("Remove vpstream's copy of Caddy?")
+    assert wait(
+        qt, lambda: caddy.remove.isHidden() and caddy.action.text() == "Install vpstream's copy"
+    )

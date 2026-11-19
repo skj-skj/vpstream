@@ -44,9 +44,9 @@ from PySide6.QtWidgets import (
 )
 
 from vpstream import __version__, local
-from vpstream.platform.common import UrlHttp
+from vpstream.platform import windows
 from vpstream.platform.windows import firewall, install, network, processes, shortcut, tools_dir
-from vpstream.platform.windows.gui import browser, model, widgets
+from vpstream.platform.windows.gui import browser, model, tools, widgets
 from vpstream.platform.windows.gui.browser import note, path_line, set_choices
 from vpstream.platform.windows.session import Session
 from vpstream.tools import Runner
@@ -221,6 +221,10 @@ class Window(QMainWindow):
         self.prepare_tab = browser.PrepareTab(self)
         self.prepare_page = scrolled(self.prepare_tab)
         self.tabs.addTab(self.prepare_page, "Prepare for browsers")
+        self.tools_tab = tools.ToolsTab(self)
+        self.tools_page = scrolled(self.tools_tab)
+        self.tabs.addTab(self.tools_page, "Tools")
+        self.tabs.currentChanged.connect(self._tab_shown)
 
         # The bottom line, always there.
         bar = self.statusBar()
@@ -471,17 +475,13 @@ class Window(QMainWindow):
 
         def work() -> tuple[list[str], list[str]]:
             problems = []
+            http = windows.http()
             for name in names:
                 try:
-                    if name == install.MKVTOOLNIX:
-                        done = install.install_mkvtoolnix(
-                            self.runner, UrlHttp(), tools_dir(), progress(name)
-                        )
-                    else:
-                        build = install.BUILDS[name]
-                        done = install.install_build(
-                            build, tools_dir(), self.runner, UrlHttp(), progress(name)
-                        )
+                    build = install.latest(install.TOOLS[name], http)
+                    done = install.install_build(
+                        build, tools_dir(), self.runner, http, progress(name)
+                    )
                     self.session.log(done)
                     progress(name)(model.INSTALLED, 1, 1)
                 except Exception as exc:
@@ -500,14 +500,28 @@ class Window(QMainWindow):
         problems, missing = found
         if problems:
             self.tell("\n\n".join(problems), error=True)
-        if [n for n in missing if n != install.MKVTOOLNIX]:
+        self._missing_now(missing)
+        if not self.setup_missing:
+            self.say(model.ALL_INSTALLED)
+        if self.tools_tab.looked:
+            self.tools_tab.look()
+
+    def tools_changed(self) -> None:
+        """The Tools tab installed or removed a program: what is missing now."""
+        self.worker.do(lambda: install.missing(self.runner), self._missing_now)
+
+    def _missing_now(self, missing: list[str]) -> None:
+        if [n for n in missing if n != install.MKVTOOLNIX.name]:
             self._offer_setup(missing)
             return
         self.setup.hide()
         self.setup_missing = False
         self.update_start()
         self._check_firewall()
-        self.say(model.ALL_INSTALLED)
+
+    def _tab_shown(self, at: int) -> None:
+        if self.tabs.widget(at) is self.tools_page:
+            self.tools_tab.shown()
 
     def _look(self) -> None:
         def work() -> tuple[list[network.Address], str]:

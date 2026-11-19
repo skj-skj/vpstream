@@ -91,7 +91,7 @@ def cmd_install(
     args: argparse.Namespace, confirm: Callable[[str, bool], bool] | None = None
 ) -> int:
     from vpstream import cli
-    from vpstream.platform.common import SetupError, UrlHttp
+    from vpstream.platform.common import SetupError
     from vpstream.platform.windows import install, shortcut
     from vpstream.tools import SystemRunner
 
@@ -101,29 +101,31 @@ def cmd_install(
         return cli._error(
             f"cannot install {', '.join(unknown)}: choose from {', '.join(install.PROGRAMS)}", 2
         )
-    runner, tools = SystemRunner(), windows.tools_dir()
+    runner, tools, http = SystemRunner(), windows.tools_dir(), windows.http()
+    # Named ones are installed as vpstream's own even when the system has one: that is how
+    # a copy of its own, or a newer one, is asked for.
     names = list(dict.fromkeys(args.programs)) or install.missing(runner)
-    if install.MKVTOOLNIX in names and args.programs and runner.which("mkvmerge"):
-        print(f"MKVToolNix is already installed: {runner.which('mkvmerge')}")
-        names.remove(install.MKVTOOLNIX)
-    if names:
-        question = f"vpstream will download and install:\n{install.plan_text(names, tools)}\nGo on?"
+    failed = 0
+    builds = []
+    for name in names:
+        try:
+            builds.append(install.latest(install.TOOLS[name], http))
+        except (SetupError, OSError) as exc:
+            print(f"error: {name}: {exc}", file=sys.stderr)
+            failed += 1
+    if builds:
+        question = (
+            f"vpstream will download and install:\n{install.plan_text(builds, tools)}\nGo on?"
+        )
         if not confirm(question, args.yes):
             print("Cancelled; nothing was changed.")
             return 1
-    failed = 0
     progress = Printed()
-    for name in names:
+    for build in builds:
         try:
-            if name == install.MKVTOOLNIX:
-                done = install.install_mkvtoolnix(runner, UrlHttp(), tools, progress)
-            else:
-                done = install.install_build(
-                    install.BUILDS[name], tools, runner, UrlHttp(), progress
-                )
-            print(done)
+            print(install.install_build(build, tools, runner, http, progress))
         except (SetupError, OSError, zipfile.BadZipFile) as exc:
-            print(f"error: {name}: {exc}", file=sys.stderr)
+            print(f"error: {build.name}: {exc}", file=sys.stderr)
             failed += 1
     if not names:
         print("Every program vpstream needs is there.")
@@ -145,7 +147,7 @@ def cmd_uninstall(
 
     confirm = confirm or cli._confirm
     tools = windows.tools_dir()
-    question = f"Remove the ffmpeg and Caddy vpstream installed ({tools}) and the desktop icon?"
+    question = f"Remove the programs vpstream installed ({tools}) and the desktop icon?"
     if not confirm(question, args.yes):
         print("Cancelled; nothing was changed.")
         return 1
@@ -165,7 +167,7 @@ def cmd_uninstall(
     print(
         "Kept: your settings and prepared videos "
         f"({paths.config_file.parent}, {paths.cache_dir.parent}); delete them by hand if you "
-        "like. MKVToolNix stays installed (it is not vpstream's: `winget uninstall "
-        f"{install.WINGET_ID}` removes it). `pip uninstall vpstream` removes vpstream."
+        "like, and programs installed for the whole system (they are not vpstream's). "
+        "`pip uninstall vpstream` removes vpstream."
     )
     return 0

@@ -1,22 +1,25 @@
-"""`vpstream windows-install` and `windows-uninstall`: the programs vpstream needs on Windows.
+"""`vpstream windows-install` and `windows-uninstall`, and the window's Tools tab: the
+programs vpstream needs on Windows.
 
-ffmpeg and Caddy come from their official release pages, at the version pinned here, and
-are checked against the SHA-256 pinned with it. They go to %LOCALAPPDATA%\\vpstream\\tools,
-which vpstream puts first on its own PATH (and nobody else's): nothing outside that folder
-changes, and uninstalling removes the folder. Each one is downloaded, checked, unpacked and
-run before it takes the place of the one there, so a failure leaves what was there.
-
-MKVToolNix has only an installer (and a .7z, which Python cannot unpack): winget installs
-it, or its own installer pinned here when there is no winget. It goes to Program Files and
-stays there when vpstream is uninstalled; doctor and the window find it there.
+ffmpeg, Caddy and MKVToolNix come from each one's own release page, at its latest release
+(`latest`): Caddy's and gyan.dev's ffmpeg GitHub releases, which give each file's SHA-256,
+and MKVToolNix's portable zip with the SHA-256 published next to it. Each download is
+checked against that SHA-256, unpacked, and run before it takes the place of the one there,
+so a failure leaves what was there. They go to %LOCALAPPDATA%\\vpstream\\tools, which
+vpstream puts first on its own PATH (and nobody else's): nothing outside that folder
+changes, and uninstalling removes the folder. A program installed for the whole system (in
+Program Files, on PATH) is used when vpstream has no copy of its own.
 """
 
 from __future__ import annotations
 
 import contextlib
 import functools
+import http.client as http_client
 import json
+import ntpath
 import os
+import re
 import shutil
 import time
 import zipfile
@@ -27,87 +30,172 @@ from pathlib import Path
 from vpstream.ffargs import missing_features, parse_ffmpeg_list
 from vpstream.platform import windows
 from vpstream.platform.common import Http, SetupError
-from vpstream.platform.windows.shortcut import powershell, quote
 from vpstream.tools import Runner, tail
 
 MARKER = "vpstream-tool.json"  # in each folder vpstream installed
-COMMAND_TIMEOUT = 900  # winget or an installer on a slow line
+VERSION = re.compile(r"\d+(?:\.\d+){0,3}")  # what a release may call itself: 9.0.2, 103.0
 
 # progress(what is happening, bytes done, bytes in all); 0 in all: no bar, only the words
 Progress = Callable[[str, int, int], None]
 
 
 @dataclass(frozen=True)
-class Build:
-    """One pinned download: a zip from the program's release page."""
+class Tool:
+    """A program vpstream can install: what it is called, what is kept of its zip."""
 
     name: str  # what the person types: windows-install ffmpeg
-    version: str
-    url: str
-    sha256: str
-    size: int  # bytes of the zip
-    unpacked: int  # bytes of what is kept from it
+    title: str  # what the window shows
+    programs: tuple[str, ...]  # what must be found for it to be there; the first is run
     keep: tuple[str, ...]  # the files kept, by name, wherever they are in the zip
     folder: str  # under tools: where they go, the first folder vpstream installed
+    unpacked: int  # bytes of what is kept, with room to spare
 
     @property
     def top(self) -> str:
         return self.folder.split("/")[0]
 
 
-FFMPEG = Build(
-    name="ffmpeg",
-    version="9.0.2",
-    # gyan.dev's builds, which ffmpeg.org links to for Windows; its GitHub releases have
-    # the same files at a fixed address.
-    url="https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",
-    sha256="60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
-    size=114_768_076,
-    unpacked=200_000_000,
-    keep=("ffmpeg.exe", "ffprobe.exe", "LICENSE"),
-    folder="ffmpeg/bin",
-)
-CADDY = Build(
-    name="caddy",
-    version="2.11.9",
-    url="https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_windows_amd64.zip",
-    sha256="ad93112d335ee687100c4c9f11bced16ca590377976b7fe7883882b9e797e472",
-    size=18_384_117,
-    unpacked=50_000_000,
-    keep=("caddy.exe", "LICENSE"),
-    folder="caddy",
-)
-BUILDS = {b.name: b for b in (FFMPEG, CADDY)}
+FFMPEG = Tool(
+    "ffmpeg", "ffmpeg", ("ffmpeg", "ffprobe"),
+    ("ffmpeg.exe", "ffprobe.exe", "LICENSE"), "ffmpeg/bin", 200_000_000,
+)  # fmt: skip
+CADDY = Tool("caddy", "Caddy", ("caddy",), ("caddy.exe", "LICENSE"), "caddy", 50_000_000)
+MKVTOOLNIX = Tool(
+    "mkvtoolnix", "MKVToolNix", ("mkvmerge", "mkvextract"),
+    ("mkvmerge.exe", "mkvextract.exe", "COPYING.txt"), "mkvtoolnix", 120_000_000,
+)  # fmt: skip
+TOOLS = {t.name: t for t in (FFMPEG, CADDY, MKVTOOLNIX)}
+PROGRAMS = tuple(TOOLS)
 
-MKVTOOLNIX = "mkvtoolnix"
-WINGET_ID = "MoritzBunkus.MKVToolNix"
-MKVTOOLNIX_SETUP = Build(
-    name=MKVTOOLNIX,
-    version="102.0",
-    url="https://mkvtoolnix.download/windows/releases/102.0/mkvtoolnix-64-bit-102.0-setup.exe",
-    sha256="aebd61c359457a05629362e46567d75a04ea0ae2797d1ea5af719e94f8fdfbd5",
-    size=0,  # not known before it is asked for
-    unpacked=150_000_000,
-    keep=(),
-    folder="",
-)
-PROGRAMS = (*BUILDS, MKVTOOLNIX)
-NEEDS = {"ffmpeg": ("ffmpeg", "ffprobe"), "caddy": ("caddy",), MKVTOOLNIX: ("mkvmerge",)}
+# Where each one says what its latest release is.
+GITHUB = {"ffmpeg": "GyanD/codexffmpeg", "caddy": "caddyserver/caddy"}
+GITHUB_ASSET = {
+    "ffmpeg": "ffmpeg-{v}-essentials_build.zip",  # gyan.dev's, which ffmpeg.org links to
+    "caddy": "caddy_{v}_windows_amd64.zip",
+}
+MKVTOOLNIX_LATEST = "https://mkvtoolnix.download/latest-release.xml"
+MKVTOOLNIX_ZIP = "https://mkvtoolnix.download/windows/releases/{v}/mkvtoolnix-64-bit-{v}.zip"
 
 
-def installed_version(tools: Path, build: Build) -> str | None:
-    """The version of `build` vpstream installed, or None."""
+@dataclass(frozen=True)
+class Build:
+    """One release of a tool: the zip to download and the SHA-256 it must have."""
+
+    tool: Tool
+    version: str
+    url: str
+    sha256: str
+    size: int = 0  # bytes of the zip; 0 when not known before the download
+
+    @property
+    def name(self) -> str:
+        return self.tool.name
+
+
+def _version(found: object, what: str) -> str:
+    text = str(found or "").strip().removeprefix("v")
+    if not VERSION.fullmatch(text):
+        raise SetupError(f"{what} does not name a version vpstream understands: {found!r}")
+    return text
+
+
+def latest(tool: Tool, http: Http) -> Build:
+    """The latest release of `tool`, as its own release page says. Raises SetupError, also
+    for a page that is not what it should be (a portal's, a cut-off one)."""
     try:
-        data = json.loads((tools / build.top / MARKER).read_text(encoding="utf-8"))
+        build = _latest(tool, http)
+    except SetupError:
+        raise
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        OSError,
+        http_client.HTTPException,
+    ) as exc:
+        raise SetupError(f"{tool.title}'s latest release cannot be read: {exc!r}") from exc
+    if not build.url.startswith("https://"):
+        raise SetupError(f"{tool.title} {build.version} is not offered over https: {build.url}")
+    return build
+
+
+def _latest(tool: Tool, http: Http) -> Build:
+    if tool.name in GITHUB:
+        api = f"https://api.github.com/repos/{GITHUB[tool.name]}/releases/latest"
+        release = http.get_json(api)
+        version = _version(release.get("tag_name"), f"{tool.title}'s latest release")
+        wanted = GITHUB_ASSET[tool.name].format(v=version)
+        asset = next((a for a in release.get("assets") or [] if a.get("name") == wanted), None)
+        digest = str((asset or {}).get("digest") or "")
+        if asset is None or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise SetupError(f"{tool.title} {version} has no {wanted} with a SHA-256 on GitHub")
+        return Build(
+            tool, version, str(asset["browser_download_url"]), digest[7:], int(asset["size"])
+        )
+    feed = http.get_text(MKVTOOLNIX_LATEST)
+    source = re.search(r"<latest-source>(.*?)</latest-source>", feed, re.S)
+    found = re.search(r"<version>([^<]*)</version>", source[1]) if source else None
+    version = _version(found[1] if found else "", f"{tool.title}'s latest release")
+    url = MKVTOOLNIX_ZIP.format(v=version)
+    sums = re.match(r"\s*([0-9a-fA-F]{64})\b", http.get_text(url + ".sha256"))
+    if sums is None:
+        raise SetupError(f"{tool.title} {version} has no SHA-256 next to {url}")
+    return Build(tool, version, url, sums[1].lower())
+
+
+def installed_version(tools: Path, tool: Tool) -> str | None:
+    """The version of `tool` vpstream installed, or None."""
+    try:
+        data = json.loads((tools / tool.top / MARKER).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     version = data.get("version") if isinstance(data, dict) else None
     return version if isinstance(version, str) else None
 
 
+@dataclass(frozen=True)
+class Found:
+    """Where a tool is found now, for the Tools tab: vpstream's own copy comes first."""
+
+    tool: Tool
+    path: str | None  # its first program, as vpstream finds it; None when missing
+    own: bool  # that is vpstream's copy
+    version: str  # what that program says it is; "" when it does not say
+    own_version: str | None  # vpstream's copy, if it has one
+
+
+def program_version(runner: Runner, path: str) -> str:
+    """The version a program says it is (`ffmpeg -version`, `caddy version`, `mkvmerge
+    --version`); "" when it does not say or does not run."""
+    name = ntpath.basename(path).lower().removesuffix(".exe")
+    args = {"ffmpeg": ["-version"], "caddy": ["version"]}.get(name, ["--version"])
+    try:
+        res = runner.run([path, *args], timeout=20)
+    except OSError:
+        return ""
+    first = (res.stdout or "").strip().splitlines()[:1]
+    # 9.0.2-essentials, v2.11.9, v103.0, n7.1 (a release build named after its git tag)
+    found = re.search(r"(?<![\w.])[vn]?(\d+\.\d+(?:\.\d+)?)", first[0]) if first else None
+    return found[1] if found and res.returncode == 0 else ""
+
+
+def found(runner: Runner, tools: Path) -> list[Found]:
+    """Each tool as vpstream finds it now. Runs each one found: not on the window's thread."""
+    rows = []
+    for tool in TOOLS.values():
+        path = runner.which(tool.programs[0])
+        top = ntpath.normcase(str(tools / tool.top)).rstrip("\\")
+        folder = ntpath.normcase(ntpath.dirname(path or ""))
+        own = bool(path) and (folder == top or folder.startswith(top + "\\"))
+        version = program_version(runner, path) if path else ""
+        rows.append(Found(tool, path, own, version, installed_version(tools, tool)))
+    return rows
+
+
 def missing(runner: Runner) -> list[str]:
     """What `windows-install` with no program installs: what is not found."""
-    return [name for name in PROGRAMS if not all(runner.which(p) for p in NEEDS[name])]
+    return [t.name for t in TOOLS.values() if not all(runner.which(p) for p in t.programs)]
 
 
 def sweep(tools: Path) -> None:
@@ -129,37 +217,37 @@ def _check_space(folder: Path, need: int) -> None:
 
 
 def _download(http: Http, build: Build, dest: Path, progress: Progress) -> None:
-    what = f"downloading {build.name} {build.version}"
+    what = f"downloading {build.tool.title} {build.version}"
     progress(what, 0, build.size)
     digest = http.download(build.url, dest, lambda done, total: progress(what, done, total))
     if digest != build.sha256:
         dest.unlink(missing_ok=True)
         raise SetupError(
-            f"the download of {build.name} does not match its SHA-256; nothing was changed. "
-            f"Try again; if it happens again, the file at {build.url} is not the one vpstream "
-            "expects"
+            f"the download of {build.tool.title} does not match its SHA-256; nothing was changed."
+            f" Try again; if it happens again, the file at {build.url} is not the one its "
+            "release page names"
         )
 
 
-def unpack(archive: Path, build: Build, staged: Path) -> None:
-    """The files `build` keeps, by name, into `staged`/its folder. Only names are used, so
+def unpack(archive: Path, tool: Tool, staged: Path) -> None:
+    """The files `tool` keeps, by name, into `staged`/its folder. Only names are used, so
     nothing lands outside it whatever the zip says."""
-    out = staged / build.folder
+    out = staged / tool.folder
     out.mkdir(parents=True)
     got = set()
     with zipfile.ZipFile(archive) as zf:
         for info in zf.infolist():
             name = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
-            if not info.is_dir() and name in build.keep and name not in got:
+            if not info.is_dir() and name in tool.keep and name not in got:
                 with zf.open(info) as src, (out / name).open("wb") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
                 got.add(name)
-    lost = [name for name in build.keep if name.endswith(".exe") and name not in got]
+    lost = [name for name in tool.keep if name.endswith(".exe") and name not in got]
     if lost:
-        raise SetupError(f"the download of {build.name} does not have {', '.join(lost)}")
+        raise SetupError(f"the download of {tool.title} does not have {', '.join(lost)}")
 
 
-def check_build(runner: Runner, build: Build, folder: Path) -> None:
+def check_build(runner: Runner, tool: Tool, folder: Path) -> None:
     """Run what was unpacked before it replaces anything."""
 
     def run(*args: str) -> str:
@@ -172,7 +260,7 @@ def check_build(runner: Runner, build: Build, folder: Path) -> None:
             raise SetupError(f"the new {args[0]} does not run here: {tail(res)}")
         return res.stdout
 
-    if build.name == FFMPEG.name:
+    if tool is FFMPEG:
         lists = [
             parse_ffmpeg_list(run("ffmpeg.exe", "-hide_banner", f"-{w}"))
             for w in ("encoders", "filters")
@@ -181,8 +269,11 @@ def check_build(runner: Runner, build: Build, folder: Path) -> None:
         if lacking:
             raise SetupError(f"the new ffmpeg lacks {', '.join(lacking)}; nothing was changed")
         run("ffprobe.exe", "-version")
-    else:
+    elif tool is CADDY:
         run("caddy.exe", "version")
+    else:
+        run("mkvmerge.exe", "--version")
+        run("mkvextract.exe", "--version")
 
 
 # Windows Defender reads a program that was just written or run, and while it does nothing
@@ -252,94 +343,62 @@ def swap(tools: Path, staged: Path, top: str) -> None:
 
 
 def install_build(build: Build, tools: Path, runner: Runner, http: Http, progress: Progress) -> str:
-    """Download, check and install one pinned build. Returns what was done."""
+    """Download, check and install one release. Returns what was done."""
+    tool = build.tool
     sweep(tools)
-    _check_space(tools, build.size + build.unpacked)
-    work = tools / f".install-{build.name}"
+    _check_space(tools, (build.size or tool.unpacked) + tool.unpacked)  # size 0: not known
+    work = tools / f".install-{tool.name}"
     work.mkdir(parents=True)
     try:
-        archive = work / build.url.rsplit("/", 1)[1]
+        archive = work / "download.zip"  # not the URL's name: nothing it says lands elsewhere
         _download(http, build, archive, progress)
-        progress(f"unpacking {build.name}", 0, 0)
+        progress(f"unpacking {tool.title}", 0, 0)
         staged = work / "staged"
-        unpack(archive, build, staged)
+        unpack(archive, tool, staged)
         archive.unlink()
-        progress(f"checking the new {build.name}", 0, 0)
-        check_build(runner, build, staged / build.folder)
+        progress(f"checking the new {tool.title}", 0, 0)
+        check_build(runner, tool, staged / tool.folder)
         marker = {
             "version": build.version,
             "url": build.url,
             "sha256": build.sha256,
             "installed": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
-        (staged / build.top / MARKER).write_text(json.dumps(marker, indent=2) + "\n", "utf-8")
-        swap(tools, staged, build.top)
+        (staged / tool.top / MARKER).write_text(json.dumps(marker, indent=2) + "\n", "utf-8")
+        swap(tools, staged, tool.top)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return f"{build.name} {build.version} is installed in {tools / build.top}"
+    return f"{tool.title} {build.version} is installed in {tools / tool.top}"
 
 
-def install_mkvtoolnix(runner: Runner, http: Http, tools: Path, progress: Progress) -> str:
-    """MKVToolNix by winget, or by its own installer (pinned) when there is no winget. Both
-    ask Windows for administrator rights unless this already has them."""
-    if runner.which("winget"):
-        progress("installing MKVToolNix with winget (Windows may ask to allow it)", 0, 0)
-        res = runner.run(
-            [
-                "winget", "install", "--id", WINGET_ID, "--exact", "--silent",
-                "--accept-package-agreements", "--accept-source-agreements",
-                "--disable-interactivity",
-            ],
-            timeout=COMMAND_TIMEOUT,
-        )  # fmt: skip
-        if res.returncode != 0:
-            raise SetupError(f"winget could not install MKVToolNix: {tail(res, stdout=True)}")
-        return "MKVToolNix is installed (by winget)"
+def remove_own(tools: Path, tool: Tool) -> bool:
+    """Remove vpstream's copy of `tool` (one installed for the system is used after);
+    False when there is none."""
+    folder = tools / tool.top
+    if not (folder / MARKER).exists():
+        return False
     sweep(tools)
-    _check_space(tools, MKVTOOLNIX_SETUP.unpacked)
-    work = tools / ".install-mkvtoolnix"
-    work.mkdir(parents=True)
-    try:
-        setup = work / "mkvtoolnix-setup.exe"
-        _download(http, MKVTOOLNIX_SETUP, setup, progress)
-        progress("installing MKVToolNix (Windows may ask to allow it)", 0, 0)
-        # Its installer needs administrator rights: Start-Process asks Windows for them.
-        script = (
-            f"exit (Start-Process -FilePath {quote(setup)} -ArgumentList '/S' -Verb RunAs "
-            "-Wait -PassThru).ExitCode"
-        )
-        res = runner.run(powershell(script), timeout=COMMAND_TIMEOUT)
-        if res.returncode != 0:
-            raise SetupError(f"the MKVToolNix installer failed: {tail(res)}")
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-    return f"MKVToolNix {MKVTOOLNIX_SETUP.version} is installed"
+    _not_in_use(folder, tool.title)
+    _retried(functools.partial(shutil.rmtree, folder))
+    return True
 
 
 def uninstall(tools: Path) -> list[str]:
     """Remove the programs vpstream installed. Returns what was removed."""
     removed = []
     sweep(tools)
-    for build in BUILDS.values():
-        folder = tools / build.top
-        if (folder / MARKER).exists():
-            _not_in_use(folder, build.name)
-            _retried(functools.partial(shutil.rmtree, folder))
-            removed.append(f"{build.name} ({folder})")
+    for tool in TOOLS.values():
+        if remove_own(tools, tool):
+            removed.append(f"{tool.name} ({tools / tool.top})")
     with contextlib.suppress(OSError):
         tools.rmdir()  # only when nothing else is in it
     return removed
 
 
-def plan_text(names: Sequence[str], tools: Path) -> str:
-    """What an install of `names` downloads, for the question before it."""
+def plan_text(builds: Sequence[Build], tools: Path) -> str:
+    """What an install of `builds` downloads, for the question before it."""
     lines = []
-    for name in names:
-        build = BUILDS.get(name)
-        if build:
-            lines.append(
-                f"  {name} {build.version} ({build.size // 1_000_000} MB) into {tools / build.top}"
-            )
-        else:
-            lines.append("  MKVToolNix, with winget or its installer, into Program Files")
+    for build in builds:
+        size = f" ({build.size // 1_000_000} MB)" if build.size else ""
+        lines.append(f"  {build.tool.title} {build.version}{size} into {tools / build.tool.top}")
     return "\n".join(lines)

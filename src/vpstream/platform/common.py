@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,6 +86,9 @@ class Http(Protocol):
 class UrlHttp:
     timeout = 60
 
+    def __init__(self, context: ssl.SSLContext | None = None) -> None:
+        self.context = context  # None: Python's own (on Linux, the system's CA bundle)
+
     def _open(self, url: str, accept: str = "*/*") -> Any:
         headers = {"User-Agent": f"vpstream/{__version__}", "Accept": accept}
         api = urllib.parse.urlsplit(url).hostname == API_HOST
@@ -97,7 +101,9 @@ class UrlHttp:
                 # Unredirected: a redirect to another host never carries it.
                 request.add_unredirected_header("Authorization", f"Bearer {attempt}")
             try:
-                return urllib.request.urlopen(request, timeout=self.timeout)
+                if self.context is None:  # elsewhere than Windows: the call as ever
+                    return urllib.request.urlopen(request, timeout=self.timeout)
+                return urllib.request.urlopen(request, timeout=self.timeout, context=self.context)
             except urllib.error.HTTPError as exc:
                 if attempt and exc.code == 401:
                     continue

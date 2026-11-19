@@ -683,3 +683,101 @@ def stopped_said(why: str) -> str:
 
 def bug_said(error: BaseException) -> str:
     return f"Something went wrong: {error}\n\nThe log has more."
+
+
+# --- the Tools tab: which ffmpeg, Caddy and MKVToolNix are used, and newer ones
+
+TOOLS_INTRO = (
+    "vpstream uses its own copy of a program when it has one, else the one installed for "
+    "the whole system. Its copies come from each program's own release page, at the latest "
+    "release, checked against the SHA-256 published with it."
+)
+INSTALL_OWN = "Install vpstream's copy"
+UPDATE = "Update"
+NOT_CHECKED = "not looked up yet"
+CHECKING = "looking..."
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """`9.0.2` as (9, 0, 2), to compare; what is not a number counts as 0."""
+    return tuple(int(part) if part.isdigit() else 0 for part in version.split("."))
+
+
+def newer(found: str, have: str) -> bool:
+    """Whether release `found` is newer than `have` ("" is older than any)."""
+    if not have:
+        return True
+    one, other = version_key(found), version_key(have)
+    width = max(len(one), len(other))
+    return one + (0,) * (width - len(one)) > other + (0,) * (width - len(other))
+
+
+@dataclass(frozen=True)
+class ToolRow:
+    name: str
+    title: str
+    where: str  # the program used, or that there is none
+    version: str
+    latest: str
+    action: str  # INSTALL_OWN, UPDATE or "" (none)
+    can_remove: bool  # vpstream has a copy of its own
+
+
+def tool_row(
+    name: str,
+    title: str,
+    path: str | None,
+    own: bool,
+    version: str,
+    own_version: str | None,
+    latest: str | None,
+    problem: str = "",
+    checking: bool = False,
+) -> ToolRow:
+    """One program in the Tools tab. Update is offered only for vpstream's own copy, when a
+    newer release is out; any program without a copy of vpstream's may get one."""
+    if path is None:
+        where = "not found"
+    else:
+        where = f"{path} ({"vpstream's copy" if own else 'installed for the whole system'})"
+    have = (own_version or version) if own else version
+    if checking:
+        said = CHECKING
+    elif problem:
+        said = f"cannot look it up: {problem}"
+    elif latest is None:
+        said = NOT_CHECKED
+    elif own and not newer(latest, have):
+        said = f"{latest} (up to date)"
+    else:
+        said = f"{latest} is out" if own else latest
+    if not own:
+        action = INSTALL_OWN
+    elif latest is not None and newer(latest, have):
+        action = UPDATE
+    else:
+        action = ""
+    # Only what vpstream marked as its own is removed (a folder copied there by hand is not).
+    return ToolRow(name, title, where, have or "unknown", said, action, own and bool(own_version))
+
+
+def ask_install(title: str, version: str, size: int, where: str | None, own: bool) -> str:
+    """The question before vpstream downloads a copy of a program, or a newer one."""
+    big = f" ({size / 1e6:.0f} MB)" if size else ""
+    if own:
+        return f"Download {title} {version}{big} and use it in place of vpstream's copy?"
+    after = f"vpstream uses it in place of {where}." if where else "vpstream uses it."
+    return f"Download {title} {version}{big} into vpstream's folder? {after}"
+
+
+def ask_remove_tool(title: str) -> str:
+    return (
+        f"Remove vpstream's copy of {title}? The one installed for the whole system, if "
+        "there is one, is used after."
+    )
+
+
+def tool_removed(title: str, removed: bool) -> str:
+    if not removed:
+        return f"vpstream has no copy of {title} to remove."
+    return f"vpstream's copy of {title} is removed."

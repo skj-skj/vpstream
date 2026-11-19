@@ -49,16 +49,14 @@ def path_hint(found: str | None, original_path: str) -> str:
 
 
 def own_build(found: str, tools: Path) -> str:
-    """For a program vpstream installed: its version, and how to update an older one."""
+    """For a program vpstream installed: its version. (The window's Tools tab looks for a
+    newer one; doctor asks nothing of the network.)"""
     from vpstream.platform.windows import install
 
-    for build in install.BUILDS.values():
-        folder = str(tools / build.folder).lower()
+    for tool in install.TOOLS.values():
+        folder = str(tools / tool.folder).lower()
         if ntpath.dirname(found).lower().rstrip("\\") == folder.rstrip("\\"):
-            have = install.installed_version(tools, build)
-            if have != build.version:
-                return f" (vpstream's {have or 'unknown version'}; {build.version} is out)"
-            return f" (vpstream's {have})"
+            return f" (vpstream's {install.installed_version(tools, tool) or 'unknown version'})"
     return ""
 
 
@@ -69,16 +67,11 @@ def check_tools(runner: Runner, original_path: str, tools: Path | None = None) -
         check = check_tool(runner, tool)
         if check.status == "ok":
             extra = own_build(check.detail, tools)
-            if tool.name.startswith("mkv"):
+            if tool.name.startswith("mkv") and not extra:
                 extra = path_hint(check.detail, original_path)
-            fix = f"{windows.INSTALL} {install_name(tool.name)}" if "is out" in extra else ""
-            check = Check(check.name, "warning" if fix else "ok", check.detail + extra, fix)
+            check = Check(check.name, "ok", check.detail + extra)
         checks.append(check)
     return checks
-
-
-def install_name(program: str) -> str:
-    return windows.HINTS.packages.get(program, program)
 
 
 def check_config(path: Path) -> Check:

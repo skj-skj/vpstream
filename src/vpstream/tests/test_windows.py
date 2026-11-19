@@ -47,11 +47,12 @@ def test_default_paths_on_windows(on_windows: None, monkeypatch: pytest.MonkeyPa
 def test_programs_are_found_in_vpstreams_folders_first() -> None:
     env = {**ENV, "PATH": "/usr/bin;/x"}
     folders = windows.program_dirs(env)
-    assert folders[:2] == [
+    assert folders[:3] == [
         windows.tools_dir(env) / "ffmpeg" / "bin",
         windows.tools_dir(env) / "caddy",
+        windows.tools_dir(env) / "mkvtoolnix",  # vpstream's own, before the system's
     ]
-    assert [str(f) for f in folders[2:]] == list(windows.MKVTOOLNIX_DIRS)
+    assert [str(f) for f in folders[3:]] == list(windows.MKVTOOLNIX_DIRS)
     a, b = str(Path("/a")), str(Path("/b"))
     joined = windows.search_path(windows.os.pathsep.join([b, a, b]), [Path(a)])
     assert joined.split(windows.os.pathsep) == [a, b, b]  # the rest as it was
@@ -306,3 +307,13 @@ def test_ffmpeg_is_given_hls_paths_with_slashes(tmp_path: Path) -> None:
     args = ffargs.hls_output_args(tmp_path / "base.part")
     assert args[-1] == f"{tmp_path.as_posix()}/base.part/index.m3u8" and "\\" not in args[-1]
     assert "\\" not in args[-2]
+
+
+def test_windows_downloads_check_certificates_with_certifis() -> None:
+    import ssl
+
+    pytest.importorskip("certifi", reason="certifi comes with vpstream on Windows")
+    http = windows.http()
+    assert http.context is not None
+    assert http.context.verify_mode == ssl.CERT_REQUIRED and http.context.check_hostname
+    assert http.context.cert_store_stats()["x509_ca"] > 100  # Mozilla's roots, not the PC's
