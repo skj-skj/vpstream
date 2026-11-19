@@ -295,7 +295,7 @@ def test_a_switch_whose_start_fails_says_only_that(qt: Any, tmp_path: Path) -> N
     window.show()
     window.show_status(status([], []))
     window.stream_prepared("C:\\gone.mkv")  # asked, then the old one stops, the new one fails
-    assert wait(qt, lambda: window.starting)
+    assert wait(qt, lambda: window.starting)  # once the question is answered
     gap = {"now": 1000.0, "prepare": [], "stream": None}
     window.show_status(gap)  # a poll between its stop and its start: the page stays
     assert window.pages.currentIndex() == 1
@@ -320,3 +320,20 @@ def test_the_close_does_not_wait_for_an_open_that_never_began(qt: Any, tmp_path:
     assert wait(qt, lambda: window.closed, 3) and not window.open_begun.is_set()
     window.worker.do(lambda: None)  # after the close: not taken
     assert window.worker.busy == 0
+
+
+def test_a_session_close_that_hangs_does_not_keep_the_window(
+    qt: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app, "SESSION_CLOSE_WAIT", 0.3)
+    session = FakeSession()
+    hung = threading.Event()
+    session.close = lambda: hung.wait(30)  # type: ignore[method-assign]
+    window = window_for(session, tmp_path)
+    window.show()
+    window.close()
+    try:
+        assert wait(qt, lambda: window.closed, 3)
+        assert any("did not close in time" in line for line in session.lines)
+    finally:
+        hung.set()  # the stand-in's thread ends with the test

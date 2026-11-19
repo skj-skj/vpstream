@@ -53,9 +53,13 @@ from vpstream.tools import Runner
 
 POLL_SECONDS = 1.0
 # How long the close waits for the worker's job under way (a download, say) before the
-# session closes; Control's own work (a start) is waited for all the same.
+# session closes; Control's own work (a start) holds the session's close in turn.
 CLOSE_WAIT = 15.0
 OPEN_WAIT = 60.0  # and for the session's open, which starts the gate (a stream taken up)
+# And for the session's close: a slow one (the indexer stopping, netsh, Caddy) ends well
+# within this; one that hangs (a gate that never served cannot be shut down) must not keep
+# the window open. Caddy goes with the window all the same.
+SESSION_CLOSE_WAIT = 60.0
 APP_ID = "vpstream"  # the taskbar's name for the window, not pythonw's
 SIZE = (1100, 760)  # at 125% on a 1920x1080 screen: 1375x950
 SMALLEST = (900, 640)
@@ -856,12 +860,19 @@ class Window(QMainWindow):
             # download); the session's open, if it began, too (it starts the gate).
             self.worker.thread.join(CLOSE_WAIT)
             if self.open_begun.is_set() and not self.opened.wait(OPEN_WAIT):
-                self.session.log("WARNING: closing while the session still opens")
+                self.session.log("WARNING: the session still opens; it is closed all the same")
+            closing = threading.Thread(target=close_session, name="close-session", daemon=True)
+            closing.start()
+            closing.join(SESSION_CLOSE_WAIT)
+            if closing.is_alive():
+                self.session.log("WARNING: the session did not close in time; the window ends")
+            self.bridge.post(self._closed)
+
+        def close_session() -> None:
             try:
                 self.session.close()
             except Exception as exc:
                 self.session.log(f"WARNING: closing: {exc!r}")
-            self.bridge.post(self._closed)
 
         threading.Thread(target=end, name="close", daemon=True).start()
 
