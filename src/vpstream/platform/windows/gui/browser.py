@@ -5,281 +5,288 @@ one after another in one queue, while a stream runs or not; below the queue are 
 already prepared, to stream or remove. On the Stream tab, `StartPanel` says whether the
 chosen video is ready and what it starts with, and `PlayerPanel` sends the players of the
 browsers watching their audio, subtitles and a time to go to. All of them ask through the
-window's worker and show what its poll brings.
+window's worker and show what its poll brings; none of them waits.
 """
 
 from __future__ import annotations
 
 import functools
-import os
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import ntpath
 from typing import TYPE_CHECKING, Any
 
-from vpstream.platform.windows.gui import model
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from vpstream.platform.windows.gui import model, widgets
 from vpstream.stream import NeedsConfirm
 
 if TYPE_CHECKING:
     from vpstream.platform.windows.gui.app import Window
 
-OFF = "Off"
 LIBRARY_SECONDS = 5.0  # how often the list of prepared videos is read while it shows
 
 
-def disable(widget: ttk.Widget, off: bool = True) -> None:
-    widget.state(["disabled" if off else "!disabled"])  # type: ignore[no-untyped-call]
+def path_line() -> QLineEdit:
+    """A chosen path: read-only, scrolled inside itself, so a long one never widens the
+    window."""
+    line = QLineEdit()
+    line.setReadOnly(True)
+    line.setFrame(False)
+    line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+    return line
 
 
-class JobBar:
-    """A job's bar. It moves gently while ffmpeg has not said how far it is yet (a busy
-    bar), then glides to each new value, 25 times a second, where the poll brings one a
-    second."""
-
-    STEP_MS = 40
-    BUSY_MS = 60  # the busy bar's step: slow enough to read as working, not flickering
-
-    def __init__(self, parent: tk.Misc) -> None:
-        self.bar = ttk.Progressbar(parent, length=180, maximum=1.0)
-        self.bar.pack(side="left", padx=8)
-        self.target = self.value = 0.0
-        self.busy = False
-        self.gliding = False
-
-    def show(self, state: str, progress: float) -> None:
-        busy = state == "running" and progress <= 0.0
-        if busy != self.busy:
-            self.busy = busy
-            if busy:
-                self.bar.configure(mode="indeterminate")
-                self.bar.start(self.BUSY_MS)
-            else:
-                self.bar.stop()
-                self.bar.configure(mode="determinate", value=self.value)
-        self.target = 1.0 if state == "done" else progress
-        if not busy and not self.gliding:
-            self.gliding = True
-            self.bar.after(self.STEP_MS, self._glide)
-
-    def _glide(self) -> None:
-        if not self.bar.winfo_exists() or self.busy:
-            self.gliding = False
-            return
-        gap = self.target - self.value
-        self.value = self.target if abs(gap) < 0.002 else self.value + gap * 0.2
-        self.bar.configure(value=self.value)
-        if self.value == self.target:
-            self.gliding = False
-        else:
-            self.bar.after(self.STEP_MS, self._glide)
+def note() -> QLabel:
+    """A label of a few lines that wraps."""
+    label = QLabel()
+    label.setWordWrap(True)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    return label
 
 
-class PrepareTab:
+def keep_room(widget: QWidget) -> None:
+    """Hidden, `widget` keeps its room, so what is next to it does not move."""
+    policy = widget.sizePolicy()
+    policy.setRetainSizeWhenHidden(True)
+    widget.setSizePolicy(policy)
+
+
+def set_choices(box: QComboBox, choices: list[tuple[str, Any]], keep: bool = True) -> None:
+    """The (label, value) choices of `box`; the chosen one stays when it is still there."""
+    was = box.currentData() if keep else None
+    box.blockSignals(True)
+    box.clear()
+    for label, value in choices:
+        box.addItem(label, value)
+    at = box.findData(was) if was is not None else -1
+    box.setCurrentIndex(max(at, 0))
+    box.blockSignals(False)
+
+
+class JobRow(QWidget):
+    """One video in the queue: what it does, its bar, and Cancel while it has parts left."""
+
+    def __init__(self, cancel: Any) -> None:
+        super().__init__()
+        line = QHBoxLayout(self)
+        line.setContentsMargins(0, 2, 0, 2)
+        self.label = QLabel()
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.bar = widgets.Bar()
+        self.cancel = QPushButton("Cancel")
+        self.cancel.clicked.connect(cancel)
+        keep_room(self.cancel)
+        line.addWidget(self.label, 3)
+        line.addWidget(self.bar, 2, Qt.AlignmentFlag.AlignVCenter)
+        line.addWidget(self.cancel)
+
+    def show_job(self, job: model.VideoJob) -> None:
+        if self.label.text() != job.line:
+            self.label.setText(job.line)
+            self.label.setToolTip(job.line)
+        self.bar.set(model.bar_target(job.state, job.progress))
+        self.cancel.setVisible(job.state in ("queued", "running"))
+
+
+class PrepareTab(QWidget):
     """Pick a video and its subtitles, prepare it; the queue; the prepared videos."""
 
-    def __init__(self, parent: ttk.Frame, window: Window) -> None:
-        self.window = window
-        self.frame = parent
-        self.path = tk.StringVar()
+    def __init__(self, main: Window) -> None:
+        super().__init__()
+        self.main = main
         self.kind = "file"
         self.plans: list[dict[str, Any]] = []
         self.source = ""
-        self.subs: list[model.Track] = []
-        self.checks: dict[int, tk.BooleanVar] = {}
-        self.job_rows: dict[int, tuple[ttk.Frame, ttk.Label, JobBar, ttk.Button]] = {}
+        self.checks: dict[int, QCheckBox] = {}
+        self.job_rows: dict[int, JobRow] = {}
         self.active = 0
         self.library: list[model.LibraryRow] = []
         self.library_raw: list[dict[str, Any]] = []
         self.read_at = 0.0
+        page = QVBoxLayout(self)
 
-        what = ttk.LabelFrame(parent, text="Prepare a video for browsers and TVs")
-        what.pack(fill="x", padx=8, pady=4)
-        row = ttk.Frame(what)
-        row.pack(fill="x", padx=8, pady=4)
-        ttk.Button(row, text="Video file...", command=self._pick_file).pack(side="left")
-        ttk.Button(row, text="Folder...", command=self._pick_folder).pack(side="left", padx=4)
-        ttk.Label(row, textvariable=self.path, wraplength=520).pack(side="left", padx=8)
-        ttk.Label(what, text="Subtitles to prepare:").pack(anchor="w", padx=8)
-        self.sub_box = ttk.Frame(what)
-        self.sub_box.pack(fill="x", padx=16)
-        self.left = ttk.Label(what, justify="left", wraplength=700)
-        self.left.pack(fill="x", padx=8, pady=2)
-        self.prepare_button = ttk.Button(what, text="Prepare", command=self.prepare)
-        self.prepare_button.pack(anchor="e", padx=8, pady=4)
-        disable(self.prepare_button)
+        what = QGroupBox("Prepare a video for browsers and TVs")
+        box = QVBoxLayout(what)
+        row = QHBoxLayout()
+        pick_file = QPushButton("Video file...")
+        pick_file.clicked.connect(lambda: self._pick(folder=False))
+        pick_folder = QPushButton("Folder...")
+        pick_folder.clicked.connect(lambda: self._pick(folder=True))
+        self.path = path_line()
+        row.addWidget(pick_file)
+        row.addWidget(pick_folder)
+        row.addWidget(self.path, 1)
+        box.addLayout(row)
+        box.addWidget(QLabel("Subtitles to prepare:"))
+        self.sub_box = QWidget()
+        self.sub_grid = QGridLayout(self.sub_box)
+        self.sub_grid.setContentsMargins(16, 0, 0, 0)
+        box.addWidget(self.sub_box)
+        self.left = note()
+        box.addWidget(self.left)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.prepare_button = QPushButton("Prepare")
+        self.prepare_button.setEnabled(False)
+        self.prepare_button.clicked.connect(lambda: self.prepare())
+        row.addWidget(self.prepare_button)
+        box.addLayout(row)
+        page.addWidget(what)
 
-        queue = ttk.LabelFrame(parent, text="Queue (one after another, while you watch)")
-        queue.pack(fill="x", padx=8, pady=4)
-        self.jobs = ttk.Frame(queue)
-        self.jobs.pack(fill="x", padx=8, pady=2)
-        self.empty = ttk.Label(queue, text="Nothing is being prepared.")
-        self.empty.pack(anchor="w", padx=8, pady=2)
+        queue = QGroupBox("Queue (one after another, while you watch)")
+        box = QVBoxLayout(queue)
+        self.jobs = QVBoxLayout()
+        box.addLayout(self.jobs)
+        self.empty = QLabel(model.NOTHING_QUEUED)
+        box.addWidget(self.empty)
+        page.addWidget(queue)
 
-        shelf = ttk.LabelFrame(parent, text="Prepared videos")
-        shelf.pack(fill="both", expand=True, padx=8, pady=4)
-        columns = ("name", "subs", "size", "state")
-        self.table = ttk.Treeview(shelf, columns=columns, show="headings", height=7)
-        for column, head, width in zip(
-            columns, ("Video", "Subtitles", "Size", ""), (300, 170, 80, 220), strict=True
-        ):
-            self.table.heading(column, text=head)
-            self.table.column(column, width=width, anchor="w")
-        self.table.pack(fill="both", expand=True, padx=8, pady=4)
-        row = ttk.Frame(shelf)
-        row.pack(fill="x", padx=8, pady=4)
-        ttk.Button(row, text="Stream it", command=self.stream_it).pack(side="right")
-        ttk.Button(row, text="Remove", command=self.remove).pack(side="right", padx=4)
-        ttk.Label(
-            row,
-            text="Stream it while another streams: the next one plays at the same address.",
-            foreground="#555",
-        ).pack(side="left")
+        shelf = QGroupBox("Prepared videos")
+        box = QVBoxLayout(shelf)
+        self.table, self.rows = widgets.table(("Video", "Subtitles", "Size", "State"), 0)
+        self.table.setMinimumHeight(180)
+        box.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        hint = note()
+        hint.setText(model.SWITCH_HINT)
+        row.addWidget(hint, 1)
+        remove = QPushButton("Remove")
+        remove.clicked.connect(self.remove)
+        stream_it = QPushButton("Stream it")
+        stream_it.clicked.connect(self.stream_it)
+        row.addWidget(remove)
+        row.addWidget(stream_it)
+        box.addLayout(row)
+        page.addWidget(shelf, 1)
 
     # --- choosing what to prepare
 
-    def _pick_file(self) -> None:
-        found = filedialog.askopenfilename(
-            parent=self.window.root,
-            title="A video to prepare",
-            filetypes=[("Videos", "*.mkv *.mp4 *.m4v *.mov *.avi *.webm *.ts"), ("All", "*.*")],
-        )
-        if found:
-            self.load(found, "file")
-
-    def _pick_folder(self) -> None:
-        found = filedialog.askdirectory(parent=self.window.root, title="A folder of videos")
-        if found:
-            self.load(found, "dir")
+    def _pick(self, folder: bool) -> None:
+        title = "A folder of videos" if folder else "A video to prepare"
+        widgets.pick(self, title, folder, lambda path: self.load(path, "dir" if folder else "file"))
 
     def load(self, path: str, kind: str) -> None:
-        self.path.set(os.path.normpath(path))
+        self.path.setText(ntpath.normpath(path))
+        self.path.setCursorPosition(0)
         self.kind = kind
         self.source, self.plans = "", []
         self.plan()
 
     def chosen_subs(self) -> list[int]:
-        return [n for n, var in self.checks.items() if var.get()]
+        return [n for n, box in self.checks.items() if box.isChecked()]
 
     def plan(self) -> None:
         """What is still to make, for the chosen subtitles (a plan only: nothing starts)."""
-        if not self.path.get():
+        source = self.path.text()
+        if not source:
             return
-        disable(self.prepare_button)
-        self.left.configure(text="Looking at the video...")
-        source = self.path.get()
+        self.prepare_button.setEnabled(False)
+        self.left.setText(model.LOOKING_VIDEO)
         options = {self.kind: source, "sub": model.sub_spec(self.chosen_subs()), "dry_run": True}
-        self.window.worker.do(
-            lambda: self.window.session.control.prepare(options),
+        self.main.worker.do(
+            lambda: self.main.session.control.prepare(options),
             lambda found: self._planned(source, found),
             self._failed,
         )
 
     def _planned(self, source: str, found: dict[str, Any]) -> None:
-        if source != self.path.get():
+        if source != self.path.text():
             return  # another was chosen meanwhile
         self.plans = found["plans"]
         if source != self.source:
             self.source = source
             self._show_tracks()
         left = model.what_is_left(self.plans)
-        self.left.configure(
-            text="All of it is prepared." if not left else "To prepare:\n" + "\n".join(left)
-        )
-        disable(self.prepare_button, not left)
+        self.left.setText(model.left_text(left))
+        self.prepare_button.setEnabled(bool(left))
 
     def _show_tracks(self) -> None:
-        _, self.subs = model.plan_tracks(self.plans)
-        for child in self.sub_box.winfo_children():
-            child.destroy()
+        _, subs = model.plan_tracks(self.plans)
+        while self.sub_grid.count():
+            item = self.sub_grid.takeAt(0)
+            gone = item.widget() if item is not None else None
+            if gone is not None:
+                gone.deleteLater()
         self.checks = {}
-        rows = (len(self.subs) + 1) // 2  # two columns: a file with many tracks fits
-        for at, track in enumerate(self.subs):
-            var = tk.BooleanVar(value=False)
-            self.checks[track.number] = var
-            box = ttk.Checkbutton(self.sub_box, text=track.text, variable=var, command=self.plan)
-            if track.how == "unsupported":
-                disable(box)
-            box.grid(row=at % rows, column=at // rows, sticky="w", padx=(0, 16))
-        if not self.subs:
-            ttk.Label(self.sub_box, text="(none in this video)").grid(row=0, column=0)
+        rows = max((len(subs) + 1) // 2, 1)  # two columns: a file with many tracks fits
+        for at, track in enumerate(subs):
+            box = QCheckBox(track.text)
+            box.setEnabled(track.how != "unsupported")
+            box.toggled.connect(lambda _on: self.plan())
+            self.checks[track.number] = box
+            self.sub_grid.addWidget(box, at % rows, at // rows)
+        if not subs:
+            self.sub_grid.addWidget(QLabel(model.NO_SUBS), 0, 0)
 
     def prepare(self, confirmed: bool = False) -> None:
         options: dict[str, Any] = {
-            self.kind: self.path.get(),
+            self.kind: self.path.text(),
             "sub": model.sub_spec(self.chosen_subs()),
         }
         if confirmed:
             options["confirmed"] = True
-        disable(self.prepare_button)
+        self.prepare_button.setEnabled(False)
 
         def queued(found: dict[str, Any]) -> None:
-            self.window.say(f"Queued: {len(found['jobs'])} parts. Choose the next one any time.")
+            self.main.say(model.queued_said(len(found["jobs"])))
             self.plan()
 
-        self.window.worker.do(
-            lambda: self.window.session.control.prepare(options), queued, self._prepare_failed
+        self.main.worker.do(
+            lambda: self.main.session.control.prepare(options), queued, self._prepare_failed
         )
 
     def _prepare_failed(self, exc: Exception) -> None:
         if isinstance(exc, NeedsConfirm):
-            if messagebox.askyesno(
-                "vpstream", f"{exc}.\n\nPrepare it all the same?", parent=self.window.root
-            ):
-                self.prepare(confirmed=True)
-                return
-            disable(self.prepare_button, False)
+            self.main.ask(
+                model.ask_long(str(exc)),
+                lambda: self.prepare(confirmed=True),
+                lambda: self.prepare_button.setEnabled(True),
+            )
             return
         self._failed(exc)
 
     def _failed(self, exc: Exception) -> None:
-        self.left.configure(text=str(exc))
-        disable(self.prepare_button, False)
-        self.window.failed(exc)
+        self.left.setText(str(exc))
+        self.prepare_button.setEnabled(True)
+        self.main.failed(exc)
 
     # --- the queue
 
-    def show(self, status: dict[str, Any]) -> None:
+    def show_status(self, status: dict[str, Any]) -> None:
         jobs = model.video_jobs(status.get("prepare") or [])
-        ids = [job.key for job in jobs]
-        for key in [k for k in self.job_rows if k not in ids]:
-            self.job_rows.pop(key)[0].destroy()
+        keys = [job.key for job in jobs]
+        for key in [k for k in self.job_rows if k not in keys]:
+            gone = self.job_rows.pop(key)
+            self.jobs.removeWidget(gone)
+            gone.deleteLater()
         for at, job in enumerate(jobs):
-            if job.key not in self.job_rows:
-                row = ttk.Frame(self.jobs)
-                label = ttk.Label(row, width=70)
-                label.pack(side="left")
-                bar = JobBar(row)
-                cancel = ttk.Button(
-                    row, text="Cancel", command=functools.partial(self.cancel, job.source)
-                )
-                self.job_rows[job.key] = (row, label, bar, cancel)
-            row, label, bar, cancel = self.job_rows[job.key]
-            if row.winfo_manager() and self.jobs.pack_slaves().index(row) != at:
-                row.pack_forget()
-            if not row.winfo_manager():
-                after = self.jobs.pack_slaves()
-                if at < len(after):
-                    row.pack(fill="x", pady=1, before=after[at])
-                else:
-                    row.pack(fill="x", pady=1)
-            if label.cget("text") != job.line:
-                label.configure(text=job.line)
-            starting = job.state == "running" and job.progress <= 0.0
-            bar.show("running" if starting else job.state, job.progress)
-            # Only a video with parts still to make can be cancelled.
-            can_cancel = job.state in ("queued", "running")
-            if can_cancel and not cancel.winfo_manager():
-                cancel.pack(side="left")
-            elif not can_cancel and cancel.winfo_manager():
-                cancel.pack_forget()
+            row = self.job_rows.get(job.key)
+            if row is None:
+                row = self.job_rows[job.key] = JobRow(functools.partial(self.cancel, job.source))
+                self.jobs.insertWidget(at, row)
+            elif self.jobs.indexOf(row) != at:
+                self.jobs.removeWidget(row)
+                self.jobs.insertWidget(at, row)
+            row.show_job(job)
+        self.empty.setVisible(not jobs)
         active = sum(1 for j in jobs if j.state in ("queued", "running"))
-        if jobs and self.empty.winfo_manager():
-            self.empty.pack_forget()
-        elif not jobs and not self.empty.winfo_manager():
-            self.empty.pack(anchor="w", padx=8, pady=2)
         ended = active < self.active
         self.active = active
         if ended:
-            self.window.say("Prepared." if not active else f"{active} videos still to prepare.")
+            self.main.say(model.prepared_said(active))
             self.plan()
         now = float(status.get("now") or 0)
         if ended or now - self.read_at >= LIBRARY_SECONDS:
@@ -287,43 +294,28 @@ class PrepareTab:
             self.refresh_library()
 
     def cancel(self, source: str) -> None:
-        self.window.worker.do(
-            lambda: self.window.session.control.cancel_prepare({"path": source}),
-            lambda found: self.window.say(f"Cancelled {found['cancelled']} parts."),
-            self.window.failed,
+        self.main.worker.do(
+            lambda: self.main.session.control.cancel_prepare({"path": source}),
+            lambda found: self.main.say(model.cancelled_said(found["cancelled"])),
+            self.main.failed,
         )
 
     # --- the prepared videos
 
     def refresh_library(self) -> None:
-        self.window.worker.do(self.window.session.control.prepared, self._library)
+        self.main.worker.do(self.main.session.control.prepared, self._library)
 
     def _library(self, rows: list[dict[str, Any]]) -> None:
         self.library_raw = rows
         self.library = model.library_rows(rows)
-        chosen = set(self.table.selection())
-        keys = [r.key for r in self.library]
-        gone = [i for i in self.table.get_children() if i not in keys]
-        if gone:
-            self.table.delete(*gone)
-        for at, row in enumerate(self.library):
-            if self.table.exists(row.key):
-                if tuple(self.table.item(row.key, "values")) != row.cells:
-                    self.table.item(row.key, values=row.cells)
-                if self.table.index(row.key) != at:
-                    self.table.move(row.key, "", at)
-            else:
-                self.table.insert("", at, iid=row.key, values=row.cells)
-        self.table.selection_set([k for k in keys if k in chosen])
-        self.window.start_panel.library_changed()
+        widgets.fill(self.table, self.rows, [(r.key, r.cells) for r in self.library])
+        self.main.start_panel.library_changed()
 
     def _selected(self) -> model.LibraryRow | None:
-        chosen = self.table.selection()
+        chosen = widgets.selected(self.table)
         row = next((r for r in self.library if chosen and r.key == chosen[0]), None)
         if row is None:
-            messagebox.showinfo(
-                "vpstream", "Select a video in the list first.", parent=self.window.root
-            )
+            self.main.tell(model.PICK_PREPARED)
         return row
 
     def stream_it(self) -> None:
@@ -331,206 +323,182 @@ class PrepareTab:
         if row is None:
             return
         if not row.ready:
-            messagebox.showinfo("vpstream", f"{row.name} is {row.state}.", parent=self.window.root)
+            self.main.tell(model.not_ready(row))
             return
-        self.window.stream_prepared(row.source)
+        self.main.stream_prepared(row.source)
 
     def remove(self) -> None:
         row = self._selected()
-        if row is None or not messagebox.askyesno(
-            "vpstream",
-            f"Remove what was prepared of {row.name} ({row.size})? The video itself stays.",
-            parent=self.window.root,
-        ):
-            return
+        if row is not None:
+            self.main.ask(model.ask_remove(row), functools.partial(self._remove, row))
 
+    def _remove(self, row: model.LibraryRow) -> None:
         def removed(found: dict[str, Any]) -> None:
             if found["kept"]:
-                self.window.say("It is streaming or being prepared, so it was kept.")
+                self.main.say(model.KEPT)
             self.refresh_library()
 
-        self.window.worker.do(
-            lambda: self.window.session.control.remove_prepared({"path": row.source}),
+        self.main.worker.do(
+            lambda: self.main.session.control.remove_prepared({"path": row.source}),
             removed,
-            self.window.failed,
+            self.main.failed,
         )
 
 
-class StartPanel:
+class StartPanel(QGroupBox):
     """On the Stream tab, in browser mode: whether the chosen video is prepared, and the
     audio and subtitles it starts with. `ready` says whether Start can go."""
 
-    def __init__(self, parent: tk.Misc, window: Window) -> None:
-        self.window = window
-        self.frame = ttk.LabelFrame(parent, text="For browsers and TVs")
+    def __init__(self, main: Window) -> None:
+        super().__init__("For browsers and TVs")
+        self.main = main
         self.ready = False
         self.tracks: tuple[list[model.Track], list[model.Track]] = ([], [])
-        self.state = ttk.Label(self.frame, justify="left", wraplength=640)
-        self.state.pack(fill="x", padx=8, pady=2)
-        row = ttk.Frame(self.frame)
-        row.pack(fill="x", padx=8, pady=2)
-        ttk.Label(row, text="Audio it starts with").pack(side="left")
-        self.audio = tk.StringVar()
-        self.audio_box = ttk.Combobox(row, textvariable=self.audio, state="readonly", width=34)
-        self.audio_box.pack(side="left", padx=8)
-        row = ttk.Frame(self.frame)
-        row.pack(fill="x", padx=8, pady=2)
-        ttk.Label(row, text="Subtitles it starts with").pack(side="left")
-        self.sub = tk.StringVar(value=OFF)
-        self.sub_box = ttk.Combobox(row, textvariable=self.sub, state="readonly", width=34)
-        self.sub_box.pack(side="left", padx=8)
-        self.to_prepare = ttk.Button(self.frame, text="Prepare it...", command=self._prepare_it)
-        self.to_prepare.pack(anchor="e", padx=8, pady=4)
+        box = QVBoxLayout(self)
+        self.state = note()
+        box.addWidget(self.state)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        self.audio = QComboBox()
+        self.sub = QComboBox()
+        for combo in (self.audio, self.sub):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(34)
+        form.addRow("Audio it starts with", self.audio)
+        form.addRow("Subtitles it starts with", self.sub)
+        box.addLayout(form)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.to_prepare = QPushButton("Prepare it...")
+        self.to_prepare.clicked.connect(self._prepare_it)
+        keep_room(self.to_prepare)
+        row.addWidget(self.to_prepare)
+        box.addLayout(row)
+        set_choices(self.sub, [(model.OFF, None)])
 
     def audio_number(self) -> int | None:
-        return _number(self.audio.get())
+        found = self.audio.currentData()
+        return int(found) if found is not None else None
 
     def sub_number(self) -> int | None:
-        return _number(self.sub.get())
+        found = self.sub.currentData()
+        return int(found) if found is not None else None
 
     def check(self) -> None:
         """Is the chosen video (or every video of the folder) prepared?"""
-        path = self.window.path.get()
+        path = self.main.path.text()
         self.ready = False
-        self.window.update_start()
+        self.main.update_start()
         if not path:
             return
-        self.state.configure(text="Looking at what is prepared...")
-        options = {self.window.kind: path, "sub": "none", "dry_run": True}
-        self.window.worker.do(
-            lambda: self.window.session.control.prepare(options),
+        self.state.setText(model.LOOKING_PREPARED)
+        options = {self.main.kind: path, "sub": "none", "dry_run": True}
+        self.main.worker.do(
+            lambda: self.main.session.control.prepare(options),
             lambda found: self._checked(path, found),
-            self.window.failed,
+            self.main.failed,
         )
 
     def _checked(self, path: str, found: dict[str, Any]) -> None:
-        if path != self.window.path.get():
+        if path != self.main.path.text():
             return
         plans = found["plans"]
         left = model.what_is_left(plans)
         self.ready = not left
         self.tracks = model.plan_tracks(plans)
-        audio = self.tracks[0]
-        self.audio_box.configure(values=[t.text for t in audio])
-        if self.audio.get() not in self.audio_box.cget("values"):
-            self.audio.set(audio[0].text if audio else "")
+        set_choices(self.audio, [(t.text, t.number) for t in self.tracks[0]])
         self.library_changed()
-        if self.ready:
-            self.state.configure(text="Prepared: it can start.")
-            self.to_prepare.pack_forget()
-        else:
-            more = "\n..." if len(left) > 5 else ""
-            self.state.configure(text="Not prepared yet:\n" + "\n".join(left[:5]) + more)
-            self.to_prepare.pack(anchor="e", padx=8, pady=4)
-        self.window.update_start()
+        self.state.setText(model.start_state(left))
+        self.to_prepare.setVisible(not self.ready)
+        self.main.update_start()
 
     def library_changed(self) -> None:
         """The subtitles a file starts with are those prepared for it (a folder: off)."""
-        if self.window.kind != "file":
-            self.sub_box.configure(values=[OFF])
-            self.sub.set(OFF)
+        if self.main.kind != "file":
+            set_choices(self.sub, [(model.OFF, None)], keep=False)
             return
-        made = model.prepared_subs(self.window.prepare_tab.library_raw, self.window.path.get())
-        labels = [t.text for t in self.tracks[1] if t.number in made]
-        self.sub_box.configure(values=[OFF, *labels])
-        if self.sub.get() not in self.sub_box.cget("values"):
-            self.sub.set(OFF)
+        made = model.prepared_subs(self.main.prepare_tab.library_raw, self.main.path.text())
+        subs = [(t.text, t.number) for t in self.tracks[1] if t.number in made]
+        set_choices(self.sub, [(model.OFF, None), *subs])
 
     def _prepare_it(self) -> None:
-        self.window.prepare_tab.load(self.window.path.get(), self.window.kind)
-        self.window.tabs.select(self.window.prepare_tab.frame)  # type: ignore[no-untyped-call]
+        self.main.prepare_tab.load(self.main.path.text(), self.main.kind)
+        self.main.tabs.setCurrentWidget(self.main.prepare_page)
 
 
-class PlayerPanel:
+class PlayerPanel(QGroupBox):
     """For the browsers selected in the device list (or all): their audio, subtitles and
     where they are, sent to their players."""
 
-    def __init__(self, parent: tk.Misc, window: Window) -> None:
-        self.window = window
-        self.frame = ttk.LabelFrame(parent, text="The players of the selected browsers")
-        self.where = ttk.Label(self.frame, text="Select a browser in the list.")
-        self.where.pack(anchor="w", padx=8)
-        row = ttk.Frame(self.frame)
-        row.pack(fill="x", padx=8, pady=4)
-        ttk.Label(row, text="Audio").pack(side="left")
-        self.audio = tk.StringVar()
-        self.audio_box = ttk.Combobox(row, textvariable=self.audio, state="readonly", width=24)
-        self.audio_box.pack(side="left", padx=4)
-        ttk.Label(row, text="Subtitles").pack(side="left", padx=(8, 0))
-        self.sub = tk.StringVar()
-        self.sub_box = ttk.Combobox(row, textvariable=self.sub, state="readonly", width=28)
-        self.sub_box.pack(side="left", padx=4)
-        ttk.Label(row, text="Go to").pack(side="left", padx=(8, 0))
-        self.seek = tk.StringVar()
-        ttk.Entry(row, textvariable=self.seek, width=8).pack(side="left", padx=4)
-        row = ttk.Frame(self.frame)
-        row.pack(fill="x", padx=8, pady=4)
-        ttk.Button(row, text="Send to all", command=lambda: self.send(everyone=True)).pack(
-            side="right"
-        )
-        ttk.Button(row, text="Send to selected", command=self.send).pack(side="right", padx=4)
-        self.menu: dict[str, list[Any]] = {"audio": [], "subs": []}
-        self.shown_for: tuple[str, ...] = ()
+    def __init__(self, main: Window) -> None:
+        super().__init__("The players of the selected browsers")
+        self.main = main
+        box = QVBoxLayout(self)
+        self.where = QLabel(model.SELECT_BROWSER)
+        box.addWidget(self.where)
+        row = QHBoxLayout()
+        self.audio = QComboBox()
+        self.sub = QComboBox()
+        self.audio.setMinimumContentsLength(20)
+        self.sub.setMinimumContentsLength(24)
+        self.seek = QLineEdit()
+        self.seek.setPlaceholderText("12:30")
+        self.seek.setMaximumWidth(90)
+        for label, widget in (("Audio", self.audio), ("Subtitles", self.sub), ("Go to", self.seek)):
+            row.addWidget(QLabel(label))
+            row.addWidget(widget)
+        row.addStretch(1)
+        box.addLayout(row)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        to_selected = QPushButton("Send to selected")
+        to_selected.clicked.connect(lambda: self.send(everyone=False))
+        to_all = QPushButton("Send to all")
+        to_all.clicked.connect(lambda: self.send(everyone=True))
+        row.addWidget(to_selected)
+        row.addWidget(to_all)
+        box.addLayout(row)
+        self.shown_for: tuple[str, str] = ("", "")
 
-    def show(self, status: dict[str, Any], selected: list[str]) -> None:
+    def show_status(self, status: dict[str, Any], selected: list[str]) -> None:
         running = status["stream"]
         devices = {d["id"]: d for d in running["devices"]}
         first = devices.get(selected[0]) if selected else None
-        self.where.configure(
-            text=model.where_it_is(first) if first else "Select a browser in the list."
-        )
+        where = model.where_it_is(first) if first else model.SELECT_BROWSER
+        if self.where.text() != where:
+            self.where.setText(where)
         menu = model.menu_for(status, first)
         key = (str(selected[:1]), str(menu))
         if key != self.shown_for:  # only when it changes: a choice being made stays
-            self.shown_for, self.menu = key, menu
-            self.audio_box.configure(values=["", *(m["label"] for m in menu["audio"])])
-            self.sub_box.configure(values=["", *(m["label"] for m in menu["subs"])])
-            self.audio.set("")
-            self.sub.set("")
-
-    def send(self, everyone: bool = False) -> None:
-        options: dict[str, Any] = {"all": True} if everyone else {}
-        if not everyone:
-            chosen = list(self.window.devices.selection())
-            if not chosen:
-                messagebox.showinfo(
-                    "vpstream", "Select a browser in the list first.", parent=self.window.root
-                )
-                return
-            options["devices"] = chosen
-        audio = _value(self.menu["audio"], self.audio.get())
-        sub = _value(self.menu["subs"], self.sub.get())
-        if audio is not None:
-            options["audio"] = audio
-        if sub is not None:
-            options["sub"] = sub
-        if self.seek.get().strip():
-            try:
-                options["seek"] = model.seconds_of(self.seek.get())
-            except ValueError as exc:
-                messagebox.showinfo("vpstream", str(exc), parent=self.window.root)
-                return
-        if len(options) == 1:
-            messagebox.showinfo(
-                "vpstream",
-                "Choose audio, subtitles or a time to go to first.",
-                parent=self.window.root,
+            self.shown_for = key
+            nothing: list[tuple[str, Any]] = [("", None)]
+            set_choices(
+                self.audio,
+                nothing + [(m["label"], str(m["value"])) for m in menu["audio"]],
+                keep=False,
             )
+            set_choices(
+                self.sub,
+                nothing + [(m["label"], str(m["value"])) for m in menu["subs"]],
+                keep=False,
+            )
+
+    def send(self, everyone: bool) -> None:
+        devices = None if everyone else widgets.selected(self.main.devices)
+        try:
+            options = model.send_options(
+                devices, self.audio.currentData(), self.sub.currentData(), self.seek.text()
+            )
+        except ValueError as exc:
+            self.main.tell(str(exc))
             return
 
         def sent(found: dict[str, Any]) -> None:
-            self.seek.set("")
-            self.window._show(found)
+            self.seek.clear()
+            self.main.show_status(found)
 
-        self.window.worker.do(
-            lambda: self.window.session.control.set_clients(options), sent, self.window.failed
+        self.main.worker.do(
+            lambda: self.main.session.control.set_clients(options), sent, self.main.failed
         )
-
-
-def _number(text: str) -> int | None:
-    head = text.split(":", 1)[0].strip()
-    return int(head) if head.isdigit() else None
-
-
-def _value(menu: list[dict[str, Any]], label: str) -> str | None:
-    return next((str(m["value"]) for m in menu if m["label"] == label), None) if label else None

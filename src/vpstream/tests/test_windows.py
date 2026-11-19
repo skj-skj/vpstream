@@ -178,25 +178,25 @@ def test_doctor_on_windows_asks_no_daemon(
     found = cli.main(["doctor"])
     said = capsys.readouterr().out
     assert "ok       caddy" in said and "daemon" not in said
-    assert found == (1 if "PROBLEM  tkinter" in said else 0)
+    assert found == (1 if "PROBLEM  PySide6" in said else 0)
 
 
 # --- doctor
 
 
-def test_doctor_checks_tkinter_and_the_programs(on_windows: None, tmp_path: Path) -> None:
+def test_doctor_checks_pyside6_and_the_programs(on_windows: None, tmp_path: Path) -> None:
     paths = config.Paths.under(tmp_path)
     checks = doctor.run_checks(
         FakeRunner(("ffmpeg", "caddy")), paths=paths, original_path="", find=lambda name: None
     )
     by_name = {c.name: c for c in checks}
-    assert by_name["tkinter"].status == "problem" and "tcl/tk" in by_name["tkinter"].fix
+    assert by_name["PySide6"].status == "problem" and "pip install" in by_name["PySide6"].fix
     assert by_name["ffprobe"].status == "problem"
     assert by_name["ffprobe"].fix == "vpstream windows-install ffmpeg"
     assert by_name["mkvmerge"].status == "warning"
     assert by_name["mkvmerge"].fix == "vpstream windows-install mkvtoolnix"
     assert by_name["config"].detail.endswith("the window writes it")
-    assert [c.name for c in checks][:2] == ["python", "tkinter"]
+    assert [c.name for c in checks][:2] == ["python", "PySide6"]
     assert by_name["log"].detail == str(tmp_path / "var" / "lib" / "vpstream.log")
 
 

@@ -1,4 +1,4 @@
-"""`vpstream doctor` on Windows: Python and tkinter, the programs, the configuration.
+"""`vpstream doctor` on Windows: Python and PySide6, the programs, the configuration.
 
 Nothing about systemd, ufw, Tailscale or a daemon: on Windows the window runs the stream.
 """
@@ -25,15 +25,14 @@ TOOLS = (
     Tool("mkvmerge", "a full seek index in MKV files, so VLC resumes them quickly", "", False),
     Tool("mkvextract", "WebVTT subtitles stored by mkvmerge", "", False),
 )
-TKINTER_FIX = (
-    'run the Python installer from python.org again, choose Modify, and tick "tcl/tk and IDLE"'
-)
+PYSIDE6_FIX = "install vpstream again: python -m pip install --upgrade vpstream"
 
 
-def check_tkinter(find: Callable[[str], Any] = importlib.util.find_spec) -> Check:
-    if find("tkinter") is not None:
-        return Check("tkinter", "ok", "the window can open")
-    return Check("tkinter", "problem", "missing; the vpstream window needs it", TKINTER_FIX)
+def check_pyside6(find: Callable[[str], Any] = importlib.util.find_spec) -> Check:
+    """PySide6-Essentials, the window's toolkit, comes with vpstream on Windows."""
+    if find("PySide6") is not None:
+        return Check("PySide6", "ok", "the window can open")
+    return Check("PySide6", "problem", "missing; the vpstream window needs it", PYSIDE6_FIX)
 
 
 def path_hint(found: str | None, original_path: str) -> str:
@@ -107,7 +106,7 @@ def run_checks(
     paths = paths or config.default_paths()
     if original_path is None:
         original_path = windows.ORIGINAL_PATH.get("PATH", os.environ.get("PATH", ""))
-    checks = [check_python(python_version or tuple(sys.version_info[:3])), check_tkinter(find)]
+    checks = [check_python(python_version or tuple(sys.version_info[:3])), check_pyside6(find)]
     checks += check_tools(runner, original_path, tools)
     checks.append(check_config(paths.config_file))
     checks.append(Check("log", "ok", str(log_file(paths))))

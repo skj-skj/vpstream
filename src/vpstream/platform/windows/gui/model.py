@@ -72,7 +72,7 @@ def start_options(path: str, kind: str, alias: str, mode: str, policy_label: str
     if not path:
         raise ValueError("Pick a video file or a folder of videos first.")
     options: dict[str, Any] = {
-        kind: ntpath.normpath(path),  # Tk writes C:/Films; the cache knows C:\\Films
+        kind: ntpath.normpath(path),  # the picker writes C:/Films; the cache knows C:\\Films
         "mode": mode,
         "policy": policy_of(policy_label),
     }
@@ -322,12 +322,6 @@ def left_text(left: Sequence[str]) -> str:
     return "All of it is prepared." if not left else "To prepare:\n" + "\n".join(left)
 
 
-def number_of(label: str) -> int | None:
-    """The track number a `Track.text` starts with; None for "Off" or nothing."""
-    head = label.split(":", 1)[0].strip()
-    return int(head) if head.isdigit() else None
-
-
 def browser_start(options: dict[str, Any], audio: int | None, sub: int | None) -> dict[str, Any]:
     """A browser stream's start: the audio and subtitles each browser begins with."""
     found = {**options, "mode": BROWSER}
@@ -379,25 +373,19 @@ def menu_for(status: dict[str, Any], device: dict[str, Any] | None) -> dict[str,
     return {"audio": menu["audio"], "subs": [{"value": "off", "label": "Off"}, *menu["subs"]]}
 
 
-def value_of(menu: Sequence[dict[str, Any]], label: str) -> str | None:
-    """What a player is sent for the choice named `label` of its menu; None for none."""
-    return next((str(m["value"]) for m in menu if m["label"] == label), None) if label else None
-
-
 def send_options(
-    devices: Sequence[str] | None, menu: dict[str, list[Any]], audio: str, sub: str, seek: str
+    devices: Sequence[str] | None, audio: str | None, sub: str | None, seek: str
 ) -> dict[str, Any]:
-    """What `Control.set_clients` is sent from the player panel; `devices` None for all.
-    Raises ValueError with what to do first."""
+    """What `Control.set_clients` is sent from the player panel: to `devices` (None for
+    all), the menu values chosen (None for no change), a time to go to. Raises ValueError
+    with what to do first."""
     if devices is not None and not devices:
         raise ValueError(PICK_BROWSER)
     options: dict[str, Any] = {"all": True} if devices is None else {"devices": list(devices)}
-    for key, found in (
-        ("audio", value_of(menu["audio"], audio)),
-        ("sub", value_of(menu["subs"], sub)),
-    ):
-        if found is not None:
-            options[key] = found
+    if audio is not None:
+        options["audio"] = audio
+    if sub is not None:
+        options["sub"] = sub
     if seek.strip():
         options["seek"] = seconds_of(seek)
     if len(options) == 1:
@@ -519,12 +507,12 @@ def _video_job(run: list[dict[str, Any]]) -> VideoJob:
     ]
     progress = sum(w * d for w, d in zip(weights, done, strict=True)) / sum(weights)
     name = str(run[0]["name"])
-    parts = f"{len(run)} part" + ("s" if len(run) != 1 else "")
+    count = parts(len(run))
     if "running" in states or "queued" in states:
         state = "running" if "running" in states else "queued"
         current = next((j for j in run if j.get("state") == "running"), None)
         if current is None:
-            line = f"{name}: waits for the one before ({parts})"
+            line = f"{name}: waits for the one before ({count})"
         else:
             number = run.index(current) + 1
             left = sum(
@@ -545,20 +533,24 @@ def _video_job(run: list[dict[str, Any]]) -> VideoJob:
     elif "cancelled" in states:
         state, line = "cancelled", f"{name}: cancelled"
     else:
-        state, line, progress = "done", f"{name}: prepared ({parts})", 1.0
+        state, line, progress = "done", f"{name}: prepared ({count})", 1.0
     return VideoJob(int(run[0]["id"]), str(run[0]["source"]), name, state, progress, line)
 
 
-def queued_said(parts: int) -> str:
-    return f"Queued: {parts} parts. Choose the next one any time."
+def parts(count: int) -> str:
+    return f"{count} part" + ("s" if count != 1 else "")
+
+
+def queued_said(count: int) -> str:
+    return f"Queued: {parts(count)}. Choose the next one any time."
 
 
 def prepared_said(active: int) -> str:
     return "Prepared." if not active else f"{active} videos still to prepare."
 
 
-def cancelled_said(parts: int) -> str:
-    return f"Cancelled {parts} parts."
+def cancelled_said(count: int) -> str:
+    return f"Cancelled {parts(count)}."
 
 
 # --- the questions and notes the window shows
@@ -622,3 +614,30 @@ def busy_span(seconds: float) -> tuple[float, float]:
     0..1: a piece that slides in from the left and out at the right, again and again."""
     at = (seconds % BUSY_SECONDS) / BUSY_SECONDS * (1 + BUSY_WIDTH) - BUSY_WIDTH
     return max(at, 0.0), min(at + BUSY_WIDTH, 1.0)
+
+
+# --- what the window says as it goes (the line at the bottom), and its pickers
+
+STARTING = "Starting..."
+READY = "Ready."
+ALL_INSTALLED = "Everything vpstream needs is installed."
+STARTING_STREAM = "Starting the stream..."
+STREAM_ON = "The stream is on."
+STOPPING = "Stopping..."
+STOPPED = "Stopped."
+COPIED = "The address is copied."
+CLOSING = "Closing..."
+LOOKING = "looking..."
+LOOKING_VIDEO = "Looking at the video..."
+LOOKING_PREPARED = "Looking at what is prepared..."
+NO_SUBS = "(none in this video)"
+OFF = "Off"
+VIDEO_FILTERS = ("Videos (*.mkv *.mp4 *.m4v *.mov *.avi *.webm *.ts)", "All files (*)")
+
+
+def stopped_said(why: str) -> str:
+    return f"The stream stopped: {why}."
+
+
+def bug_said(error: BaseException) -> str:
+    return f"Something went wrong: {error}\n\nThe log has more."

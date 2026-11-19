@@ -1,11 +1,10 @@
 """What the vpstream window says and sends (`platform.windows.gui.model`), the way it starts
-(`gui.main`), and the closing of the Worker's answers; the Tk widgets themselves are tried
-on Windows."""
+(`gui.main`). The Qt window itself is tried in test_windows_qt, where PySide6 is installed
+(Windows)."""
 
 from __future__ import annotations
 
 import itertools
-import queue
 from typing import Any
 
 import pytest
@@ -199,22 +198,6 @@ def test_the_window_started_as_administrator_says_who_asked(
     monkeypatch.setattr(commands, "open_window", lambda who=None: opened.append(who) or 0)
     assert cli.main(["--elevated-for", "ana"]) == 0
     assert opened == ["ana"]
-
-
-def test_an_answer_of_the_worker_runs_on_the_window_thread() -> None:
-    pytest.importorskip("tkinter", reason="this Python has no tkinter")
-    from vpstream.platform.windows.gui.app import Worker
-
-    answers: queue.Queue[Any] = queue.Queue()
-    lines: list[str] = []
-    worker = Worker(answers, lines.append)
-    got: list[Any] = []
-    worker.do(lambda: 41 + 1, got.append)
-    worker.do(lambda: 1 / 0, None, lambda exc: got.append(type(exc).__name__))
-    for _ in range(2):
-        answers.get(timeout=5)()
-    assert got == [42, "ZeroDivisionError"] and worker.busy == 0
-    assert "ZeroDivisionError" in lines[0]
 
 
 # --- browser mode
@@ -413,29 +396,17 @@ def test_the_busy_bar_slides_across_calmly() -> None:
 # --- the words
 
 
-def test_track_labels_and_menus_are_read_back() -> None:
-    assert model.number_of("5: Japanese (ASS)") == 5
-    assert model.number_of("Off") is None and model.number_of("") is None
-    menu = [{"value": "2", "label": "English"}, {"value": "off", "label": "Off"}]
-    assert model.value_of(menu, "Off") == "off"
-    assert model.value_of(menu, "") is None and model.value_of(menu, "Klingon") is None
-
-
 def test_what_the_player_panel_sends() -> None:
-    menu = {
-        "audio": [{"value": "1", "label": "English"}],
-        "subs": [{"value": "off", "label": "Off"}],
-    }
-    assert model.send_options(["a"], menu, "English", "", " 1:30 ") == {
+    assert model.send_options(["a"], "1", None, " 1:30 ") == {
         "devices": ["a"], "audio": "1", "seek": 90.0,
     }  # fmt: skip
-    assert model.send_options(None, menu, "", "Off", "") == {"all": True, "sub": "off"}
+    assert model.send_options(None, None, "off", "") == {"all": True, "sub": "off"}
     with pytest.raises(ValueError, match="Select a browser"):
-        model.send_options([], menu, "English", "", "")
+        model.send_options([], "1", None, "")
     with pytest.raises(ValueError, match="Choose audio"):
-        model.send_options(None, menu, "", "", "")
+        model.send_options(None, None, None, "")
     with pytest.raises(ValueError, match="not a time"):
-        model.send_options(None, menu, "", "", "soon")
+        model.send_options(None, None, None, "soon")
 
 
 def test_what_the_start_panel_and_the_prepare_tab_say() -> None:
@@ -463,3 +434,5 @@ def test_the_questions() -> None:
     assert model.not_ready(row) == "b.mkv is not ready (no base version)."
     assert model.ask_long("It takes 2h") == "It takes 2h.\n\nPrepare it all the same?"
     assert model.prepared_said(0) == "Prepared." and model.prepared_said(2).startswith("2 videos")
+    assert model.queued_said(1).startswith("Queued: 1 part.")
+    assert model.cancelled_said(3) == "Cancelled 3 parts."

@@ -160,7 +160,8 @@ def normal_priority(pid: int) -> None:
 
 def keep_awake(on: bool) -> None:
     """While a stream runs, Windows does not go to sleep (the screen may go off). Called
-    from the window's own thread: the request belongs to the thread that made it."""
+    from one thread that lives as long as the stream: the request belongs to the thread
+    that made it."""
     if sys.platform == "win32":
         flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0)
         ctypes.windll.kernel32.SetThreadExecutionState(ctypes.c_uint32(flags))

@@ -10,7 +10,11 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "src/vpstream/assets/hls.js.LICENSE"]
 requires-python = ">=3.12"
-dependencies = ["flask>=3.0"]
+dependencies = [
+    "flask>=3.0",
+    # The Windows window's toolkit (Qt Widgets only); nothing changes on Linux.
+    "PySide6-Essentials==6.12.0; sys_platform == 'win32'",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -51,6 +55,20 @@ python_version = "3.12"
 strict = true
 files = ["src/vpstream"]
 exclude = ["src/vpstream/tests/"]
+
+# PySide6 is installed on Windows only. Where it is (the PC), its stubs are checked in full;
+# elsewhere (Linux, CI) the window's Qt modules are checked without them.
+[[tool.mypy.overrides]]
+module = ["PySide6", "PySide6.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "vpstream.platform.windows.gui.app",
+    "vpstream.platform.windows.gui.browser",
+    "vpstream.platform.windows.gui.widgets",
+]
+disallow_subclassing_any = false
 
 [tool.semantic_release]
 commit_parser = "conventional"

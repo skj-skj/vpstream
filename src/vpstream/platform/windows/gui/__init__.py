@@ -1,5 +1,5 @@
-"""The vpstream window: `model` (plain data, tested anywhere), `app` (Tk), and `main`, what
-`vpstream` with no command runs on Windows.
+"""The vpstream window: `model` (plain data, tested anywhere), `app`, `browser` and
+`widgets` (Qt), and `main`, what `vpstream` with no command runs on Windows.
 
 Before the window opens: administrator rights (Windows asks; the firewall rule needs them),
 one window at a time, and every program the window starts tied to it, so a window that is
@@ -9,13 +9,22 @@ killed leaves no Caddy behind.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import traceback
 
-from vpstream.platform.windows.doctor import TKINTER_FIX
+from vpstream.platform.windows.doctor import PYSIDE6_FIX
 
 TITLE = "vpstream"
 MB_ICONERROR, MB_ICONINFORMATION = 0x10, 0x40
+# What would make Qt load other plugins or another platform into a window that runs as
+# administrator; the window is Qt's own, from vpstream's PySide6.
+QT_SETTINGS = (
+    "QT_PLUGIN_PATH",
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "QT_QPA_PLATFORM",
+    "QT_STYLE_OVERRIDE",
+)
 
 
 def message(text: str, error: bool = True) -> None:
@@ -42,10 +51,12 @@ def main(elevated_for: str | None = None) -> int:
     if not instance.first:
         message("vpstream is already open.", error=False)
         return 0
+    for name in QT_SETTINGS:
+        os.environ.pop(name, None)
     try:
-        import tkinter  # noqa: F401
+        import PySide6.QtWidgets  # noqa: F401
     except ImportError:
-        message(f"The vpstream window needs tkinter: {TKINTER_FIX}.")
+        message(f"The vpstream window needs PySide6: {PYSIDE6_FIX}.")
         return 1
     try:
         return _open(elevated_for or "")
