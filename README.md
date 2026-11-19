@@ -217,21 +217,23 @@ vpstream devices lock            # nobody new from now on
 | Command | What it does |
 | --- | --- |
 | `vpstream start --file F` / `--dir D` | Starts a stream (`--mode browser`, `--alias`, `--ttl`, `--policy`, `--audio`, `--sub`, `--http`) |
-| `vpstream stop`, `vpstream status` | Stops the stream; shows its addresses and state |
+| `vpstream stop`, `vpstream status [--json]` | Stops the stream; shows its addresses and state |
 | `vpstream ls [FOLDER]` | A folder's videos, their tracks and what is prepared |
-| `vpstream track-info FILE` | A file's tracks, with the numbers `--sub` and `--audio` take |
+| `vpstream track-info FILE` | A file's tracks, with the numbers prepare and start take for subtitles and audio |
 | `vpstream prepare --file F` / `--dir D` | Prepares for browser mode (`--sub 1,3` / `eng` / `none`, `--yes`, `--no-wait`) |
 | `vpstream prepared [rm PATH \| --stale \| --all \| cancel]` | Lists, removes or cancels prepared versions |
 | `vpstream devices [enable\|disable DEVICE \| lock \| unlock]` | Who asked for the stream, and who gets in |
-| `vpstream clients [set DEVICE... \| --all]` | Browser mode: what each TV plays; `--audio`, `--sub`, `--seek`, `--name` |
+| `vpstream clients [set DEVICE... \| --all]` | Browser mode: what each TV plays; `--audio`, `--sub`, `--seek`, `--start-at` (`--video` in a folder), `--name` |
 | `vpstream alias NAME` | Changes the name in the address |
 | `vpstream doctor` | Checks this machine, and says how to fix what is missing |
 | `vpstream up`, `vpstream down` | Termux: starts or stops the daemon |
 | `sudo vpstream init [--local \| --https \| --no-tailscale]` | Linux: sets the service up (see [More on Linux](#more-on-linux)) |
+| `sudo vpstream dash-pass [--dash-pass-file FILE]` | Linux: a new dashboard password (`--dash-pass` takes it on the command line, and leaves it in shell history) |
 | `sudo vpstream uninstall [--purge]` | Linux: removes it |
-| `vpstream install ffmpeg\|caddy`, `vpstream update ffmpeg\|caddy` | Linux: installs or updates them |
-| `vpstream windows-install`, `vpstream windows-uninstall` | Windows: the programs it needs, and the desktop icon |
-| `vpstream bench FILE`, `vpstream caps` | How fast this machine prepares; what a TV browser can play |
+| `vpstream install ffmpeg\|caddy [--yes] [--tmp DIR]`, `vpstream update ffmpeg\|caddy` | Linux: installs or updates them; they ask first unless `--yes`, and `--tmp DIR` puts the download on another disk |
+| `vpstream windows-install [PROGRAM...] [--yes]`, `vpstream windows-uninstall [--yes]` | Windows: the programs it needs, and the desktop icon |
+| `vpstream bench FILE` | How fast this machine copies, transcodes and burns in (`--sample`, `--presets`, `--sub`, `--json`, `--tmp`, `--no-nice`) |
+| `vpstream caps` | A page that tests what a TV browser can play (`--host`, `--port`, `--ttl`, `--out`, `--clips`, `--regen`) |
 | `vpstream selftest [--integration]` | Runs the tests shipped with the package |
 
 ## More on Linux
@@ -246,7 +248,8 @@ measures them) and the media folder. `vpstream doctor` names a wrong setting. Af
 ### Public dashboard
 
 `sudo vpstream init --no-tailscale` puts the dashboard on the internet at `https://<ip>:1338/`
-behind a password (asked for, or `--dash-pass-file FILE`), with a certificate authority made
+behind a password (asked for, or `--dash-pass-file FILE`; `--dash-pass` leaves it in shell
+history), with a certificate authority made
 for this host's addresses only.
 
 - Install the authority on your phone first: `vpstream dashboard-cert > vpstream-ca.crt`
