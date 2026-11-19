@@ -437,4 +437,7 @@ def test_the_questions() -> None:
     assert model.prepared_said(0) == "Prepared." and model.prepared_said(2).startswith("2 videos")
     assert model.prepared_said(1) == "1 video still to prepare."
     assert model.queued_said(1).startswith("Queued: 1 part.")
+    assert model.close_question(False, False) is None
+    assert "is running" in (model.close_question(True, True) or "")
+    assert "is starting" in (model.close_question(True, False) or "")
     assert model.cancelled_said(3) == "Cancelled 3 parts."

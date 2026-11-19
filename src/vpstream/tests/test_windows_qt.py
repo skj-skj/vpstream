@@ -210,15 +210,21 @@ def test_a_question_box_does_not_wait_and_its_button_answers(qt: Any, tmp_path: 
     window = window_for(FakeSession(), tmp_path)
     window.show()
     said: list[str] = []
-    window.ask("Remove it?", lambda: said.append("yes"), lambda: said.append("no"))
-    box = window.findChild(QtWidgets.QMessageBox)
-    assert box is not None and box.isVisible() and said == []  # open, and nothing waited
-    box.button(QtWidgets.QMessageBox.StandardButton.Yes).click()
-    assert wait(qt, lambda: said == ["yes"])
-    window.ask("Remove it?", lambda: said.append("yes"), lambda: said.append("no"))
-    assert wait(qt, lambda: window.findChild(QtWidgets.QMessageBox) is not None)
-    window.findChild(QtWidgets.QMessageBox).button(QtWidgets.QMessageBox.StandardButton.No).click()
-    assert wait(qt, lambda: said == ["yes", "no"])
+    Box = QtWidgets.QMessageBox
+
+    def shown() -> Any:
+        return next((b for b in window.findChildren(Box) if b.isVisible()), None)
+
+    window.ask("Remove a?", lambda: said.append("a yes"), lambda: said.append("a no"))
+    first = shown()
+    assert first is not None and said == []  # open, and nothing waited
+    first.button(Box.StandardButton.Yes).click()
+    assert wait(qt, lambda: said == ["a yes"] and shown() is None)
+    window.ask("Remove b?", lambda: said.append("b yes"), lambda: said.append("b no"))
+    second = shown()
+    assert second is not None and second is not first and second.text() == "Remove b?"
+    second.button(Box.StandardButton.No).click()
+    assert wait(qt, lambda: said == ["a yes", "b no"])
 
 
 def test_notes_do_not_take_a_drives_answers(qt: Any, tmp_path: Path) -> None:
@@ -236,11 +242,29 @@ def test_notes_do_not_take_a_drives_answers(qt: Any, tmp_path: Path) -> None:
 
 def test_one_start_at_a_time_and_the_close_waits_for_it(qt: Any, tmp_path: Path) -> None:
     session = FakeSession()
-    window = window_for(session, tmp_path, answer=lambda t, q: True)
+    asked: list[str] = []
+    window = window_for(session, tmp_path, answer=lambda t, q: asked.append(t) or True)
     window.show()
     window.stream_prepared("C:\\a.mkv")
     window.stream_prepared("C:\\a.mkv")  # a double click: one start
-    assert window.starting
+    assert window.starting and window.said.text() == "A stream is starting; try again in a moment."
     window.close()  # while it starts: asked, then closed once the start is done
+    assert asked == ["A stream is starting. Stop it and close vpstream?"]
     assert wait(qt, lambda: window.closed, 5)
     assert session.order == ["start C:\\a.mkv", "close"]
+
+
+def test_the_close_does_not_wait_for_a_job_that_hangs(
+    qt: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(app, "CLOSE_WAIT", 0.3)
+    session = FakeSession()
+    window = window_for(session, tmp_path)
+    window.show()
+    ran: list[str] = []
+    window.worker.do(lambda: time.sleep(3))  # a download, say
+    window.worker.do(lambda: ran.append("queued"))  # dropped: the window closes
+    started = time.monotonic()
+    window.close()
+    assert wait(qt, lambda: window.closed, 2) and time.monotonic() - started < 1.5
+    assert session.order == ["close"] and ran == []

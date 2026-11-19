@@ -51,6 +51,7 @@ from vpstream.platform.windows.session import Session
 from vpstream.tools import Runner
 
 POLL_SECONDS = 1.0
+CLOSE_WAIT = 15.0  # at most this long for the job under way (a start, say) before closing
 APP_ID = "vpstream"  # the taskbar's name for the window, not pythonw's
 SIZE = (1100, 760)  # at 125% on a 1920x1080 screen: 1375x950
 SMALLEST = (900, 640)
@@ -88,7 +89,8 @@ class Worker:
         self.jobs: queue.Queue[Callable[[], None] | None] = queue.Queue()
         self.post, self.log = post, log
         self.busy = 0
-        threading.Thread(target=self._run, name="window-worker", daemon=True).start()
+        self.thread = threading.Thread(target=self._run, name="window-worker", daemon=True)
+        self.thread.start()
 
     def _run(self) -> None:
         while (job := self.jobs.get()) is not None:
@@ -120,6 +122,12 @@ class Worker:
             then(value)
 
     def stop(self) -> None:
+        """No more jobs: the one under way ends, those waiting are dropped."""
+        while True:
+            try:
+                self.jobs.get_nowait()
+            except queue.Empty:
+                break
         self.jobs.put(None)
 
 
@@ -155,6 +163,7 @@ class Window(QMainWindow):
         self.was_streaming = False
         self.stopping_on_purpose = False
         self.closing = False
+        self.asking_close = False
         self.closed = False
         self.starting = False
         self.setup_missing = False
@@ -613,7 +622,8 @@ class Window(QMainWindow):
         """From the Prepare tab: stream a prepared file in browser mode. In place of a
         running stream it keeps its address and policy, so a TV only reloads the page."""
         if self.starting:
-            return  # one start at a time
+            self.say(model.ONE_AT_A_TIME)
+            return
         running = (self.status or {}).get("stream")
         if running:
             question = model.ask_switch(model.streaming_what(running), source)
@@ -624,6 +634,7 @@ class Window(QMainWindow):
     def _switch(self, source: str) -> None:
         """The stream as it is now (it may have stopped while the question was open)."""
         if self.starting:
+            self.say(model.ONE_AT_A_TIME)
             return
         running = (self.status or {}).get("stream")
         options = model.switch_options(running, source)
@@ -639,13 +650,13 @@ class Window(QMainWindow):
             return self.session.start(options)
 
         def started(found: dict[str, Any]) -> None:
-            self.starting = False
+            self.starting = self.stopping_on_purpose = False
             self.update_start()
             self.say(model.STREAM_ON)
             self.show_status(found)
 
         def failed(exc: Exception) -> None:
-            self.starting = False
+            self.starting = self.stopping_on_purpose = False
             self.update_start()
             self.failed(exc)
 
@@ -659,7 +670,11 @@ class Window(QMainWindow):
             self.say(model.STOPPED)
             self.show_status(found)
 
-        self.worker.do(self.session.stop, stopped, self.failed)
+        def failed(exc: Exception) -> None:
+            self.stopping_on_purpose = False  # it still streams
+            self.failed(exc)
+
+        self.worker.do(self.session.stop, stopped, failed)
 
     def _copy(self) -> None:
         QGuiApplication.clipboard().setText(self.url.text())
@@ -714,6 +729,8 @@ class Window(QMainWindow):
         self.prepare_tab.show_status(status)
         running = status.get("stream")
         if running is None:
+            if self.starting:
+                return  # a switch between its stop and its start: the page stays
             if self.was_streaming:
                 self.pages.setCurrentIndex(0)
                 why = self.session.stop_reason()
@@ -758,15 +775,18 @@ class Window(QMainWindow):
     # --- the end
 
     def _open_log(self) -> None:
-        """The log in the program Windows opens .log files with. The one program the window
-        starts itself, and on purpose with a window of its own; on the worker, since
-        ShellExecute can take a moment."""
+        """The log in the program Windows opens .log files with: the one program the window
+        starts itself, on purpose with a window of its own. On a thread of its own, since
+        ShellExecute can take a moment, and not behind the worker's jobs."""
         path = self.log_path
 
         def work() -> None:
-            os.startfile(path)  # type: ignore[attr-defined,unused-ignore]
+            try:
+                os.startfile(path)  # type: ignore[attr-defined,unused-ignore]
+            except OSError as exc:
+                self.bridge.post(functools.partial(self.tell, f"{path}: {exc}", True))
 
-        self.worker.do(work, None, lambda exc: self.tell(f"{path}: {exc}", error=True))
+        threading.Thread(target=work, name="open-log", daemon=True).start()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Closing asks first while a stream runs; the session then closes off this thread,
@@ -775,12 +795,19 @@ class Window(QMainWindow):
             event.accept()
             return
         event.ignore()
-        if self.closing:
+        if self.closing or self.asking_close:
             return
-        if self.starting or (self.status and self.status.get("stream")):
-            self.ask(model.ASK_CLOSE, self._close)
-        else:
+        streaming = bool(self.status and self.status.get("stream"))
+        question = model.close_question(self.starting, streaming)
+        if question is None:
             self._close()
+            return
+        self.asking_close = True
+
+        def no() -> None:
+            self.asking_close = False
+
+        self.ask(question, self._close, no)
 
     def _close(self) -> None:
         self.closing = True
@@ -789,16 +816,19 @@ class Window(QMainWindow):
         self.polling.set()
         self._awake(False)
 
+        self.worker.stop()
+
         def end() -> None:
+            # The job under way (a start, say) ends first, so nothing starts after the
+            # session closed; one that takes too long (a download) is not waited for.
+            self.worker.thread.join(CLOSE_WAIT)
             try:
                 self.session.close()
             except Exception as exc:
                 self.session.log(f"WARNING: closing: {exc!r}")
+            self.bridge.post(self._closed)
 
-        # The worker's last job: what it was doing (a start, say) ends first, so nothing
-        # starts again after the session closed.
-        self.worker.do(end, lambda _: self._closed())
-        self.worker.stop()
+        threading.Thread(target=end, name="close", daemon=True).start()
 
     def _closed(self) -> None:
         self.closed = True

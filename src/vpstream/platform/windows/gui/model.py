@@ -562,7 +562,18 @@ def cancelled_said(count: int) -> str:
 
 # --- the questions and notes the window shows
 
-ASK_CLOSE = "A stream is running. Stop it and close vpstream?"
+ONE_AT_A_TIME = "A stream is starting; try again in a moment."
+
+
+def close_question(starting: bool, streaming: bool) -> str | None:
+    """What closing asks first, None when it just closes."""
+    if streaming:
+        return "A stream is running. Stop it and close vpstream?"
+    if starting:
+        return "A stream is starting. Stop it and close vpstream?"
+    return None
+
+
 PICK_DEVICE = "Select a device in the list first."
 PICK_BROWSER = "Select a browser in the list first."
 PICK_PREPARED = "Select a video in the list first."

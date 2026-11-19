@@ -113,8 +113,24 @@ def fill(
     view: QTableView, found: QStandardItemModel, rows: Sequence[tuple[str, Sequence[str]]]
 ) -> None:
     """Show `rows` (key, cells): a row whose key is there already only has its changed
-    cells written, so nothing flickers and the selection stays on the same rows."""
+    cells written, so nothing flickers and the selection stays on the same rows. The
+    selection's signals are quiet meanwhile: whoever fills the table shows what follows."""
     chosen = selected(view)
+    model_ = view.selectionModel()
+    model_.blockSignals(True)
+    try:
+        _fill(view, found, rows, chosen)
+    finally:
+        model_.blockSignals(False)
+    view.viewport().update()
+
+
+def _fill(
+    view: QTableView,
+    found: QStandardItemModel,
+    rows: Sequence[tuple[str, Sequence[str]]],
+    chosen: list[str],
+) -> None:
     keys = [key for key, _ in rows]
     for at in reversed(range(found.rowCount())):
         if str(found.item(at, 0).data(KEY)) not in keys:
@@ -136,7 +152,6 @@ def fill(
                 item.setText(cell)
     if moved:  # a row taken out and put back is no longer selected: select it again
         model_ = view.selectionModel()
-        model_.blockSignals(True)
         model_.clearSelection()
         for at, key in enumerate(keys_of(found)):
             if key in chosen:
@@ -144,8 +159,6 @@ def fill(
                     found.index(at, 0),
                     model_.SelectionFlag.Select | model_.SelectionFlag.Rows,
                 )
-        model_.blockSignals(False)
-        view.viewport().update()
 
 
 def pick(parent: QWidget, title: str, folder: bool, then: Callable[[str], None]) -> None:
