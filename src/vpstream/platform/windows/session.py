@@ -359,9 +359,15 @@ class Session:
         try:
             self.control.shutdown()
         finally:
+            # An open that failed part way left threads that never started: a gate that
+            # never served cannot be shut down (shutdown() would wait for it for ever), and
+            # a thread never started cannot be joined.
+            started = [thread for thread in self._threads if thread.ident is not None]
             if self._gate is not None:
-                self._gate.shutdown()
-            for thread in self._threads:
+                if any(thread.name == "gate" for thread in started):
+                    self._gate.shutdown()
+                self._gate.server_close()
+            for thread in started:
                 thread.join(timeout=5)
             self._set_crashes(0)
 

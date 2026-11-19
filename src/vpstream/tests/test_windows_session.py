@@ -299,6 +299,26 @@ class Rule(FakeFirewall):
         self.events.append("no rule")
 
 
+def test_a_session_whose_open_failed_part_way_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = config.Paths.under(tmp_path / "vp")
+    server = session.WindowsCaddy(FakeRunner(("caddy",)), 1337, paths, 0, "s3cret")
+    opened = a_session(tmp_path, server=server)
+
+    def unreadable(path: Path) -> Any:
+        raise OSError("the state file cannot be read")
+
+    monkeypatch.setattr(state, "load", unreadable)
+    with pytest.raises(OSError):
+        opened.open()  # after the gate was made, before it served
+    closing = threading.Thread(target=opened.close, daemon=True)
+    closing.start()
+    closing.join(5)
+    assert not closing.is_alive()  # before, shutdown() waited for a gate that never served
+    assert opened._gate.socket.fileno() == -1  # and its port is let go
+
+
 def test_the_rule_is_there_before_caddy_listens_and_gone_when_it_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
