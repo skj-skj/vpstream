@@ -152,8 +152,20 @@ def problems(text: str, parser: argparse.ArgumentParser) -> list[str]:
     return readme.found + readme.missing()
 
 
+def every_command() -> argparse.ArgumentParser:
+    """The command line, with the commands only Windows has added: the README documents
+    both."""
+    from vpstream.platform.windows import commands as windows
+
+    parser = cli.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    if "windows-install" not in sub.choices:  # on Windows they are there already
+        windows.add_parsers(sub)
+    return parser
+
+
 def test_the_readme_matches_the_command_line() -> None:
-    assert problems(README.read_text(encoding="utf-8"), cli.build_parser()) == []
+    assert problems(README.read_text(encoding="utf-8"), every_command()) == []
 
 
 # --- the check itself, on a small parser of its own
