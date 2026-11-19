@@ -319,6 +319,16 @@ def test_a_session_whose_open_failed_part_way_closes(
     assert opened._gate.socket.fileno() == -1  # and its port is let go
 
 
+def test_an_open_that_ends_after_the_close_starts_nothing(tmp_path: Path) -> None:
+    paths = config.Paths.under(tmp_path / "vp")
+    server = session.WindowsCaddy(FakeRunner(("caddy",)), 1337, paths, 0, "s3cret")
+    late = a_session(tmp_path, server=server)
+    late.close()  # the window closed while the open was still under way
+    late.open()
+    assert all(thread.ident is None for thread in late._threads)
+    late._gate.server_close()
+
+
 def test_the_rule_is_there_before_caddy_listens_and_gone_when_it_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

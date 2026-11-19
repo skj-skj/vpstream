@@ -338,6 +338,8 @@ class Session:
         self.control.reconcile()
         if self.control.stream is None:
             self._calm_at = None
+        if self._stop.is_set():  # closed meanwhile (the window gave up waiting)
+            return
         self._threads.append(threading.Thread(target=self._tick, name="tick"))
         for thread in self._threads:
             thread.daemon = True
