@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.17.1 (2026-11-19)
+
+### Bug Fixes
+
+- A shorter README, with Linux, Termux and Windows sections
+  ([#32](https://github.com/skj-skj/vpstream/pull/32),
+  [`8528ad0`](https://github.com/skj-skj/vpstream/commit/8528ad0729b4e356ee5e8657fd0251f0e5cb8de0))
+
+
 ## v0.17.0 (2026-11-19)
 
 ### Features
