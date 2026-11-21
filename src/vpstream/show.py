@@ -162,13 +162,64 @@ def format_clients(stream: dict[str, Any], now: float) -> str:
     return "\n".join(text.table(rows))
 
 
+def format_together(stream: dict[str, Any]) -> str:
+    """The group of a stream watched together: where it is, with which tracks, who changed
+    it last, and how far each page is from it."""
+    group = stream.get("together")
+    if not group:
+        return "This stream is not watched together."
+    videos = stream.get("videos") or []
+    number = int(group.get("video") or 1)
+    video = videos[number - 1] if 0 < number <= len(videos) else {}
+    menu = video.get("menu") or {}
+    at = _clock(float(group.get("position") or 0))
+    if group.get("duration"):
+        at += f" / {_clock(float(group['duration']))}"
+    state = "paused" if group.get("paused") else "playing"
+    if group.get("pending"):
+        state += " (changing: " + ", ".join(group["pending"]) + ")"
+    audio, sub = group.get("audio"), group.get("sub")
+    lines = [
+        f"Video:        {number}. {video.get('name', '')}",
+        f"At:           {at}, {state}",
+        "Audio:        "
+        + ("as the video starts" if audio is None else _track(menu.get("audio", []), audio)),
+        "Subtitles:    "
+        + ("as the video starts" if sub is None else _track(menu.get("subs", []), sub)),
+    ]
+    ago = group.get("changed_ago")
+    if ago is not None:
+        who = group.get("changed_by") or ""
+        names = {d.get("id"): _device_name(d) for d in stream.get("devices") or []}
+        by = "the owner" if who == "owner" else names.get(who, who)
+        when = f"{text.duration(float(ago))} ago"
+        lines.append(f"Changed:      {f'by {by}' if by else 'at the end'}, {when}")
+    pages = group.get("pages") or []
+    if pages:
+        rows = [["DEVICE", "OFF BY", "COOLDOWN", "NAME"]]
+        names = {d.get("id"): _device_name(d) for d in stream.get("devices") or []}
+        for page in pages:
+            drift = page.get("drift")
+            cool = float(page.get("cooldown") or 0)
+            rows.append(
+                [
+                    str(page.get("device")),
+                    "-" if drift is None else f"{float(drift):+.1f} s",
+                    f"{cool:.0f} s" if cool else "-",
+                    str(names.get(page.get("device"), ""))[:40],
+                ]
+            )
+        lines += ["", *text.table(rows)]
+    return "\n".join(lines)
+
+
 def format_stream(stream: dict[str, Any]) -> str:
     """The running stream: what it is and the address of every video."""
     left = stream.get("seconds_left")
     limit = "no time limit" if left is None else f"stops in {text.duration(float(left))}"
+    mode = str(stream.get("mode")) + (", watched together" if stream.get("together") else "")
     lines = [
-        f"Stream:       /{stream.get('alias')} ({stream.get('mode')}, policy "
-        f"{stream.get('policy')}, {limit})",
+        f"Stream:       /{stream.get('alias')} ({mode}, policy {stream.get('policy')}, {limit})",
         f"Source:       {stream.get('source')}",
     ]
     videos = stream.get("videos") or []

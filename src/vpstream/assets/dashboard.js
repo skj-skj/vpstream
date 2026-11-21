@@ -240,7 +240,7 @@
     $("live").hidden = !stream;
     if (!stream) { return; }
     $("aliasname").textContent = "/" + stream.alias;
-    $("modepill").textContent = stream.mode === "browser" ? "Browser mode" : "Direct mode";
+    $("modepill").textContent = stream.together ? "Watching together" : stream.mode === "browser" ? "Browser mode" : "Direct mode";
     $("url").textContent = stream.url;
     $("left").textContent = stream.seconds_left === null ? "No limit" : duration(stream.seconds_left);
     var total = stream.expires === null ? 0 : stream.expires - stream.started;
@@ -363,13 +363,31 @@
     return chips;
   }
 
+  // Watching together: how far this viewer's newest page is from the group, and whether it
+  // has just joined.
+  function groupChips(stream, d) {
+    var g = stream.together;
+    if (!g) { return []; }
+    var mine = g.pages.filter(function (p) { return p.device === d.id; });
+    var p = mine[mine.length - 1];
+    if (!p) { return [pill("not in the group", "")]; }
+    var chips = [];
+    if (p.drift !== null && p.drift !== undefined) {
+      var off = Math.abs(p.drift);
+      chips.push(pill((p.drift >= 0 ? "+" : "−") + off.toFixed(1) + " s off the group",
+        off > 2 ? "bad" : off > 0.5 ? "warn" : "ok"));
+    }
+    if (p.cooldown > 0) { chips.push(pill("just joined: " + Math.ceil(p.cooldown) + " s", "warn")); }
+    return chips;
+  }
+
   function renderViewer(stream, now, d) {
     var c = d.client;
     var menu = menuOf(stream, c && c.video);
     var state = viewerState(c, now);
     var video = c && c.video ? stream.videos[c.video - 1] : null;
     var on = !!ticked[d.id];
-    var chips = pending(c, menu);
+    var chips = pending(c, menu).concat(groupChips(stream, d));
     return h("div", { className: "item client" + (on ? " ticked" : ""), onclick: function () {
       if (on) { delete ticked[d.id]; } else { ticked[d.id] = true; }
       renderViewers(last);
@@ -432,6 +450,7 @@
   }
 
   function renderViewers(info) {
+    renderTogether(info);
     var stream = info && info.stream;
     var list = viewers(stream);
     var ids = list.map(function (d) { return d.id; });
@@ -460,6 +479,63 @@
     }
     showChoice("caudio", sharedChoice(list, "audio"));
     showChoice("csub", sharedChoice(list, "sub"));
+  }
+
+  // --- watching together: the group's state, and changes for everyone
+
+  var groupMenuKey = "";
+
+  function changedText(stream, g) {
+    if (g.changed_ago === null || g.changed_ago === undefined) { return ""; }
+    var who = g.changed_by === "owner" ? "you" : "";
+    if (g.changed_by && !who) {
+      var d = stream.devices.filter(function (x) { return x.id === g.changed_by; })[0];
+      who = d ? deviceName(d) : g.changed_by;
+    }
+    var ago = g.changed_ago < 1 ? "just now" : duration(g.changed_ago) + " ago";
+    return who ? "Changed by " + who + ", " + ago : "Stopped at the end, " + ago;
+  }
+
+  function renderTogether(info) {
+    var stream = info && info.stream;
+    var g = stream && stream.together;
+    $("togethercard").hidden = !g;
+    $("clientonly").hidden = !!g;
+    if (!g) { return; }
+    var video = stream.videos[g.video - 1];
+    var menu = menuOf(stream, g.video);
+    var state = g.pending.length ? ["Changing...", "accent"] : g.paused ? ["Paused", "warn"] : ["Playing", "ok"];
+    fill($("tstate"), [
+      h("div", { className: "row" }, [
+        h("span", { className: "title ellipsis grow" }, video ? video.number + ". " + video.name : ""),
+        pill(state[0], state[1])
+      ]),
+      g.duration ? bar(g.position / g.duration) : null,
+      h("div", { className: "meta" }, [
+        h("span", {}, clock(g.position) + (g.duration ? " / " + clock(g.duration) : "")),
+        h("span", {}, "Audio: " + (g.audio === null ? "as the video starts" : trackLabel(menu.audio, g.audio))),
+        h("span", {}, "Subtitles: " + (g.sub === null ? "as the video starts" : trackLabel(menu.subs, g.sub)))
+      ]),
+      changedText(stream, g) ? h("div", { className: "muted small" }, changedText(stream, g)) : null
+    ]);
+    $("tplay").textContent = g.paused ? "Play" : "Pause";
+    var key = JSON.stringify(menu);
+    if (key !== groupMenuKey) {
+      groupMenuKey = key;
+      fillSelect("taudio", menu.audio);
+      fillSelect("tsub", menu.subs);
+    }
+    showChoice("taudio", g.audio === null ? "" : g.audio === 0 ? "off" : String(g.audio));
+    showChoice("tsub", g.sub === null ? "" : String(g.sub));
+  }
+
+  // A change for the whole group. One made while the group's window is open waits for it.
+  function forEveryone(action, value, done) {
+    var payload = { action: action };
+    if (value !== undefined) { payload.value = value; }
+    change("together", payload, function (info) {
+      toast(info.outcome === "queued" ? done + " in a moment" : done);
+    });
   }
 
   function askViewers(payload, done) {
@@ -635,6 +711,7 @@
       }
     });
     if (!$("plainfield").hidden && $("plain").checked) { options.http = true; }
+    if (options.mode === "browser" && $("together").checked) { options.together = true; }
     change("stream/start", options, null, "The stream is running");
   });
   $("stop").addEventListener("click", function () {
@@ -679,6 +756,25 @@
       var payload = {};
       payload[pick[1]] = at;
       askViewers(payload, pick[2]);
+    });
+  });
+  $("tplay").addEventListener("click", function () {
+    var g = last && last.stream && last.stream.together;
+    if (g) { forEveryone(g.paused ? "play" : "pause", undefined, g.paused ? "Playing for everyone" : "Paused for everyone"); }
+  });
+  $("tback").addEventListener("click", function () { forEveryone("skip", -10, "Back 10 s for everyone"); });
+  $("tforward").addEventListener("click", function () { forEveryone("skip", 10, "On 10 s for everyone"); });
+  $("tseek").addEventListener("click", function () {
+    var at = $("tat").value.trim();
+    if (!at) { $("tat").focus(); return; }
+    forEveryone("seek", at, "Seek for everyone");
+  });
+  [["taudio", "audio", "Audio"], ["tsub", "sub", "Subtitles"]].forEach(function (pick) {
+    $(pick[0]).addEventListener("change", function () {
+      var value = $(pick[0]).value;
+      if (!value) { return; }
+      forEveryone(pick[1], value, pick[2] + " for everyone");
+      $(pick[0]).blur();
     });
   });
   $("rename").addEventListener("click", function () {

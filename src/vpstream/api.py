@@ -153,6 +153,7 @@ def create_app(
             "stream/unlock": lambda body: control.unlock(),
             "devices": lambda body: control.set_device(body.get("device"), body.get("allowed")),
             "clients": control.set_clients,
+            "together": control.together,
             "prepare": control.prepare,
             "prepare/cancel": control.cancel_prepare,
             "prepared/rm": control.remove_prepared,

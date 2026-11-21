@@ -581,6 +581,59 @@ const { check, finish } = runner();
     ok(text(page.$("toasts")).includes("not a time"), text(page.$("toasts")));
   });
 
+  await check("start: Watch together is sent in browser mode only", async () => {
+    const page = load({ status: status(), "stream/start": status({ stream: stream() }) });
+    await settle();
+    page.$("path").value = "/m/film.mkv";
+    page.$("together").checked = true;
+    page.$("start").dispatch("submit");
+    await settle();
+    ok(!("together" in page.posts()[0].body), "not in direct mode");
+    const browser = load({ status: status(), "stream/start": status({ stream: stream() }) });
+    await settle();
+    browser.$("mode").querySelector('[data-value="browser"]').click();
+    browser.$("path").value = "/m/film.mkv";
+    browser.$("together").checked = true;
+    browser.$("start").dispatch("submit");
+    await settle();
+    eq(browser.posts()[0].body.together, true);
+  });
+
+  await check("viewers: watching together, the group's state, its changes for everyone, and each one's drift", async () => {
+    const devices = [viewer("b-000001", "TV"), viewer("b-000002", "Phone"), viewer("b-000003", "Late")];
+    const s = watched(devices);
+    s.together = { rev: 4, video: 1, position: 754, paused: false, audio: 2, sub: null, duration: 5400,
+      window: 0, changed_by: "b-000002", changed_ago: 3, now: NOW, pending: [],
+      pages: [{ page: "a", device: "b-000001", drift: 0.3, cooldown: 0 }, { page: "b", device: "b-000002", drift: -2.5, cooldown: 0 },
+        { page: "c", device: "b-000003", drift: null, cooldown: 6.2 }] };
+    let sent = null;
+    const page = load({ status: status({ stream: s }), together: (body) => { sent = body; return status({ stream: s, outcome: "applied" }); } });
+    await settle();
+    eq(page.$("togethercard").hidden, false);
+    eq(text(page.$("modepill")), "Watching together");
+    const shown = text(page.$("tstate"));
+    ok(shown.includes("1. E01 <b>bold</b>.mkv") && shown.includes("Playing") && shown.includes("12:34 / 1:30:00"), shown);
+    ok(shown.includes("Audio: Japanese") && shown.includes("Subtitles: as the video starts"), shown);
+    ok(shown.includes("Changed by Phone, 3s ago"), shown);
+    eq(text(page.$("tplay")), "Pause");
+    const items = page.$("clients").querySelectorAll(".item");
+    ok(text(items[0]).includes("+0.3 s off the group"), text(items[0]));
+    ok(text(items[1]).includes("\u22122.5 s off the group"), text(items[1]));
+    ok(text(items[2]).includes("just joined: 7 s"), text(items[2]));
+    items[0].click();
+    eq(page.$("clientonly").hidden, true, "no per-viewer audio, subtitles or seeks");
+    page.$("tplay").click(); await settle();
+    eq(sent, { action: "pause" });
+    page.$("tback").click(); await settle();
+    eq(sent, { action: "skip", value: -10 });
+    page.$("tat").value = "1:00:00";
+    page.$("tseek").click(); await settle();
+    eq(sent, { action: "seek", value: "1:00:00" });
+    page.$("tsub").value = "1-soft";
+    page.$("tsub").dispatch("change"); await settle();
+    eq(sent, { action: "sub", value: "1-soft" });
+  });
+
   await check("viewers: in direct mode and with no stream, the tab says why it is empty", async () => {
     const direct = load({ status: status({ stream: stream({ mode: "direct" }) }) });
     await settle();

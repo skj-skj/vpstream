@@ -47,6 +47,7 @@ SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone
 RETRY_SECONDS = 10.0
 MAX_RETRY_SECONDS = 300.0  # a public dashboard that keeps failing is tried less and less often
 TICK_SECONDS = 1.0  # how often the stream's time limit, Caddy and the access log are looked at
+TOGETHER_SECONDS = 0.25  # how often a group watching together closes a window that is due
 LOOPBACK = "127.0.0.1"
 URL_SECONDS = 30.0  # how long the tailnet address is remembered between status requests
 # A status request asks Tailscale two things. Both waits together stay well under the time
@@ -444,6 +445,13 @@ class Daemon:
             except Exception as exc:  # one bad look must not end the looking
                 self.log(f"WARNING: checking the stream failed: {exc!r}")
 
+    def _tick_together(self, stop: threading.Event) -> None:
+        while not stop.wait(TOGETHER_SECONDS):
+            try:
+                self.control.tick_together()
+            except Exception as exc:  # one bad look must not end the looking
+                self.log(f"WARNING: checking the group watching together failed: {exc!r}")
+
     def serve(self, stop: threading.Event) -> None:
         """Serve until `stop` is set. On the way out a running stream is stopped and the
         socket files are removed."""
@@ -483,6 +491,7 @@ class Daemon:
                 keep_up = self._public_dashboard
             threads.append(threading.Thread(target=keep_up, args=(dash, stop), name="dash"))
         threads.append(threading.Thread(target=self._tick, args=(stop,), name="tick"))
+        threads.append(threading.Thread(target=self._tick_together, args=(stop,), name="together"))
         for thread in threads:
             thread.daemon = True
             thread.start()

@@ -90,7 +90,7 @@ def test_config_is_json_plain_http_and_never_opens_an_admin_port() -> None:
 
 def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
     cfg = caddy.config(1337, Path("/run/vpstream/gate.sock"), Path("/x/access.log"), Path("/v"))
-    refuse, ask = cfg["apps"]["http"]["servers"]["vpstream"]["routes"]
+    refuse, sync, ask = cfg["apps"]["http"]["servers"]["vpstream"]["routes"]
     assert refuse["match"] == [{"not": [{"method": ["GET", "HEAD"]}]}] and refuse["terminal"]
     assert refuse["handle"][0]["status_code"] == 405
     assert "match" not in ask  # no path is served without asking
@@ -101,11 +101,17 @@ def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
         "X-Vpstream-Ip": ["{http.request.remote.host}"],
         "X-Vpstream-Scheme": ["{http.request.scheme}"],
     }
+    # A wait of a player watching together goes to the gate too, the same way, but only
+    # ever for a page: never a file.
+    assert sync["match"] == [{"path": ["/*/*/sync"]}] and sync["terminal"]
+    (wait,) = sync["handle"]
+    assert wait["upstreams"] == proxy["upstreams"]
+    assert wait["headers"] == proxy["headers"] and "handle_response" not in wait
 
 
 def test_a_file_is_sent_only_when_the_gate_names_one() -> None:
     cfg = caddy.config(1337, Path("/g.sock"), Path("/x/access.log"), Path("/v"))
-    proxy = cfg["apps"]["http"]["servers"]["vpstream"]["routes"][1]["handle"][0]
+    proxy = cfg["apps"]["http"]["servers"]["vpstream"]["routes"][-1]["handle"][0]
     (on_file,) = proxy["handle_response"]
     assert on_file["match"] == {"headers": {"X-Vpstream-File": ["*"]}}
     handlers = on_file["routes"][0]["handle"]

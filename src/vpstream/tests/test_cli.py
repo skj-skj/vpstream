@@ -225,3 +225,42 @@ def test_clients_command_sends_the_change(monkeypatch: pytest.MonkeyPatch) -> No
         ("clients", {"name": "TV", "all": True}),
         ("status", None),
     ]
+
+
+def test_together_command_sends_the_action(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sent: list[object] = []
+    group = {"video": 1, "position": 750.0, "paused": True, "audio": None, "sub": None}
+    answer = {"stream": {"videos": [{"name": "Film"}], "together": group}, "outcome": "queued"}
+    monkeypatch.setattr(
+        cli, "_daemon", lambda route, payload=None: sent.append((route, payload)) or answer
+    )
+    assert cli.main(["together"]) == 0
+    assert cli.main(["together", "seek", "12:30"]) == 0
+    assert cli.main(["together", "skip", "-10"]) == 0
+    assert cli.main(["together", "pause"]) == 0
+    assert sent == [
+        ("together", {"action": "status"}),
+        ("together", {"action": "seek", "value": "12:30"}),
+        ("together", {"action": "skip", "value": "-10"}),
+        ("together", {"action": "pause"}),
+    ]
+    out = capsys.readouterr().out
+    assert "12:30, paused" in out and "being settled" in out
+
+
+def test_together_command_refusals(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["together", "seek"]) == 2
+    assert "vpstream together seek 12:30" in capsys.readouterr().err
+    assert cli.main(["together", "play", "3"]) == 2
+    assert "takes no value" in capsys.readouterr().err
+
+
+def test_start_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli, "_request", lambda route, kind, options, yes=False: sent.append(options)
+    )
+    cli.main(["start", "--file", "/m/f.mkv", "--mode", "browser", "--together"])
+    assert sent[0]["together"] is True and sent[0]["mode"] == "browser"

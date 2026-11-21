@@ -23,6 +23,7 @@ from vpstream import (
     reindex,
     state,
     text,
+    together,
     tracks,
 )
 from vpstream.caddy import CaddyError, StreamServer, link_video, link_videos, unlink_videos
@@ -34,8 +35,10 @@ from vpstream.media import shown
 from vpstream.platform.common import Firewall, FirewallError, switch
 from vpstream.stream import (
     BROWSER,
+    DENIED,
     DIRECT,
     MISSING,
+    SAVE_LATER,
     SAVE_NOW,
     Answer,
     NeedsConfirm,
@@ -54,6 +57,13 @@ BOOT_ID = "/proc/sys/kernel/random/boot_id"
 # position on the next tick, and what the owner changes at once.
 SAVE_SECONDS = 10.0
 NOW_SECONDS = 1.0  # what must be written at once is, at most this often
+# Watching together, a page's wait for the group to change (see stream._sync) is held this
+# long at most, and so many at once: one per page (a newer one ends the older), a few per
+# browser and a few in all. Each takes a thread of the gate while it waits; one past the
+# bound is answered at once, and its page asks again a little later.
+HOLD_SECONDS = 20.0
+MAX_HOLDS = 24
+HOLDS_PER_DEVICE = 3
 
 
 class ControlError(RuntimeError):
@@ -98,6 +108,15 @@ class Control:
     _host: str = ""
     _save_by: float | None = None  # when what viewers changed must be written down
     _saved_at: float = 0.0
+    # Watching together: the pages that wait for the group to change, page -> (browser,
+    # a number of its own), and the condition they wait on, of `_lock`.
+    _holds: dict[str, tuple[str, int]] = field(default_factory=dict)
+    _held: int = 0
+    _group_rev: int = 0
+    _changed: threading.Condition = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._changed = threading.Condition(self._lock)
 
     # --- the pieces
 
@@ -106,7 +125,9 @@ class Control:
         return self.paths.state_dir / state.FILE_NAME
 
     def _save(self) -> None:
-        recorded = None if self.stream is None else {**self.stream.to_dict(), "boot": self.boot}
+        recorded = None
+        if self.stream is not None:
+            recorded = {**self.stream.to_dict(self.clock()), "boot": self.boot}
         state.save(self._state_file, state.State(stream=recorded))
         self._save_by, self._saved_at = None, self.clock()
 
@@ -514,6 +535,11 @@ class Control:
         def change(stream: Stream) -> None:
             if stream.mode != BROWSER and set(values) - {"name"}:
                 raise StreamError("players are told what to do in browser mode only")
+            if stream.together is not None and set(values) - {"name"}:
+                raise StreamError(
+                    "watching together, every player does what the group does: change it "
+                    "for everyone with vpstream together (or on the dashboard)"
+                )
             video = options.get("video")
             if video is not None and not (is_whole(video) and 0 < video <= len(stream.videos)):
                 raise StreamError(f"not a video of this stream: {video!r}")
@@ -540,11 +566,108 @@ class Control:
             answer = stream.visit(path, ip, user_agent, wants_html, self.clock(), cookie, query)
             if answer.saves:
                 self._save_due(answer.saves)
+            self._group_moved()
+            if answer.kind == "hold":
+                return self._hold(stream, answer, ip, cookie)
         if answer.kind == "notready" and self.preparer is not None:
             job = self.preparer.job_for(Path(stream.entries[answer.number - 1]))
             if job is not None:
                 return Answer(503, "preparing", number=answer.number, data=job)
         return answer
+
+    # --- watching together
+
+    def _group_moved(self) -> None:
+        """Wake the pages that wait, when the group changed. Called with `_lock` held."""
+        stream = self.stream
+        rev = stream.together.rev if stream is not None and stream.together is not None else 0
+        if rev != self._group_rev:
+            self._group_rev = rev
+            self._changed.notify_all()
+
+    def _hold(self, stream: Stream, answer: Answer, ip: str, cookie: str | None) -> Answer:
+        """Hold a page's wait until the group changes, HOLD_SECONDS at most, then answer
+        with the group's state, and how long it was held (`waited`), so the page can tell
+        the trip there and back from the wait. Called with `_lock` held; the wait lets go
+        of it. Approval is looked at again before the answer."""
+        page, rev, device = answer.data["page"], answer.data["rev"], answer.data["device"]
+        mine = sum(1 for d, _ in self._holds.values() if d == device)
+        full = len(self._holds) >= MAX_HOLDS or mine >= HOLDS_PER_DEVICE
+        began = time.monotonic()
+        if page in self._holds or not full:
+            self._held += 1
+            ticket = (device, self._held)
+            self._holds[page] = ticket  # an older wait of the same page ends
+            self._changed.notify_all()
+            try:
+                while (
+                    self.stream is stream
+                    and stream.together is not None
+                    and stream.together.rev == rev
+                    and self._holds.get(page) == ticket
+                ):
+                    left = HOLD_SECONDS - (time.monotonic() - began)
+                    if left <= 0:
+                        break
+                    self._changed.wait(min(left, 1.0))
+            finally:
+                if self._holds.get(page) == ticket:
+                    del self._holds[page]
+        if self.stream is not stream or stream.together is None:
+            return MISSING
+        if not stream.devices.passes(stream.policy, ip, cookie):
+            return DENIED
+        waited = round(time.monotonic() - began, 3)
+        data = {**stream.group_state(page, self.clock()), "waited": waited}
+        return Answer(200, "client", number=answer.number, data=data)
+
+    def tick_together(self) -> None:
+        """Called about every 250 ms (daemon.TOGETHER_SECONDS): close a window that is due,
+        pause a group at the end of its video, and wake the pages that wait."""
+        with self._lock:
+            stream = self.stream
+            if stream is None or stream.together is None:
+                return
+            # A group that plays moves on: it is written down every SAVE_SECONDS, so after a
+            # crash it comes back about where it was.
+            if stream.together.tick(self.clock()) or not stream.together.paused:
+                self._save_due(SAVE_LATER)
+            self._group_moved()
+
+    def together(self, options: dict[str, Any]) -> dict[str, Any]:
+        """The owner's press for the whole group: `action` play, pause, seek, skip (a step
+        in seconds), audio, sub or video, with its `value`; or status. It goes the way a
+        viewer's press does, with its window, but never waits for a cooldown."""
+        action = options.get("action")
+        known = (together.SEEK, together.SKIP, together.AUDIO, together.SUB, together.VIDEO)
+        if action not in ("status", "play", "pause", *known):
+            raise StreamError(
+                f"not a together action: {action!r}. Use status, play, pause, seek, skip, "
+                "audio, sub or video"
+            )
+        with self._lock:
+            stream = self._running()
+            room = stream.together
+            if room is None:
+                raise StreamError("this stream is not watched together; start one with --together")
+            outcome = None
+            if action != "status":
+                value = options.get("value")
+                kind = together.PLAY if action in ("play", "pause") else str(action)
+                if kind == together.PLAY:
+                    value = action == "play"
+                elif value is None:
+                    raise StreamError(f"{action} needs a value")
+                try:
+                    value = together.read_value(kind, value, len(stream.videos))
+                    if kind == together.VIDEO and not stream.ready(value):
+                        raise StreamError(f"video {value} is not prepared for browsers yet")
+                    outcome = room.propose(kind, value, "", together.OWNER, "", self.clock())
+                except together.TogetherError as exc:
+                    raise StreamError(str(exc)) from exc
+                self._save_due(SAVE_LATER)
+                self._group_moved()
+            return {**self.status(), "outcome": outcome}
 
     def status(self) -> dict[str, Any]:
         with self._lock:
