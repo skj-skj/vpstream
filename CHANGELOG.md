@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.18.0 (2026-11-22)
+
+### Features
+
+- Watch together mode in browser mode (Termux) ([#33](https://github.com/skj-skj/vpstream/pull/33),
+  [`1319e8b`](https://github.com/skj-skj/vpstream/commit/1319e8befc6e0bcbae838e458349cffb6938f88f))
+
+
 ## v0.17.1 (2026-11-19)
 
 ### Bug Fixes
