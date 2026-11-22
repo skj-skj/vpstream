@@ -123,6 +123,43 @@ as_group "$BIN/vpstream status --json" | grep -q '"stream": null'
 getfacl -c "$MEDIA/film.mkv" | grep -qx "user:vpstream:r--"
 as_group "$BIN/vpstream revoke"
 no grep -q vpstream <(getfacl -c "$MEDIA/film.mkv" "$MEDIA")
+
+step "watch together: two pages, a press of one, and the other's held wait answered on it"
+# The tests' own sample (the wheel carries them), prepared for browsers by the service.
+"$BIN/python" -c 'import sys; from pathlib import Path; from vpstream.tests.media import make_sample
+make_sample(Path(sys.argv[1]))' "$MEDIA"
+chmod 600 "$MEDIA/sample.mkv"
+as_group "$BIN/vpstream start --file $MEDIA/sample.mkv --alias tg --mode browser --together --yes"
+json() { "$BIN/python" -c "import json, sys; d = json.load(sys.stdin); print($1)"; }
+PLAYER='X-Vpstream-Player: 1'
+page() { curl -sS -m 10 -b "/tmp/$1.jar" -c "/tmp/$1.jar" -H 'Accept: text/html' -o "/tmp/$1.html" -w '%{http_code}' http://127.0.0.1:1337/tg; }
+report() { curl -sS -m 10 -b "/tmp/$1.jar" -H "$PLAYER" "http://127.0.0.1:1337/tg/1/client?pg=$2&t=0&d=12&p=1&in=1${3:-}"; }
+for who in tv phone; do
+  [ "$(page $who)" = 403 ]   # it waits for the owner
+  id=$(as_group "$BIN/vpstream status --json" | json 'next(x["id"] for x in d["stream"]["devices"] if x["allowed"] is None)')
+  as_group "$BIN/vpstream devices enable $id"
+  [ "$(page $who)" = 200 ]
+  grep -q '"sync": "/tg/1/sync"' "/tmp/$who.html"
+done
+[ "$(report tv tv000001 | json 'd["cooldown"]')" = 10.0 ]   # just joined: its buttons wait
+report phone ph000001 > /dev/null
+sleep 10
+rev=$(report tv tv000001 | json 'd["together"]["rev"]')
+curl -sS -m 30 -b /tmp/tv.jar -H "$PLAYER" -w '\n%{time_total}\n' \
+  "http://127.0.0.1:1337/tg/1/sync?pg=tv000001&rev=$rev" > /tmp/held.txt &
+held=$!
+sleep 2   # the wait is held by now
+[ "$(report phone ph000001 '&act=play&id=ph000001-1' | json 'd["outcome"]')" = applied ]
+wait "$held"
+cat /tmp/held.txt
+head -1 /tmp/held.txt | json 'd["together"]["paused"]' | grep -qx False
+[ "$(head -1 /tmp/held.txt | json 'd["together"]["rev"]')" = $((rev + 1)) ]
+# Answered on the change, a moment after the press: not when its hold ran out.
+"$BIN/python" -c "import sys; assert float(sys.argv[1]) < 6" "$(tail -1 /tmp/held.txt)"
+as_group "$BIN/vpstream together pause"   # inside the press's window: settled when it ends
+sleep 3
+as_group "$BIN/vpstream status --json" | json '"%s %s" % (d["stream"]["together"]["paused"], len(d["stream"]["together"]["pages"]))' | grep -qx 'True 2'
+as_group "$BIN/vpstream stop"
 sudo rm -r "$MEDIA"
 
 step "the helper opens and closes only the configured port"

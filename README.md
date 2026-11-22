@@ -24,7 +24,7 @@ TV's web browser (browser mode). The stream's port is open only while a stream r
 - [Commands](#commands)
 - [More on Linux](#more-on-linux): [configuration](#configuration),
   [public dashboard](#public-dashboard), [local network mode](#local-network-mode),
-  [HTTPS for streams](#https-for-streams)
+  [HTTPS for streams](#https-for-streams), [watch together](#watch-together-over-the-internet)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -293,6 +293,18 @@ certificate for the address (Caddy 2.10+: `vpstream install caddy`). Port 80 is 
 while a certificate is asked for; let 80/tcp in your provider's firewall too. A certificate is
 kept while it lasts (Let's Encrypt allows 5 a week per address). `vpstream start --http` starts
 one stream over plain HTTP. `sudo vpstream init --no-https` turns it off.
+
+### Watch together over the internet
+
+[Watch together](#watch-together) works the same for viewers anywhere, over HTTPS too.
+
+- A device keeps within a few tenths of a second of the group over trips of up to 300 ms.
+  One that joins seeks to the group's place, so its buttons work about 10 seconds after
+  the video loads.
+- The Viewers tab shows how far each device is off, as the device itself measures it, and
+  the seconds left of its cooldown.
+- Up to 24 pages (3 per device) wait for the group's changes at once. More still follow it,
+  a few seconds late.
 
 ## Troubleshooting
 
