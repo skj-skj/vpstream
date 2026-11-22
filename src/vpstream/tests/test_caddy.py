@@ -107,6 +107,9 @@ def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
     (wait,) = sync["handle"]
     assert wait["upstreams"] == proxy["upstreams"]
     assert wait["headers"] == proxy["headers"] and "handle_response" not in wait
+    # Bounded on its own, apart from the videos' bound: the gate's socket takes both at once.
+    assert wait["transport"]["max_conns_per_host"] == caddy.SYNC_CONNECTIONS
+    assert wait["transport"]["keep_alive"]["max_idle_conns_per_host"] == caddy.SYNC_CONNECTIONS
 
 
 def test_a_file_is_sent_only_when_the_gate_names_one() -> None:

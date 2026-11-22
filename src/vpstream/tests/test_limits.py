@@ -27,7 +27,7 @@ def test_termux_has_bounds_by_default(on_termux: None) -> None:
 
 def test_linux_bounds_only_the_gate_and_has_no_limits_section() -> None:
     cfg = config.parse("")
-    # The gate's socket takes 16 waiting dials; Caddy keeps to that, the others wait.
+    # Caddy asks the gate at most 16 at once, the others wait (see daemon.gate_backlog).
     assert (cfg.gate_connections, cfg.caddy_cpus, cfg.caddy_memory_mb, cfg.prepare_threads) == (
         16,
         0,
@@ -49,10 +49,11 @@ def test_caddy_asks_the_gate_at_most_so_often(tmp_path: Path) -> None:
         "max_conns_per_host": 8,
         "keep_alive": {"max_idle_conns_per_host": 8},
     }
-    # The waits of players watching together are held long: they never count against it.
+    # The waits of players watching together are held long: they never count against it,
+    # and have a bound of their own, the same everywhere.
     sync = server.config()["apps"]["http"]["servers"]["vpstream"]["routes"][1]
     assert sync["match"] == [{"path": ["/*/*/sync"]}]
-    assert "transport" not in sync["handle"][0]
+    assert sync["handle"][0]["transport"]["max_conns_per_host"] == caddy.SYNC_CONNECTIONS
 
 
 def test_caddy_gets_go_bounds_only_when_set(tmp_path: Path) -> None:

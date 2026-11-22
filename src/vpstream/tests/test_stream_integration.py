@@ -37,6 +37,7 @@ class Live:
         self.cfg = config.Config(stream_port=free_port(), dashboard_port=free_port(), **settings)
         self.log: list[str] = []
         self.tls = tls
+        self.cafile: Path | None = None  # with `tls`: what it trusts, as a file
         runner = SystemRunner()
         self.server = daemon.stream_server(self.cfg, self.paths, runner)
         certificates = daemon.stream_certificates(
@@ -52,14 +53,18 @@ class Live:
         return client.call(self.paths.socket, "GET" if payload is None else "POST", route, payload)
 
     def get(
-        self, target: str, method: str = "GET", headers: dict[str, str] | None = None
+        self,
+        target: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        timeout: float = 10,
     ) -> tuple[int, dict[str, str], bytes]:
         conn: http.client.HTTPConnection
         if self.tls is None:
-            conn = http.client.HTTPConnection("127.0.0.1", self.cfg.stream_port, timeout=10)
+            conn = http.client.HTTPConnection("127.0.0.1", self.cfg.stream_port, timeout=timeout)
         else:
             conn = http.client.HTTPSConnection(
-                "127.0.0.1", self.cfg.stream_port, timeout=10, context=self.tls
+                "127.0.0.1", self.cfg.stream_port, timeout=timeout, context=self.tls
             )
         try:
             conn.request(method, target, headers=headers or {})

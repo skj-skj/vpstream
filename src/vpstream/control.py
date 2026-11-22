@@ -60,7 +60,8 @@ NOW_SECONDS = 1.0  # what must be written at once is, at most this often
 # Watching together, a page's wait for the group to change (see stream._sync) is held this
 # long at most, and so many at once: one per page (a newer one ends the older), a few per
 # browser and a few in all. Each takes a thread of the gate while it waits; one past the
-# bound is answered at once, and its page asks again a little later.
+# bound is answered at once, and its page asks again a little later. Caddy lets more than
+# MAX_HOLDS through at once (caddy.SYNC_CONNECTIONS), so that answer is never held up.
 HOLD_SECONDS = 20.0
 MAX_HOLDS = 24
 HOLDS_PER_DEVICE = 3

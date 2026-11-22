@@ -88,6 +88,11 @@ def unlink_videos(folder: Path) -> None:
 
 
 _NO_ADMIN = {"disabled": True, "config": {"persist": False}}
+# At most this many waits of players watching together go to the gate at once (see the sync
+# route in `config`): more than the daemon holds (control.MAX_HOLDS), so a wait it answers
+# at once never waits behind the held ones. The gate's socket takes these and
+# `gate_connections` together (see daemon.gate_backlog).
+SYNC_CONNECTIONS = 32
 
 
 def _proxy_to(socket_path: Path, connections: int = 0) -> dict[str, Any]:
@@ -150,10 +155,12 @@ def config(
     # A player that watches together waits on /ALIAS/N/sync for the group to change (see
     # player.SYNC). Such a wait is held for many seconds, so it has a way to the gate of
     # its own, outside `gate_connections`: held waits never keep a video's pieces waiting.
-    # The daemon bounds how many it holds (see control.HOLD_SECONDS).
+    # The daemon bounds how many it holds (see control.HOLD_SECONDS); this way is bounded
+    # too, so that when every held wait is answered at once and every page waits again,
+    # Caddy never dials the gate past its socket's backlog (a viewer would get a 502).
     sync = {
         "match": [{"path": ["/*/*/sync"]}],
-        "handle": [_proxy_to(gate_socket)],
+        "handle": [_proxy_to(gate_socket, SYNC_CONNECTIONS)],
         "terminal": True,
     }
     refuse_method = {

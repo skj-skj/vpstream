@@ -68,6 +68,7 @@ def kept(short_tmp: Path, tmp_path: Path) -> Iterator[Live]:
     _need("caddy")
     cert, key = _self_signed(tmp_path / "cert")
     run = Live(short_tmp, _trusting(cert), stream_https=True, stream_host=HOST, acme_ca=NOWHERE)
+    run.cafile = cert
     store = run.paths.certificate_dir / "data" / "caddy"
     store_certificate(store, NOWHERE, HOST, pem=cert.read_text(), key=key.read_text())
     run.thread.start()

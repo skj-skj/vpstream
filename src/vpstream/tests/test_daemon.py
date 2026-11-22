@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import __version__, api, cli, client, config, daemon, show, state
+from vpstream import __version__, api, caddy, cli, client, config, control, daemon, show, state
 from vpstream.platform.linux import firewall
 from vpstream.tests.fakes import (
     NAME,
@@ -130,6 +130,50 @@ def test_a_leftover_socket_file_is_replaced(short_tmp: Path, tailnet: FakeRunner
         assert client.call(paths.socket, "GET", "status")["pid"]
     finally:
         run.close()
+
+
+def _waiting_dials(path: Path, most: int) -> int:
+    """How many connections the socket at `path` takes while none is accepted."""
+    dials = []
+    try:
+        for _ in range(most):
+            dial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            dial.setblocking(False)  # as Caddy dials: refused at once when the backlog is full
+            dials.append(dial)
+            try:
+                dial.connect(str(path))
+            except BlockingIOError:
+                return len(dials) - 1
+        return most
+    finally:
+        for dial in dials:
+            dial.close()
+
+
+@pytest.mark.parametrize("bound", [16, 8, 0])
+def test_the_gates_socket_takes_every_dial_caddy_may_make_at_once(
+    short_tmp: Path, tailnet: FakeRunner, bound: int
+) -> None:
+    """Caddy dials the gate for videos (gate_connections) and, watching together, for the
+    players' waits (caddy.SYNC_CONNECTIONS), each bounded on its own. When every held wait
+    is answered at once and every page waits again, the dials come together: past the
+    socket's backlog one was refused and its viewer got a 502."""
+    cfg = config.Config(dashboard_port=free_port(), gate_connections=bound)
+    paths = config.Paths.under(short_tmp)
+    paths.run_dir.mkdir(parents=True)
+    run = daemon.Daemon(cfg, paths, tailnet, None, FakeServer(), log=lambda m: None)
+    listener, _ = run._unix_server(paths.gate_socket, lambda env, start: [])
+    try:
+        need = (bound or daemon.BACKLOG) + caddy.SYNC_CONNECTIONS
+        assert _waiting_dials(paths.gate_socket, need + 8) >= need
+        assert control.MAX_HOLDS < caddy.SYNC_CONNECTIONS
+    finally:
+        listener.close()
+    other, _ = run._unix_server(paths.socket, lambda env, start: [])
+    try:
+        assert _waiting_dials(paths.socket, 64) <= daemon.BACKLOG + 1, "the CLI's is not"
+    finally:
+        other.close()
 
 
 def test_a_file_that_is_not_a_socket_is_not_removed(short_tmp: Path) -> None:
