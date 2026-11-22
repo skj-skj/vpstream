@@ -54,7 +54,9 @@
   var RATE_DONE = 0.2;
   var RATE_ONLY_SEEK = 1;  // where the rate cannot be changed, a seek from this far off
   var PAUSED_OFF = 0.25;  // paused, a seek from this far off
-  var JOINED_OFF = 0.5;  // a page this close to the group is at its place
+  var JOINED_OFF = 0.5;  // a page this close to the group is at its place; until then, a seek
+  var MAX_SEEK_COST = 5;  // seconds: a seek to keep up aims at most this far ahead
+  var JOIN_SEEKS = 2;  // seeks to get to the group's place; then by its rate, as any page
   var SEEK_GAP_MS = 1000;  // a seek to keep up is given this long to happen
   var WAIT_RETRY_MS = 2000;
   var WAIT_TIMEOUT_MS = 30000;
@@ -69,6 +71,10 @@
   var starting = false;  // a play() that has not answered yet
   var rated = false, rateWorks = true;
   var lastSeek = 0;
+  // Over the internet a seek takes a while (the video is fetched from the new place), and
+  // the group plays on meanwhile: a seek to keep up aims ahead by what the last one took.
+  var seekCost = 0, seekBegan = 0;
+  var joinSeeks = 0;
 
   function $(id) { return document.getElementById(id); }
 
@@ -369,6 +375,11 @@
   function groupQuery() {
     var q = ["p=" + (video.paused ? 1 : 0), "pg=" + page, "rev=" + (group ? group.rev : 0)];
     if (settled) { q.push("t=" + Math.max(0, video.currentTime).toFixed(1)); }
+    // How far it is off the group, as it measures it: the daemon cannot tell how long the
+    // report took to get there (see together.Room.report).
+    if (settled && group && group.video === S.number) {
+      q.push("o=" + (video.currentTime - groupAt()).toFixed(2));
+    }
     if (isFinite(video.duration) && video.duration > 0) { q.push("d=" + video.duration.toFixed(1)); }
     if (S.audio.length) { q.push("a=" + audioValue()); }
     q.push("s=" + encodeURIComponent(subValue()));
@@ -456,9 +467,17 @@
     rated = rate !== 1 && rateWorks;
   }
 
-  function catchUp(at) {
+  function catchUp(at, ahead) {
     lastSeek = Date.now();
-    seekTo(at);
+    seekBegan = ahead ? lastSeek : 0;
+    seekTo(at + (ahead ? seekCost : 0));
+  }
+
+  // How long a seek to keep up took, until the video was there again.
+  function seekDone() {
+    if (!seekBegan) { return; }
+    seekCost = Math.min(MAX_SEEK_COST, (Date.now() - seekBegan) / 1000);
+    seekBegan = 0;
   }
 
   // Keep this page with the group: play or pause as it does, and stay at its place.
@@ -476,16 +495,22 @@
     } else {
       if (video.paused) {
         if (!held && !starting) { startHere(); }
-      } else if ((far > SEEK_OFF || (!rateWorks && far > RATE_ONLY_SEEK)) && free) {
+      } else if ((far > (joined || joinSeeks >= JOIN_SEEKS ? SEEK_OFF : JOINED_OFF) ||
+                  (!rateWorks && far > RATE_ONLY_SEEK)) && free) {
+        // A page that has just come is put at the group's place by a seek, not by its
+        // rate: its buttons wait for it to get there. Seeks that take very uneven times
+        // never land near it: after a few, its rate does the rest.
+        if (!joined) { joinSeeks += 1; }
         setRate(1);
-        catchUp(target);
+        catchUp(target, true);
       } else if (rated && far < RATE_DONE) {
         setRate(1);
       } else if (rateWorks && far > RATE_OFF) {
         setRate(off > 0 ? 0.95 : 1.05);
       }
     }
-    if (!joined && Math.abs(video.currentTime - target) < JOINED_OFF &&
+    // Not while a seek runs: the video's time is already the seek's, but it is not there.
+    if (!joined && !video.seeking && Math.abs(video.currentTime - target) < JOINED_OFF &&
         (group.paused || !video.paused)) {
       joined = true;
       reportSoon();
@@ -695,6 +720,7 @@
     video.addEventListener(name, update);
   });
   video.addEventListener("pause", showControls);
+  video.addEventListener("seeked", seekDone);
   // A pause the browser made by itself while the group plays (the tab put away, the
   // headphones out): this page waits for a tap, and the group goes on.
   video.addEventListener("pause", function () {

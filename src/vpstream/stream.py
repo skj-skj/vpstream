@@ -568,6 +568,7 @@ class Stream:
             position=clients.read_float(query.get("t")),
             duration=clients.read_float(query.get("d")),
             ready=query.get("in") == "1",
+            offset=together.read_offset(query.get("o")),
         )
         outcome = self._act(page, device.id, query, now) if query.get("act") else None
         data = {**self.group_state(page, now), "outcome": outcome}
