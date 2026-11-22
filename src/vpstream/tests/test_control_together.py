@@ -250,7 +250,7 @@ def test_waits_are_bounded_per_page_per_device_and_in_all(
         return thread
 
     first = hold("t1")
-    hold("t2")
+    second = hold("t2")
     began = time.monotonic()
     third = rig.wait("tv", "t3", rev=1)  # past the bound: answered at once
     assert time.monotonic() - began < 0.5 and third.data["waited"] < 0.1
@@ -260,6 +260,7 @@ def test_waits_are_bounded_per_page_per_device_and_in_all(
     del got["t1"]
     rig.control.together({"action": "play"})
     again.join(2)
+    second.join(2)  # woken too: each thread answers once it has the lock
     assert got["t1"].data["together"]["rev"] == 2 and got["t2"].data["together"]["rev"] == 2
     assert not rig.control._holds
 
