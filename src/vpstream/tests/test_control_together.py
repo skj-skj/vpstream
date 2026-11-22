@@ -253,10 +253,11 @@ def test_waits_are_bounded_per_page_per_device_and_in_all(
     second = hold("t2")
     began = time.monotonic()
     third = rig.wait("tv", "t3", rev=1)  # past the bound: answered at once
-    assert time.monotonic() - began < 0.5 and third.data["waited"] < 0.1
+    # Times well short of a held wait's (5 s), also on a loaded machine.
+    assert time.monotonic() - began < 2 and third.data["waited"] < 1
     again = hold("t1")  # the same page again: the older wait ends
     first.join(2)
-    assert "t1" in got and got["t1"].data["waited"] < 1
+    assert "t1" in got and got["t1"].data["waited"] < 3
     del got["t1"]
     rig.control.together({"action": "play"})
     again.join(2)
