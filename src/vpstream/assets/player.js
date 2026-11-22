@@ -384,7 +384,8 @@
   function answered(answer, sent, act, said) {
     if (act && acts[0] === act) {
       acts.shift();
-      if (answer.outcome === "queued") { showHint(act.act); }
+      if (answer.outcome === "queued") { showHint(HINTS[act.act]); }
+      if (answer.outcome === "refused") { showHint(REFUSED); }
     }
     if (said && typeof answer.cooldown === "number") {
       heard = true;
@@ -401,8 +402,10 @@
     video: "Changing the video for everyone..."
   };
 
-  function showHint(act) {
-    hint = HINTS[act] || "";
+  var REFUSED = "That cannot be done for everyone right now.";
+
+  function showHint(text) {
+    hint = text || "";
     hintUntil = Date.now() + ((group && group.window) || 2) * 1000 + 1000;
     note();
   }
@@ -417,11 +420,12 @@
   }
 
   // Take the group's state from an answer that left at `sent`. An answer older than the
-  // one taken last (by the daemon's clock) is dropped; a new rev is followed.
+  // one taken last is dropped: one of an older rev, or of the same rev by the daemon's
+  // clock (a rev only goes up, the clock may be set back); a new rev is followed.
   function adopt(answer, sent) {
     var s = answer && answer.together;
     if (!s || typeof s.rev !== "number") { return; }
-    if (group && s.now < group.now) { return; }
+    if (group && (s.rev < group.rev || (s.rev === group.rev && s.now < group.now))) { return; }
     var trip = Math.max(0, (Date.now() - sent) / 1000 - (answer.waited || 0));
     var fresh = !group || s.rev !== group.rev;
     group = {
@@ -583,7 +587,7 @@
       var again = answer && ((answer.waited || 0) >= 1 || (group && group.rev !== before));
       window.setTimeout(wait, again ? 0 : WAIT_RETRY_MS);
     };
-    x.onerror = x.ontimeout = function () { window.setTimeout(wait, WAIT_RETRY_MS); };
+    x.onerror = x.ontimeout = x.onabort = function () { window.setTimeout(wait, WAIT_RETRY_MS); };
     x.send();
   }
 

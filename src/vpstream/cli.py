@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, platform, stream
+from vpstream import __version__, gate, platform, stream, text, together
 from vpstream.net import url_host
 from vpstream.show import (
     ACTIVE,
@@ -539,14 +539,15 @@ def cmd_clients(args: argparse.Namespace) -> int:
     return _show(_daemon("clients", payload), clients=True)
 
 
-TOGETHER_ACTIONS = ("status", "play", "pause", "seek", "skip", "audio", "sub", "video")
+TOGETHER_ACTIONS = ("status", *together.ACTIONS)
+NO_VALUE = ("status", together.PLAY, together.PAUSE)
 
 
 def cmd_together(args: argparse.Namespace) -> int:
     action = args.action or "status"
-    if action in ("status", "play", "pause") and args.value is not None:
+    if action in NO_VALUE and args.value is not None:
         return _error(f"{action} takes no value", 2)
-    if action not in ("status", "play", "pause") and args.value is None:
+    if action not in NO_VALUE and args.value is None:
         example = {"seek": "12:30", "skip": "-10", "audio": "2", "sub": "1-soft", "video": "3"}
         return _error(f"give a value: vpstream together {action} {example[action]}", 2)
     payload: dict[str, Any] = {"action": action}
@@ -560,7 +561,8 @@ def cmd_together(args: argparse.Namespace) -> int:
         print("No stream is running.")
         return 0
     if info.get("outcome") == "queued":
-        print("A change made in the last 2 s is being settled; yours goes in when it is.")
+        window = text.duration(together.WINDOW_SECONDS)
+        print(f"A change made in the last {window} is being settled; yours goes in when it is.")
     print(format_together(stream))
     return 0
 

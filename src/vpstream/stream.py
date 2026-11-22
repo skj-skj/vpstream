@@ -267,11 +267,6 @@ NUMBER = re.compile(r"[1-9][0-9]{0,5}")
 _ACTION = re.compile(r"[a-z0-9-]{1,32}")  # the id a player gives a press
 
 
-def _page_key(value: Any) -> str:
-    """A player's page id (see clients), or "" for one that does not read."""
-    return value if isinstance(value, str) and clients._PAGE.fullmatch(value) else ""
-
-
 @dataclass
 class Stream:
     kind: str  # "file" or "dir"
@@ -529,17 +524,7 @@ class Stream:
             return Answer(302, "redirect", number=number, location=self.master_url(number))
         client = device.client if device is not None and device.kind == gate.BROWSER else None
         if room is not None:
-            settings = player.settings(
-                Path(self.entries[number - 1]),
-                alias=self.alias,
-                number=number,
-                names=self.names(),
-                folder=self.kind == "dir",
-                audio=self.audio,
-                sub=self.sub,
-                group=room.state(now),
-            )
-            return Answer(200, "player", number=number, alias=self.alias, data=settings)
+            client = None  # the page follows the group, not what this browser chose
         settings = player.settings(
             Path(self.entries[number - 1]),
             alias=self.alias,
@@ -549,6 +534,7 @@ class Stream:
             audio=self.audio,
             sub=self.sub,
             client=client,
+            group=None if room is None else room.state(now),
         )
         used = client is not None and client.start_at is not None and client.start_at[0] == number
         if client is not None:
@@ -571,7 +557,7 @@ class Stream:
         if self.together is None:
             data: dict[str, Any] = {"commands": commands}
             return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
-        room, page = self.together, _page_key(query.get("pg"))
+        room, page = self.together, clients.page_key(query.get("pg"))
         if not page:
             return MISSING
         room.report(
@@ -579,8 +565,8 @@ class Stream:
             device.id,
             now,
             video=number,
-            position=clients._float(query.get("t")),
-            duration=clients._float(query.get("d")),
+            position=clients.read_float(query.get("t")),
+            duration=clients.read_float(query.get("d")),
             ready=query.get("in") == "1",
         )
         outcome = self._act(page, device.id, query, now) if query.get("act") else None
@@ -588,27 +574,29 @@ class Stream:
         return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
 
     def _act(self, page: str, device: str, query: dict[str, str], now: float) -> str:
-        """A press of a page for the group: act=play, pause, seek, skip, audio, sub or
-        video, with its value in v and its id in id."""
-        room = self.together
-        assert room is not None
-        kind, given = query.get("act", ""), query.get("v")
-        value: Any = given
-        if kind in ("play", "pause"):
-            kind, value = together.PLAY, kind == "play"
-        elif kind == together.VIDEO and not (
-            given is not None
-            and NUMBER.fullmatch(given)
-            and int(given) <= len(self.videos)
-            and self.ready(int(given))
-        ):
-            return together.REFUSED
+        """A press of a page for the group: act= one of together.ACTIONS, with its value in
+        v and its id in id."""
         action = query.get("id", "")
         action = action if _ACTION.fullmatch(action) else ""
         try:
-            return room.propose(kind, value, page, device, action, now)
+            return self.press(query.get("act"), query.get("v"), page, device, action, now)
         except together.TogetherError:
             return together.REFUSED
+
+    def press(
+        self, action: Any, value: Any, page: str, device: str, action_id: str, now: float
+    ) -> str:
+        """A press for the group watching together (see together.Room.propose), of a page
+        or of the owner (`page` ""): another video only once it is prepared for browsers.
+        Raises TogetherError for one that does not read or cannot be done."""
+        room = self.together
+        if room is None:
+            raise together.TogetherError("this stream is not watched together")
+        kind, value = together.as_press(action, value)
+        value = together.read_value(kind, value, len(self.videos))
+        if kind == together.VIDEO and not self.ready(value):
+            raise together.TogetherError(f"video {value} is not prepared for browsers yet")
+        return room.propose(kind, value, page, device, action_id, now)
 
     def _sync(
         self, number: int, device: gate.Device | None, query: dict[str, str] | None, now: float
@@ -618,11 +606,11 @@ class Stream:
         room = self.together
         if room is None or device is None or device.kind != gate.BROWSER or query is None:
             return MISSING
-        page = _page_key(query.get("pg"))
+        page = clients.page_key(query.get("pg"))
         if not page:
             return MISSING
         room.tick(now)
-        rev = clients._int(query.get("rev"))
+        rev = clients.read_int(query.get("rev"))
         if rev is None or rev != room.rev or number != room.video:
             return Answer(200, "client", number=number, data=self.group_state(page, now))
         data = {"page": page, "rev": rev, "device": device.id}

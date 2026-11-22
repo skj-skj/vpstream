@@ -30,6 +30,9 @@ from vpstream.checks import is_finite, is_whole
 PLAY, SEEK, AUDIO, SUB, VIDEO = "play", "seek", "audio", "sub", "video"
 KINDS = (VIDEO, PLAY, SEEK, AUDIO, SUB)  # the order a window's presses apply in
 SKIP = "skip"  # a step of seconds, from the presser's own seek that waits, else the group's
+PAUSE = "pause"  # a press of play is PLAY True, of pause PLAY False
+# What can be asked of the group, by a viewer's page, the dashboard or the command line.
+ACTIONS = (PLAY, PAUSE, SEEK, SKIP, AUDIO, SUB, VIDEO)
 WINDOW_SECONDS = 2.0
 COOLDOWN_SECONDS = 10.0
 # A page whose browser was on the group's last video this shortly before it changed is
@@ -49,6 +52,16 @@ OWNER = "owner"  # who changed it, for a change made on the dashboard or the com
 
 class TogetherError(ValueError):
     """An action that does not read; the message says why."""
+
+
+def as_press(action: Any, value: Any = None) -> tuple[str, Any]:
+    """An action (see ACTIONS) as the kind of press it is, and its value: play and pause are
+    PLAY, True and False. The value is read by `read_value`."""
+    if action in (PLAY, PAUSE):
+        return PLAY, action == PLAY
+    if action not in ACTIONS:
+        raise TogetherError(f"not an action: {action!r}. Use {', '.join(ACTIONS)}")
+    return action, value
 
 
 def read_value(kind: str, value: Any, videos: int) -> Any:
@@ -147,10 +160,12 @@ class Room:
 
     def join(self, page: str, device: str, now: float) -> Page:
         """The page `page` of `device`, known from now on. A page new to the room joins it;
-        one whose browser had a page on the group's last video follows the group."""
-        self.tick(now)
+        one whose browser had a page on the group's last video follows the group. A page
+        that was quiet PAGE_SECONDS joins again, with a cooldown."""
         known = self.pages.get(page)
         if known is not None:
+            if now - known.seen > PAGE_SECONDS:
+                known.joined, known.follows = None, False
             known.seen = now
             return known
         follows = bool(self.video_changed) and now - self.video_changed <= FOLLOW_SECONDS
@@ -177,10 +192,13 @@ class Room:
         """Take one report of a page: the video it is on, where it is, how long the video is,
         and whether it is loaded and at the group's place (`ready`). Its cooldown starts
         with the first report that says so."""
+        self.tick(now)
         known = self.join(page, device, now)
         known.video = video
         if video == self.video and duration and duration > 0:
-            self.durations[video] = duration
+            # The longest any page says: one version of a video (subtitles burned in) may
+            # end a little before another, and the group must not stop before the last.
+            self.durations[video] = max(duration, self.durations.get(video, 0.0))
         if video == self.video and position is not None:
             known.drift = position - self.live(now)
         else:
@@ -231,8 +249,9 @@ class Room:
                 value = min(value, self.duration)
             proposal = Proposal(value, page, device[:MAX_DEVICE], self.video)
             if self.window_until is None:
-                self._apply({kind: proposal}, now)
-                self.window_until = now + WINDOW_SECONDS
+                # A press that changes nothing opens no window: it holds up no one.
+                if self._apply({kind: proposal}, now):
+                    self.window_until = now + WINDOW_SECONDS
                 outcome = APPLIED
             else:
                 self.pending[kind] = proposal
@@ -253,8 +272,9 @@ class Room:
             self._changed("", now)
         return self.rev != rev
 
-    def _apply(self, proposals: dict[str, Proposal], now: float) -> None:
-        """Apply the proposals, in KINDS order, that change something; one rev for all."""
+    def _apply(self, proposals: dict[str, Proposal], now: float) -> bool:
+        """Apply the proposals, in KINDS order, that change something; one rev for all.
+        True when one did."""
         changed = ""
         for kind in KINDS:
             p = proposals.get(kind)
@@ -279,6 +299,7 @@ class Room:
             changed = p.device or OWNER
         if changed:
             self._changed(changed, now)
+        return bool(changed)
 
     def _forget_actions(self, now: float) -> None:
         old = [k for k, (at, _) in self.actions.items() if now - at > ACTION_SECONDS]
@@ -374,7 +395,7 @@ class Room:
         pages = data.get("pages")
         for key, raw in list(pages.items())[:MAX_PAGES] if isinstance(pages, dict) else []:
             page = _page(raw)
-            if isinstance(key, str) and 0 < len(key) <= 16 and page is not None:
+            if clients.page_key(key) and page is not None:
                 room.pages[key] = page
         return room
 

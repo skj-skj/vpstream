@@ -90,7 +90,7 @@ def test_a_page_starts_where_the_group_is_with_its_tracks(rig: Group) -> None:
     assert page["start"] == pytest.approx(330.0)
     assert page["audio"][page["start_audio"]]["number"] == 2
     group = page["together"]
-    assert group["sync"] == "/aaa/1/sync" and group["cooldown"] == together.COOLDOWN_SECONDS
+    assert group["sync"] == "/aaa/1/sync" and "cooldown" not in group
     assert group["state"]["paused"] is False and group["state"]["audio"] == 2
 
 
@@ -339,3 +339,38 @@ def test_the_api_and_the_public_app_carry_it(rig: Group) -> None:
     assert got.headers["Cache-Control"] == "no-store"
     plain = app.get("/aaa/1/sync?pg=t1&rev=0", headers={caddy.HEADER_IP: "192.0.2.10"})
     assert plain.status_code == 404  # not the player's: not a wait
+
+
+def test_the_owner_changes_the_video_for_everyone(rig: Group) -> None:
+    rig.start_together(folder=True)
+    rig.join("tv", "t1")
+    info = rig.control.together({"action": "video", "value": "2"})
+    assert info["outcome"] == "applied" and info["stream"]["together"]["video"] == 2
+    assert rig.visit("tv", "aaa/1").location == "/aaa/2"
+
+
+def test_a_page_that_comes_back_after_a_while_waits_again(rig: Group) -> None:
+    rig.start_together()
+    rig.join("tv", "t1")
+    rig.clock.now += together.PAGE_SECONDS + 1  # the tab was put away
+    answer = rig.say("tv", "t1", t=0, d=600, act="play", id="t1-1", **{"in": 1})
+    assert answer["outcome"] == "cooldown" and answer["cooldown"] == together.COOLDOWN_SECONDS
+    assert rig.room().paused
+
+
+def test_a_window_closed_by_the_dashboards_look_wakes_the_waits(
+    rig: Group, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(control, "HOLD_SECONDS", 5.0)
+    rig.start_together()
+    rig.join("tv", "t1")
+    rig.say("tv", "t1", act="play", id="t1-1")
+    rig.say("tv", "t1", act="pause", id="t1-2")
+    got: list[Answer] = []
+    held = threading.Thread(target=lambda: got.append(rig.wait("tv", "t1", rev=2)))
+    held.start()
+    time.sleep(0.2)
+    rig.clock.now += 2
+    rig.control.status()  # closes the window, before the daemon's own tick does
+    held.join(0.5)
+    assert got and got[0].data["together"]["paused"] is True

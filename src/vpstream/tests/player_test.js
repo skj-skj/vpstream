@@ -682,5 +682,44 @@ const { check, finish } = runner();
     eq(text(page.$("note")), "Changing the video for everyone...");
   });
 
+
+  await check("together: a new rev is followed even when the daemon's clock was set back", async () => {
+    const page = loadGroup({ rev: 3 });
+    inGroup(page, { rev: 3 });
+    const back = groupState({ rev: 4, paused: false, position: 0 });
+    back.now -= 30;  // the clock was stepped back
+    open(waits(page)).pop().respond(200, { together: back, waited: 1 });
+    page.tick(250);
+    eq([page.video.paused, text(page.$("play"))], [false, "Pause"], "it plays with the group");
+    const same = groupState({ rev: 4, paused: false, position: 0 });
+    same.now = back.now - 1;  // the same rev, told before: dropped
+    same.paused = true;
+    open(waits(page)).pop().respond(200, { together: same, waited: 1 });
+    eq(page.video.paused, false, "an older answer of the same rev is dropped");
+    const old = groupState({ rev: 3, paused: true });
+    old.now += 1000;
+    page.tick(0);
+    open(waits(page)).pop().respond(200, { together: old, waited: 1 });
+    eq(page.video.paused, false, "an older rev is dropped, whatever its clock");
+  });
+
+  await check("together: a press the daemon refuses says so", async () => {
+    const page = load({ folder: true, count: 3, next: "/aaa/2", together: { state: groupState(), sync: "/aaa/1/sync", cooldown: 10, names: ["a", "b", "c"] } });
+    inGroup(page);
+    press(page, "next");
+    answer(page, {}, { outcome: "refused" });
+    eq(text(page.$("note")), "That cannot be done for everyone right now.");
+    page.tick(4000);
+    eq(text(page.$("note")), "", "and then it goes");
+  });
+
+  await check("together: a wait that was aborted goes again", async () => {
+    const page = loadGroup();
+    eq(waits(page).length, 1);
+    waits(page)[0].onabort();
+    page.tick(2000);
+    eq(waits(page).length, 2);
+  });
+
   finish();
 })();

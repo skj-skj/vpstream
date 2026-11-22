@@ -187,17 +187,16 @@ def format_together(stream: dict[str, Any]) -> str:
         "Subtitles:    "
         + ("as the video starts" if sub is None else _track(menu.get("subs", []), sub)),
     ]
+    names = {d.get("id"): _device_name(d) for d in stream.get("devices") or []}
     ago = group.get("changed_ago")
     if ago is not None:
         who = group.get("changed_by") or ""
-        names = {d.get("id"): _device_name(d) for d in stream.get("devices") or []}
         by = "the owner" if who == "owner" else names.get(who, who)
         when = f"{text.duration(float(ago))} ago"
         lines.append(f"Changed:      {f'by {by}' if by else 'at the end'}, {when}")
     pages = group.get("pages") or []
     if pages:
         rows = [["DEVICE", "OFF BY", "COOLDOWN", "NAME"]]
-        names = {d.get("id"): _device_name(d) for d in stream.get("devices") or []}
         for page in pages:
             drift = page.get("drift")
             cool = float(page.get("cooldown") or 0)

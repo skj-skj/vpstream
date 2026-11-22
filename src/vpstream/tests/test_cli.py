@@ -247,7 +247,7 @@ def test_together_command_sends_the_action(
         ("together", {"action": "pause"}),
     ]
     out = capsys.readouterr().out
-    assert "12:30, paused" in out and "being settled" in out
+    assert "12:30, paused" in out and "in the last 2s is being settled" in out
 
 
 def test_together_command_refusals(capsys: pytest.CaptureFixture[str]) -> None:

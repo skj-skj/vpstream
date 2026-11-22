@@ -13,7 +13,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from vpstream import clients, ffargs, prepared, together, tracks
+from vpstream import clients, ffargs, prepared, tracks
 
 MASTER = ffargs.MASTER
 SOFT, BURN = clients.SOFT, clients.BURN  # the kinds of subtitles the player switches between
@@ -147,7 +147,6 @@ def settings(
         data["together"] = {
             "state": group,
             "sync": f"/{alias}/{number}/{SYNC}",
-            "cooldown": together.COOLDOWN_SECONDS,
             "names": names if folder else [],
         }
     return data

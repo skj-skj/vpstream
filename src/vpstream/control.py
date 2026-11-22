@@ -639,30 +639,21 @@ class Control:
         in seconds), audio, sub or video, with its `value`; or status. It goes the way a
         viewer's press does, with its window, but never waits for a cooldown."""
         action = options.get("action")
-        known = (together.SEEK, together.SKIP, together.AUDIO, together.SUB, together.VIDEO)
-        if action not in ("status", "play", "pause", *known):
+        if action != "status" and action not in together.ACTIONS:
             raise StreamError(
-                f"not a together action: {action!r}. Use status, play, pause, seek, skip, "
-                "audio, sub or video"
+                f"not a together action: {action!r}. Use status, {', '.join(together.ACTIONS)}"
             )
         with self._lock:
             stream = self._running()
-            room = stream.together
-            if room is None:
+            if stream.together is None:
                 raise StreamError("this stream is not watched together; start one with --together")
             outcome = None
             if action != "status":
                 value = options.get("value")
-                kind = together.PLAY if action in ("play", "pause") else str(action)
-                if kind == together.PLAY:
-                    value = action == "play"
-                elif value is None:
+                if action not in (together.PLAY, together.PAUSE) and value is None:
                     raise StreamError(f"{action} needs a value")
                 try:
-                    value = together.read_value(kind, value, len(stream.videos))
-                    if kind == together.VIDEO and not stream.ready(value):
-                        raise StreamError(f"video {value} is not prepared for browsers yet")
-                    outcome = room.propose(kind, value, "", together.OWNER, "", self.clock())
+                    outcome = stream.press(action, value, "", together.OWNER, "", self.clock())
                 except together.TogetherError as exc:
                     raise StreamError(str(exc)) from exc
                 self._save_due(SAVE_LATER)
@@ -674,6 +665,7 @@ class Control:
             now = self.clock()
             stream = self.stream
             described = None if stream is None else stream.describe(self.base_url(), now)
+            self._group_moved()  # describing it may have closed a window
             info = {
                 "now": now,
                 "stream": described,

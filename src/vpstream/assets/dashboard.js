@@ -483,7 +483,7 @@
 
   // --- watching together: the group's state, and changes for everyone
 
-  var groupMenuKey = "";
+  var groupMenuKey = "", groupVideosKey = "";
 
   function changedText(stream, g) {
     if (g.changed_ago === null || g.changed_ago === undefined) { return ""; }
@@ -525,6 +525,15 @@
       fillSelect("taudio", menu.audio);
       fillSelect("tsub", menu.subs);
     }
+    // Another video for everyone: those prepared for browsers, of a folder.
+    var ready = stream.videos.filter(function (v) { return v.ready; });
+    $("tvideofield").hidden = stream.videos.length < 2;
+    var videosKey = JSON.stringify(ready.map(function (v) { return [v.number, v.name]; }));
+    if (videosKey !== groupVideosKey) {
+      groupVideosKey = videosKey;
+      fill($("tvideo"), ready.map(function (v) { return h("option", { value: String(v.number) }, v.number + ". " + v.name); }));
+    }
+    showChoice("tvideo", String(g.video));
     showChoice("taudio", g.audio === null ? "" : g.audio === 0 ? "off" : String(g.audio));
     showChoice("tsub", g.sub === null ? "" : String(g.sub));
   }
@@ -768,6 +777,12 @@
     var at = $("tat").value.trim();
     if (!at) { $("tat").focus(); return; }
     forEveryone("seek", at, "Seek for everyone");
+  });
+  $("tvideo").addEventListener("change", function () {
+    var g = last && last.stream && last.stream.together;
+    var value = $("tvideo").value;
+    $("tvideo").blur();
+    if (g && value && value !== String(g.video)) { forEveryone("video", value, "Video " + value + " for everyone"); }
   });
   [["taudio", "audio", "Audio"], ["tsub", "sub", "Subtitles"]].forEach(function (pick) {
     $(pick[0]).addEventListener("change", function () {

@@ -86,12 +86,23 @@ def test_different_kinds_in_one_window_all_apply() -> None:
 
 def test_a_window_that_changes_nothing_bumps_no_rev() -> None:
     room = joined(Room(), "a", "b")
-    press(room, "a", "pause")  # paused already: applies, changes nothing, opens the window
-    assert room.rev == 1 and room.window_until == T0 + WINDOW_SECONDS
+    press(room, "a", "play")
     press(room, "b", "pause", now=T0 + 1)
-    assert not room.tick(T0 + 2) and room.rev == 1
-    assert press(room, "b", "play", now=T0 + 3) == APPLIED  # no window open: at once
-    assert room.rev == 2
+    press(room, "b", "play", now=T0 + 1.5)  # back to what it is: the window changes nothing
+    assert not room.tick(T0 + 2) and room.rev == 2
+    assert press(room, "b", "pause", now=T0 + 3) == APPLIED  # no window open: at once
+    assert room.rev == 3
+
+
+def test_a_press_that_changes_nothing_opens_no_window() -> None:
+    room = joined(Room(), "a", "b")
+    assert press(room, "a", "pause") == APPLIED  # paused already
+    assert room.rev == 1 and room.window_until is None
+    room.propose(together.SEEK, 0.2, "a", "b-a", "", T0)  # where it is, near enough
+    room.propose(together.AUDIO, 0, "", together.OWNER, "", T0)
+    room.propose(together.AUDIO, 0, "", together.OWNER, "", T0)  # the same audio again
+    assert room.window_until == T0 + WINDOW_SECONDS and room.rev == 2
+    assert press(room, "b", "play", now=T0 + 3) == APPLIED and room.paused is False
 
 
 def test_steps_stack_on_the_pressers_own_pending_seek() -> None:
@@ -269,3 +280,54 @@ def test_pages_that_went_quiet_are_forgotten() -> None:
     room.report("new", "b-2", T0 + together.PAGE_SECONDS + 1, 1, 0.0, 600.0)
     assert set(room.pages) == {"new"}
     assert [p["page"] for p in room.describe(T0 + together.PAGE_SECONDS + 1)["pages"]] == ["new"]
+
+
+def test_a_page_that_was_quiet_long_joins_again_with_a_cooldown() -> None:
+    room = joined(Room(), "a", "b")
+    assert room.cooldown("a", T0) == 0
+    later = T0 + together.PAGE_SECONDS + 1  # its tab was put away; nothing new joined since
+    room.report("a", "b-a", later, 1, 0.0, 600.0, False)
+    assert room.cooldown("a", later) == COOLDOWN_SECONDS
+    assert press(room, "a", "play", now=later) == COOLDOWN
+    room.report("a", "b-a", later + 1, 1, 0.0, 600.0, True)  # at the group's place again
+    assert press(room, "a", "play", now=later + 1 + COOLDOWN_SECONDS) == APPLIED
+
+
+def test_a_page_that_reports_often_keeps_its_place() -> None:
+    room = joined(Room(), "a")
+    for n in range(1, 40):
+        room.report("a", "b-a", T0 + 2 * n, 1, 0.0, 600.0, True)
+    assert room.cooldown("a", T0 + 80) == 0
+
+
+def test_the_longest_duration_any_page_reports_is_the_videos() -> None:
+    room = joined(Room(), "a", "b", duration=600.0)
+    room.report("b", "b-b", T0, 1, 0.0, 599.4, True)  # a version that ends a little sooner
+    room.report("b", "b-b", T0, 1, 0.0, 0.5, True)  # or a page that says something odd
+    assert room.duration == 600.0
+    press(room, "a", "play")
+    assert not room.tick(T0 + 1) and room.paused is False
+
+
+@pytest.mark.parametrize(
+    ("action", "value", "pressed"),
+    [
+        ("play", None, (together.PLAY, True)),
+        ("pause", "x", (together.PLAY, False)),
+        ("seek", "12:30", (together.SEEK, "12:30")),
+        ("video", 2, (together.VIDEO, 2)),
+    ],
+)
+def test_an_action_is_a_kind_of_press(action: str, value: Any, pressed: Any) -> None:
+    assert together.as_press(action, value) == pressed
+
+
+def test_an_action_that_is_not_one_does_not_read() -> None:
+    with pytest.raises(TogetherError, match="not an action: 'jump'"):
+        together.as_press("jump", 1)
+
+
+def test_a_restart_drops_pages_whose_ids_do_not_read() -> None:
+    data = joined(Room(), "a").to_dict(T0)
+    data["pages"]["Bad id!"] = data["pages"]["a"]
+    assert set(Room.from_dict(data, 1).pages) == {"a"}

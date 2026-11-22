@@ -187,18 +187,18 @@ class Client:
         """
         self.video = video
         self.reported = now
-        page = self._page(values.get("pg"), video, _int(values.get("ack")), now)
+        page = self._page(values.get("pg"), video, read_int(values.get("ack")), now)
         for kind, key in PRESSED.items():
-            ago = _float(values.get(key))
+            ago = read_float(values.get(key))
             command = self.commands.get(kind)
             if ago is not None and command is not None and command.issued <= now - ago:
                 del self.commands[kind]  # the viewer chose after the owner asked
         live = list(self.pages.values())
         self.commands = {k: c for k, c in self.commands.items() if any(c.due(k, p) for p in live)}
-        duration = _float(values.get("d"))
+        duration = read_float(values.get("d"))
         if duration is not None:
             self.duration = duration
-        position = _float(values.get("t"))
+        position = read_float(values.get("t"))
         if position is not None:
             self.position = position
             self._remember(video, position)
@@ -215,7 +215,7 @@ class Client:
 
     def _page(self, key: Any, video: int, ack: int | None, now: float) -> Page:
         """The page that reports, brought up to date; pages that went quiet are forgotten."""
-        name = key if isinstance(key, str) and _PAGE.fullmatch(key) else ""
+        name = page_key(key)
         page = self.pages.pop(name, None) or Page()
         page.ack = max(page.ack, ack or 0)
         page.video, page.seen = video, now
@@ -267,10 +267,10 @@ class Client:
         if not isinstance(data, dict):
             return None
         client = cls()
-        video = _int(data.get("video"))
+        video = read_int(data.get("video"))
         client.video = video if video is not None and video <= videos else 0
         for name in ("position", "duration", "reported"):
-            value = _float(data.get(name), limit=None if name == "reported" else MAX_SECONDS)
+            value = read_float(data.get(name), limit=None if name == "reported" else MAX_SECONDS)
             setattr(client, name, value or 0.0)
         client.paused = data.get("paused") is not False
         for name, read in ((AUDIO, audio_value), (SUB, sub_value)):
@@ -279,15 +279,15 @@ class Client:
                     setattr(client, name, read(data[name]))
         positions = data.get("positions")
         for key, at in positions.items() if isinstance(positions, dict) else []:
-            n, seconds = _int(key), _float(at)
+            n, seconds = read_int(key), read_float(at)
             if n is not None and 0 < n <= videos and seconds is not None:
                 client.positions[n] = seconds
         start = data.get("start_at")
         if isinstance(start, list) and len(start) == 2:
-            n, seconds = _int(start[0]), _float(start[1])
+            n, seconds = read_int(start[0]), read_float(start[1])
             if n is not None and 0 < n <= videos and seconds is not None:
                 client.start_at = (n, seconds)
-        client.seq = _int(data.get("seq")) or 0
+        client.seq = read_int(data.get("seq")) or 0
         commands = data.get("commands")
         for kind, raw in commands.items() if isinstance(commands, dict) else []:
             command = _command(kind, raw, client.seq)
@@ -302,17 +302,22 @@ _READ = {AUDIO: audio_value, SUB: sub_value, SEEK: seconds_value}
 def _command(kind: Any, raw: Any, last: int) -> Command | None:
     if kind not in _READ or not isinstance(raw, dict):
         return None
-    seq, video = _int(raw.get("seq")), _int(raw.get("video"))
+    seq, video = read_int(raw.get("seq")), read_int(raw.get("video"))
     if seq is None or not 0 < seq <= last:
         return None
     try:
         value = _READ[kind](raw.get("value"))
     except ClientError:
         return None
-    return Command(seq, value, video or 0, _float(raw.get("issued"), limit=None) or 0.0)
+    return Command(seq, value, video or 0, read_float(raw.get("issued"), limit=None) or 0.0)
 
 
-def _int(value: Any) -> int | None:
+def page_key(value: Any) -> str:
+    """A player's page id, or "" for one that does not read."""
+    return value if isinstance(value, str) and _PAGE.fullmatch(value) else ""
+
+
+def read_int(value: Any) -> int | None:
     """A whole number of 0 or more, from a report (text) or a record (a number)."""
     if isinstance(value, str) and is_digits(value) and len(value) <= 12:
         return int(value)
@@ -321,7 +326,7 @@ def _int(value: Any) -> int | None:
     return None
 
 
-def _float(value: Any, limit: float | None = MAX_SECONDS) -> float | None:
+def read_float(value: Any, limit: float | None = MAX_SECONDS) -> float | None:
     """A number of seconds of 0 or more, from a report (text) or a record (a number)."""
     if isinstance(value, str) and len(value) <= 20:
         try:

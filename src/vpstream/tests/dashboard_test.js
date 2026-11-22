@@ -632,6 +632,30 @@ const { check, finish } = runner();
     page.$("tsub").value = "1-soft";
     page.$("tsub").dispatch("change"); await settle();
     eq(sent, { action: "sub", value: "1-soft" });
+    eq(page.$("tvideofield").hidden, false);
+    const offered = page.$("tvideo").querySelectorAll("option");
+    eq(Array.from(offered, (o) => o.value), ["1"], "only the videos prepared for browsers");
+    eq(page.$("tvideo").value, "1", "the group's video");
+    s.videos[2].ready = true;
+    page.$("tplay").click(); await settle();  // the next status shows the third one ready
+    eq(Array.from(page.$("tvideo").querySelectorAll("option"), (o) => o.value), ["1", "3"]);
+    page.$("tvideo").value = "3";
+    page.$("tvideo").dispatch("change"); await settle();
+    eq(sent, { action: "video", value: "3" });
+    sent = null;
+    page.$("tvideo").value = "1";
+    page.$("tvideo").dispatch("change"); await settle();
+    eq(sent, null, "the video it is on already: nothing to ask");
+  });
+
+  await check("viewers: watching one file together, no video to choose", async () => {
+    const s = watched([viewer("b-000001", "TV")]);
+    s.videos = [s.videos[0]];
+    s.together = { rev: 1, video: 1, position: 0, paused: true, audio: null, sub: null, duration: 0,
+      window: 0, changed_by: "", changed_ago: null, now: NOW, pending: [], pages: [] };
+    const page = load({ status: status({ stream: s }) });
+    await settle();
+    eq(page.$("tvideofield").hidden, true);
   });
 
   await check("viewers: in direct mode and with no stream, the tab says why it is empty", async () => {
