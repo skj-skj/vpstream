@@ -219,3 +219,39 @@ def test_format_clients() -> None:
     assert "not playing yet" in lines[3]
     assert "waiting WL" in lines[4]
     assert "No browser" in show.format_clients({"devices": stream["devices"][:1]}, 1.0)
+
+
+def test_format_together() -> None:
+    stream = {
+        "videos": [{"name": "Film", "menu": {"audio": [{"value": "2", "label": "Japanese"}]}}],
+        "devices": [{"id": "b-000001", "kind": "browser", "name": "TV"}],
+        "together": {
+            "video": 1,
+            "position": 754.0,
+            "duration": 5400.0,
+            "paused": False,
+            "audio": 2,
+            "sub": None,
+            "pending": ["seek"],
+            "changed_by": "b-000001",
+            "changed_ago": 3.0,
+            "pages": [
+                {"device": "b-000001", "drift": 0.34, "cooldown": 0},
+                {"device": "b-000009", "drift": None, "cooldown": 6.2},
+            ],
+        },
+    }
+    lines = show.format_together(stream).splitlines()
+    assert lines[:5] == [
+        "Video:        1. Film",
+        "At:           12:34 / 1:30:00, playing (changing: seek)",
+        "Audio:        Japanese",
+        "Subtitles:    as the video starts",
+        "Changed:      by TV, 3s ago",
+    ]
+    assert lines[6].split() == ["DEVICE", "OFF", "BY", "COOLDOWN", "NAME"]
+    assert lines[7].split() == ["b-000001", "+0.3", "s", "-", "TV"]
+    assert lines[8].split() == ["b-000009", "-", "6", "s"]
+    stream["together"].update(changed_by="", pages=[])  # type: ignore[attr-defined]
+    assert show.format_together(stream).splitlines()[-1] == "Changed:      at the end, 3s ago"
+    assert "not watched together" in show.format_together({"together": None})

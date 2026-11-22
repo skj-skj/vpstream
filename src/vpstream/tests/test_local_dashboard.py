@@ -262,6 +262,8 @@ def test_held_connections_cannot_take_every_thread(
     try:
         port = run.daemon.config.dashboard_port
         _wait(lambda: run.daemon.lan_address, "lan up", run)
+        # Every thread of the daemon started (the dashboard is up before the last of them).
+        assert run.daemon.ready.wait(10)
         before = threading.active_count()
         for _ in range(40):
             conn = socket.create_connection((LAN, port), timeout=5)
@@ -277,6 +279,10 @@ def test_held_connections_cannot_take_every_thread(
         while threading.active_count() - before > 2 and time.monotonic() < deadline:
             time.sleep(0.1)
         assert _get(LAN, port, "/api/v1/status")[0] == 401  # served again
+        # The thread that served it ends just after its answer.
+        deadline = time.monotonic() + 5
+        while threading.active_count() - before > 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
         assert threading.active_count() - before <= 2
     finally:
         for conn in held:

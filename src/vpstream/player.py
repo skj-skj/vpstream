@@ -18,6 +18,10 @@ from vpstream import clients, ffargs, prepared, tracks
 MASTER = ffargs.MASTER
 SOFT, BURN = clients.SOFT, clients.BURN  # the kinds of subtitles the player switches between
 REPORT = "client"  # /ALIAS/N/client?t=... is where the player reports and gets commands
+# /ALIAS/N/sync?rev=... is where a page watching together waits for the group to change. It
+# has a route of its own in Caddy (see caddy.config): a request held there must not take
+# one of the gate's connections, which the video's pieces need.
+SYNC = "sync"
 # Sent with every report. A page on another site cannot add a header to a request without
 # asking first (a preflight), which Caddy refuses: so a report is the player's, even in a
 # browser that sends the cookie along with requests from other sites.
@@ -75,14 +79,18 @@ def _start_tracks(
     audio: str | None,
     sub: str | None,
     client: clients.Client | None,
+    group: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
     """Which audio track (an index, len for Off) and subtitle option (an index, -1 for
-    Off) the page starts with: what this client chose last, where this video has it, else
-    the stream's choice, else the file's default audio and no subtitles."""
+    Off) the page starts with: what this client chose last (watching together: what the
+    group chose), where this video has it, else the stream's choice, else the file's
+    default audio and no subtitles."""
     numbers = [t.number for t in audio_tracks]
     ids = [o["id"] for _, o in options]
     chosen_audio = client.wanted(clients.AUDIO) if client else None
     chosen_sub = client.wanted(clients.SUB) if client else None
+    if group is not None:
+        chosen_audio, chosen_sub = group.get("audio"), group.get("sub")
     if audio_tracks and chosen_audio in (0, *numbers):
         start_audio = numbers.index(chosen_audio) if chosen_audio else len(numbers)
     elif (chosen := tracks.pick(audio_tracks, _choice(audio))) is not None:
@@ -105,14 +113,16 @@ def settings(
     audio: str | None,
     sub: str | None,
     client: clients.Client | None = None,
+    group: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What the player page is told about video `number` (1-based) of a stream: its audio
     tracks, the subtitles that are prepared, which of them it starts with, where it starts
-    and where it reports (see `clients`)."""
+    and where it reports (see `clients`). Watching together, `group` is the group's state
+    (see `together`): the page starts with it, and follows it."""
     hls = f"/{alias}/{number}/hls/"
     audio_tracks, options = choices(entry, hls)
-    start_audio, start_sub = _start_tracks(audio_tracks, options, audio, sub, client)
-    return {
+    start_audio, start_sub = _start_tracks(audio_tracks, options, audio, sub, client, group)
+    data = {
         "title": names[number - 1] if 0 < number <= len(names) else "",
         "number": number,
         "count": len(names),
@@ -130,7 +140,16 @@ def settings(
         "ack": client.seq if client else 0,
         "report": f"/{alias}/{number}/{REPORT}",
         "assets": f"/{alias}/assets/",
+        "together": None,
     }
+    if group is not None:
+        data["start"] = group.get("position") or 0.0
+        data["together"] = {
+            "state": group,
+            "sync": f"/{alias}/{number}/{SYNC}",
+            "names": names if folder else [],
+        }
+    return data
 
 
 def page(data: dict[str, Any]) -> str:

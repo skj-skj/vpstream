@@ -11,7 +11,7 @@ from vpstream.tests.fakes import FakeRunner
 
 
 def _proxy(cfg: dict) -> dict:  # type: ignore[type-arg]
-    route = cfg["apps"]["http"]["servers"]["vpstream"]["routes"][1]
+    route = cfg["apps"]["http"]["servers"]["vpstream"]["routes"][-1]
     return route["handle"][0]  # type: ignore[no-any-return]
 
 
@@ -49,6 +49,10 @@ def test_caddy_asks_the_gate_at_most_so_often(tmp_path: Path) -> None:
         "max_conns_per_host": 8,
         "keep_alive": {"max_idle_conns_per_host": 8},
     }
+    # The waits of players watching together are held long: they never count against it.
+    sync = server.config()["apps"]["http"]["servers"]["vpstream"]["routes"][1]
+    assert sync["match"] == [{"path": ["/*/*/sync"]}]
+    assert "transport" not in sync["handle"][0]
 
 
 def test_caddy_gets_go_bounds_only_when_set(tmp_path: Path) -> None:

@@ -200,6 +200,26 @@ vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
   afar.
 - **Remove:** `vpstream prepared rm PATH`, `--stale` or `--all`.
 
+#### Watch together
+
+Several devices watch at the same place, as one group:
+
+```text
+vpstream start --file /srv/media/film.mkv --mode browser --together
+vpstream together                 # where the group is, and how far each device is off it
+vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, sub 1-soft, video 3
+```
+
+- You let each device in (the policy is `approval`); the group starts paused at 0:00.
+- Play, pause, a seek, audio, subtitles and (in a folder) another video, pressed on any
+  device, apply to everyone. The first press applies at once; presses in the 2 seconds after
+  it are settled when those end, the last of each kind winning.
+- A device that joins, or comes back, starts where the group is, and its buttons work only
+  10 seconds after it got there (Full screen and Hide always do).
+- A device that falls behind catches up by itself; the group pauses at the end of a video.
+- The dashboard's Start form has a Watch together switch; its Viewers tab shows the group
+  and changes it for everyone.
+
 ### Who may watch
 
 `--policy open` (anyone; the default in direct mode), `approval` (you let each one in; the
@@ -216,7 +236,7 @@ vpstream devices lock            # nobody new from now on
 
 | Command | What it does |
 | --- | --- |
-| `vpstream start --file F` / `--dir D` | Starts a stream (`--mode browser`, `--alias`, `--ttl`, `--policy`, `--audio`, `--sub`, `--http`) |
+| `vpstream start --file F` / `--dir D` | Starts a stream (`--mode browser`, `--alias`, `--ttl`, `--policy`, `--audio`, `--sub`, `--http`, `--together`) |
 | `vpstream stop`, `vpstream status [--json]` | Stops the stream; shows its addresses and state |
 | `vpstream ls [FOLDER]` | A folder's videos, their tracks and what is prepared |
 | `vpstream track-info FILE` | A file's tracks, with the numbers prepare and start take for subtitles and audio |
@@ -224,6 +244,7 @@ vpstream devices lock            # nobody new from now on
 | `vpstream prepared [rm PATH \| --stale \| --all \| cancel]` | Lists, removes or cancels prepared versions |
 | `vpstream devices [enable\|disable DEVICE \| lock \| unlock]` | Who asked for the stream, and who gets in |
 | `vpstream clients [set DEVICE... \| --all]` | Browser mode: what each TV plays; `--audio`, `--sub`, `--seek`, `--start-at` (`--video` in a folder), `--name` |
+| `vpstream together [status \| play \| pause \| seek T \| skip S \| audio N \| sub S \| video N]` | Watching together: the group's state, or a change for everyone |
 | `vpstream alias NAME` | Changes the name in the address |
 | `vpstream doctor` | Checks this machine, and says how to fix what is missing |
 | `vpstream up`, `vpstream down` | Termux: starts or stops the daemon |

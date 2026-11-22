@@ -147,6 +147,15 @@ def config(
             {"match": {"headers": {HEADER_FILE: ["*"]}}, "routes": [{"handle": send_file}]}
         ],
     }
+    # A player that watches together waits on /ALIAS/N/sync for the group to change (see
+    # player.SYNC). Such a wait is held for many seconds, so it has a way to the gate of
+    # its own, outside `gate_connections`: held waits never keep a video's pieces waiting.
+    # The daemon bounds how many it holds (see control.HOLD_SECONDS).
+    sync = {
+        "match": [{"path": ["/*/*/sync"]}],
+        "handle": [_proxy_to(gate_socket)],
+        "terminal": True,
+    }
     refuse_method = {
         "match": [{"not": [{"method": ["GET", "HEAD"]}]}],
         "handle": [{"handler": "static_response", "status_code": 405}],
@@ -159,7 +168,7 @@ def config(
         "read_header_timeout": 10 * _SECOND,
         "idle_timeout": 120 * _SECOND,
         "logs": {"default_logger_name": SERVER},
-        "routes": [refuse_method, {"handle": [ask_gate]}],
+        "routes": [refuse_method, sync, {"handle": [ask_gate]}],
     }
     apps: dict[str, Any] = {"http": {"servers": {SERVER: server}}}
     if certificate is not None:

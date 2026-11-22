@@ -259,3 +259,19 @@ def test_when_a_command_was_made_survives_a_restart() -> None:
     client.command(clients.AUDIO, 2, now=500.0)
     again = Client.from_dict(client.to_dict(), videos=1)
     assert again is not None and again.commands[clients.AUDIO].issued == 500.0
+
+
+@pytest.mark.parametrize(
+    ("key", "read"),
+    [
+        ("ab12", "ab12"),
+        ("a" * 16, "a" * 16),
+        ("a" * 17, ""),
+        ("AB", ""),
+        ("a-b", ""),
+        (7, ""),
+        ("", ""),
+    ],
+)
+def test_a_page_id_reads_or_is_empty(key: object, read: str) -> None:
+    assert clients.page_key(key) == read

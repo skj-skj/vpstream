@@ -34,6 +34,13 @@
     cursor: pointer; }
   button:focus { outline: none; border-color: #ffd400; background: #3a3a10; }
   button.wide { min-width: 300px; text-align: left; }
+  button[disabled] { opacity: .4; cursor: default; }
+  #note { color: #ffd400; font-size: 24px; min-height: 0; margin: 0 0 8px; }
+  #join { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 36px; padding: 28px 44px; border-color: #ffd400; z-index: 2; }
+  #list { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow-y: auto;
+    background: rgba(0, 0, 0, .92); padding: 28px; z-index: 3; }
+  #list button { display: block; width: 100%; margin: 0 0 14px; text-align: left; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -41,8 +48,11 @@
 <video id="video" playsinline preload="auto"></video>
 <div id="overlay"></div>
 <div id="message"></div>
+<button id="join" type="button" hidden>Tap to join playback</button>
+<div id="list" hidden></div>
 <div id="controls">
   <div id="title"></div>
+  <div id="note"></div>
   <div id="bar"><div id="track"></div><div id="fill"></div></div>
   <div id="buttons">
     <button id="play" type="button">Play</button>

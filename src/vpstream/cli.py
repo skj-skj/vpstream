@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, platform, stream
+from vpstream import __version__, gate, platform, stream, text, together
 from vpstream.net import url_host
 from vpstream.show import (
     ACTIVE,
@@ -23,6 +23,7 @@ from vpstream.show import (
     format_prepared,
     format_status,
     format_stream,
+    format_together,
 )
 
 
@@ -339,6 +340,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     options.update(mode=args.mode, ttl=args.ttl)
     if args.http:
         options["http"] = True
+    if args.together:
+        options["together"] = True
     for name in ("alias", "policy", "audio", "sub"):
         if getattr(args, name):
             options[name] = getattr(args, name)
@@ -534,6 +537,34 @@ def cmd_clients(args: argparse.Namespace) -> int:
         payload["video"] = args.video
     payload.update({"all": True} if args.all else {"devices": args.devices})
     return _show(_daemon("clients", payload), clients=True)
+
+
+TOGETHER_ACTIONS = ("status", *together.ACTIONS)
+NO_VALUE = ("status", together.PLAY, together.PAUSE)
+
+
+def cmd_together(args: argparse.Namespace) -> int:
+    action = args.action or "status"
+    if action in NO_VALUE and args.value is not None:
+        return _error(f"{action} takes no value", 2)
+    if action not in NO_VALUE and args.value is None:
+        example = {"seek": "12:30", "skip": "-10", "audio": "2", "sub": "1-soft", "video": "3"}
+        return _error(f"give a value: vpstream together {action} {example[action]}", 2)
+    payload: dict[str, Any] = {"action": action}
+    if args.value is not None:
+        payload["value"] = args.value
+    info = _daemon("together", payload)
+    if info is None:
+        return 1
+    stream = info.get("stream")
+    if not stream:
+        print("No stream is running.")
+        return 0
+    if info.get("outcome") == "queued":
+        window = text.duration(together.WINDOW_SECONDS)
+        print(f"A change made in the last {window} is being settled; yours goes in when it is.")
+    print(format_together(stream))
+    return 0
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -927,6 +958,11 @@ def build_parser(windows: bool = False) -> argparse.ArgumentParser:
         action="store_true",
         help="on a host that serves streams over HTTPS: this one over plain HTTP",
     )
+    go.add_argument(
+        "--together",
+        action="store_true",
+        help="browser mode: watch together, every device at the same place (approval policy)",
+    )
     go.add_argument("--yes", action="store_true", help="do not ask before a long transcode")
     go.set_defaults(func=cmd_start)
 
@@ -994,6 +1030,19 @@ def build_parser(windows: bool = False) -> argparse.ArgumentParser:
     cl.add_argument("--video", type=int, help="for --start-at: which video (default: its own)")
     cl.add_argument("--name", help="what to call the device on the dashboard")
     cl.set_defaults(func=cmd_clients)
+    tg = sub.add_parser(
+        "together",
+        help="watching together: show the group, or play, pause, seek or change tracks for "
+        "everyone",
+    )
+    tg.add_argument("action", nargs="?", choices=TOGETHER_ACTIONS, help="(default status)")
+    tg.add_argument(
+        "value",
+        nargs="?",
+        help="seek: a time such as 12:30; skip: seconds such as -10; audio: a track or off; "
+        "sub: such as 1-soft, 3-burn or off; video: its number",
+    )
+    tg.set_defaults(func=cmd_together)
 
     sub.add_parser(
         "up", help="Termux: start the daemon in the background and keep the phone awake"

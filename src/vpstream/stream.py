@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vpstream import clients, gate, media, platform, player, prepared, tracks
+from vpstream import clients, gate, media, platform, player, prepared, together, tracks
 from vpstream.certificate import LONGEST_STREAM_SECONDS
 from vpstream.checks import is_number
+from vpstream.together import Room
 
 DIRECT = "direct"  # the files as they are, for players such as VLC
 BROWSER = "browser"  # prepared HLS versions and a player page, for TV browsers
@@ -263,6 +264,7 @@ SAVE_NOW, SAVE_LATER = "now", "later"
 MISSING = Answer(404, "missing")
 DENIED = Answer(403, "denied")
 NUMBER = re.compile(r"[1-9][0-9]{0,5}")
+_ACTION = re.compile(r"[a-z0-9-]{1,32}")  # the id a player gives a press
 
 
 @dataclass
@@ -286,6 +288,9 @@ class Stream:
     audio: str | None = None
     sub: str | None = None
     https: bool = False  # served over HTTPS, with the host's certificate
+    # Watch together (browser mode): the group every player follows; None when each plays
+    # on its own.
+    together: Room | None = None
 
     def __post_init__(self) -> None:
         if len(self.served) != len(self.videos):
@@ -315,6 +320,7 @@ class Stream:
             "sub",
             "confirmed",
             "http",
+            "together",
         }
         if extra := sorted(set(options) - known):
             raise StreamError(f"unknown option: {', '.join(extra)}")
@@ -328,6 +334,16 @@ class Stream:
         if not isinstance(plain, bool):
             raise StreamError(f"http must be true or false, not {plain!r}")
         https = https and not plain
+        group = options.get("together", False)
+        if not isinstance(group, bool):
+            raise StreamError(f"together must be true or false, not {group!r}")
+        if group and mode != BROWSER:
+            raise StreamError("watch together is for browser mode (--mode browser)")
+        if group and policy != gate.APPROVAL:
+            raise StreamError(
+                "watch together lets in only the devices you approve: leave out the policy, "
+                "or give approval"
+            )
         ttl = _ttl_seconds(options.get("ttl"), https)
         audio = check_choice("audio", options.get("audio"))
         sub = check_choice("sub", options.get("sub"))
@@ -352,6 +368,7 @@ class Stream:
             audio=audio,
             sub=sub,
             https=https,
+            together=Room(videos=len(videos)) if group else None,
         )
         stream.set_policy(policy)
         return stream
@@ -361,6 +378,10 @@ class Stream:
     def set_policy(self, policy: str) -> None:
         """Switch the policy. A lock keeps the devices that get in right now."""
         policy = check_policy(policy)
+        if self.together is not None and policy == gate.OPEN:
+            raise StreamError(
+                "watch together lets in only the devices you approve; it cannot be open"
+            )
         if policy == gate.LOCKED:
             if self.policy != gate.LOCKED:
                 self.devices.keep_current(self.policy)
@@ -416,7 +437,7 @@ class Stream:
         # Only browser mode has pages a browser stays on, so only there is a cookie given.
         seen = self.devices.admit(self.policy, ip, user_agent, now, cookie, browser and wants_html)
         if seen.ok:
-            answer = self._admitted(parts, seen.device, wants_html, query)
+            answer = self._admitted(parts, seen.device, wants_html, query, now)
         else:
             answer = self._refused(seen.device, wants_html)
         if seen.cookie:
@@ -437,11 +458,14 @@ class Stream:
         device: gate.Device | None,
         wants_html: bool,
         query: dict[str, str] | None,
+        now: float,
     ) -> Answer:
         browser = self.mode == BROWSER
         if len(parts) == 1:
             if self.kind == "file":
-                return self._play(1, wants_html, device) if browser else self._video(1)
+                return self._play(1, wants_html, device, now) if browser else self._video(1)
+            if self.together is not None and wants_html:  # the group's video, not a choice
+                return self._play(self.together.video, wants_html, device, now)
             return self._listing("index" if wants_html else "playlist")
         head = parts[1].lower()
         if len(parts) == 2 and head == PLAYLIST and self.kind == "dir":
@@ -454,11 +478,13 @@ class Stream:
         if len(parts) == 2:
             if not browser:
                 return self._video(number)
-            return self._play(number, wants_html, device)
+            return self._play(number, wants_html, device, now)
         if browser and len(parts) > 3 and parts[2] == HLS:
             return self._prepared_file(number, "/".join(parts[3:]))
         if browser and len(parts) == 3 and parts[2] == player.REPORT:
-            return self._report(number, device, query)
+            return self._report(number, device, query, now)
+        if browser and len(parts) == 3 and parts[2] == player.SYNC:
+            return self._sync(number, device, query, now)
         return MISSING
 
     def ready(self, number: int) -> bool:
@@ -479,15 +505,26 @@ class Stream:
     def master_url(self, number: int) -> str:
         return f"/{self.alias}/{number}/{HLS}/{prepared.BASE}/{player.MASTER}"
 
-    def _play(self, number: int, wants_html: bool, device: gate.Device | None) -> Answer:
+    def _play(
+        self, number: int, wants_html: bool, device: gate.Device | None, now: float
+    ) -> Answer:
         """A browser gets the player page, any other player the HLS master playlist. The
         page starts where this browser left off, or where the owner said it should, with
-        the tracks it chose last."""
+        the tracks it chose last. Watching together, it starts where the group is, with
+        the group's tracks, and a page asked for another video gets the group's."""
+        room = self.together
+        if room is not None and wants_html:
+            room.tick(now)
+            if number != room.video:
+                location = f"/{self.alias}/{room.video}"
+                return Answer(302, "redirect", number=room.video, location=location)
         if not self.ready(number):
             return Answer(503, "notready", number=number)
         if not wants_html:
             return Answer(302, "redirect", number=number, location=self.master_url(number))
         client = device.client if device is not None and device.kind == gate.BROWSER else None
+        if room is not None:
+            client = None  # the page follows the group, not what this browser chose
         settings = player.settings(
             Path(self.entries[number - 1]),
             alias=self.alias,
@@ -497,6 +534,7 @@ class Stream:
             audio=self.audio,
             sub=self.sub,
             client=client,
+            group=None if room is None else room.state(now),
         )
         used = client is not None and client.start_at is not None and client.start_at[0] == number
         if client is not None:
@@ -505,16 +543,84 @@ class Stream:
         return Answer(200, "player", number=number, alias=self.alias, data=settings, saves=saves)
 
     def _report(
-        self, number: int, device: gate.Device | None, query: dict[str, str] | None
+        self, number: int, device: gate.Device | None, query: dict[str, str] | None, now: float
     ) -> Answer:
         """A player says where it is; the answer is what waits for it. Only a browser
-        known by its cookie has a record, so one browser never sees another's commands."""
+        known by its cookie has a record, so one browser never sees another's commands.
+        Watching together, the answer is the group's state, and a report may carry a
+        press of the viewer's (`act`) for the group."""
         if device is None or device.kind != gate.BROWSER or query is None:
             return MISSING
         if device.client is None:
             device.client = clients.Client()
-        commands = device.client.report(number, query, device.last_seen)
-        return Answer(200, "client", number=number, data={"commands": commands}, saves=SAVE_LATER)
+        commands = device.client.report(number, query, now)
+        if self.together is None:
+            data: dict[str, Any] = {"commands": commands}
+            return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
+        room, page = self.together, clients.page_key(query.get("pg"))
+        if not page:
+            return MISSING
+        room.report(
+            page,
+            device.id,
+            now,
+            video=number,
+            position=clients.read_float(query.get("t")),
+            duration=clients.read_float(query.get("d")),
+            ready=query.get("in") == "1",
+        )
+        outcome = self._act(page, device.id, query, now) if query.get("act") else None
+        data = {**self.group_state(page, now), "outcome": outcome}
+        return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
+
+    def _act(self, page: str, device: str, query: dict[str, str], now: float) -> str:
+        """A press of a page for the group: act= one of together.ACTIONS, with its value in
+        v and its id in id."""
+        action = query.get("id", "")
+        action = action if _ACTION.fullmatch(action) else ""
+        try:
+            return self.press(query.get("act"), query.get("v"), page, device, action, now)
+        except together.TogetherError:
+            return together.REFUSED
+
+    def press(
+        self, action: Any, value: Any, page: str, device: str, action_id: str, now: float
+    ) -> str:
+        """A press for the group watching together (see together.Room.propose), of a page
+        or of the owner (`page` ""): another video only once it is prepared for browsers.
+        Raises TogetherError for one that does not read or cannot be done."""
+        room = self.together
+        if room is None:
+            raise together.TogetherError("this stream is not watched together")
+        kind, value = together.as_press(action, value)
+        value = together.read_value(kind, value, len(self.videos))
+        if kind == together.VIDEO and not self.ready(value):
+            raise together.TogetherError(f"video {value} is not prepared for browsers yet")
+        return room.propose(kind, value, page, device, action_id, now)
+
+    def _sync(
+        self, number: int, device: gate.Device | None, query: dict[str, str] | None, now: float
+    ) -> Answer:
+        """A page waits for the group to change: the answer comes at once when the group's
+        rev is not the one the page has (`rev`), else `control` holds it ("hold")."""
+        room = self.together
+        if room is None or device is None or device.kind != gate.BROWSER or query is None:
+            return MISSING
+        page = clients.page_key(query.get("pg"))
+        if not page:
+            return MISSING
+        room.tick(now)
+        rev = clients.read_int(query.get("rev"))
+        if rev is None or rev != room.rev or number != room.video:
+            return Answer(200, "client", number=number, data=self.group_state(page, now))
+        data = {"page": page, "rev": rev, "device": device.id}
+        return Answer(200, "hold", number=number, data=data)
+
+    def group_state(self, page: str, now: float) -> dict[str, Any]:
+        """What a page of the group is told: the group's state and its own cooldown."""
+        room = self.together
+        assert room is not None
+        return {"together": room.state(now), "cooldown": round(room.cooldown(page, now), 2)}
 
     def _prepared_file(self, number: int, rel: str) -> Answer:
         found = prepared.served_file(Path(self.entries[number - 1]), rel)
@@ -527,8 +633,9 @@ class Stream:
     def names(self) -> list[str]:
         return [media.shown(Path(video).name) for video in self.videos]
 
-    def to_dict(self) -> dict[str, Any]:
-        """Everything, for the state file."""
+    def to_dict(self, now: float | None = None) -> dict[str, Any]:
+        """Everything, for the state file. Watching together, the group is recorded where
+        it is at `now`."""
         return {
             "kind": self.kind,
             "source": self.source,
@@ -547,6 +654,7 @@ class Stream:
             "audio": self.audio,
             "sub": self.sub,
             "https": self.https,
+            "together": None if self.together is None else self.together.to_dict(now),
         }
 
     @classmethod
@@ -603,6 +711,11 @@ class Stream:
                 unlocked_policy=check_policy(data["unlocked_policy"]),
                 devices=gate.Devices.from_rows(data.get("devices"), count),
                 https=https,
+                together=(
+                    Room.from_dict(data["together"], count)
+                    if data.get("together") is not None and data["mode"] == BROWSER
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:  # StreamError is a ValueError
             raise StreamError(f"the recorded stream is not usable: {exc}") from exc
@@ -622,6 +735,7 @@ class Stream:
             "policy": self.policy,
             "unlocked_policy": self.unlocked_policy,
             "https": self.https,
+            "together": None if self.together is None else self.together.describe(now),
             "started": self.started,
             "expires": self.expires,
             "seconds_left": None if self.expires is None else max(0.0, self.expires - now),

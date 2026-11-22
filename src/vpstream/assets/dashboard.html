@@ -43,6 +43,8 @@
           <button type="button" data-value="direct" class="on">Direct<small>VLC and players</small></button>
           <button type="button" data-value="browser">Browser<small>TV browsers</small></button>
         </div>
+        <label class="field browser"><span><input id="together" type="checkbox">
+          Watch together: every device plays the same, and you let each one in</span></label>
         <details>
           <summary>More options</summary>
           <div class="grid2" style="margin-top:10px">
@@ -117,6 +119,26 @@
 
   <!-- Viewers: the browsers of a browser stream, and what to ask of them -->
   <section data-panel="viewers" class="stack" hidden>
+    <div id="togethercard" class="card" hidden>
+      <h2>Watching together</h2>
+      <div id="tstate" class="stack"></div>
+      <div class="stack" style="margin-top:12px">
+        <div class="row">
+          <button id="tback" class="btn grow" type="button">&#8722;10 s</button>
+          <button id="tplay" class="btn primary grow" type="button">Play</button>
+          <button id="tforward" class="btn grow" type="button">+10 s</button>
+        </div>
+        <div class="row">
+          <input id="tat" type="text" class="grow" placeholder="10:10" autocomplete="off" autocapitalize="off" spellcheck="false" style="flex:1">
+          <button id="tseek" class="btn" type="button">Seek everyone</button>
+        </div>
+        <label id="tvideofield" class="field">Video for everyone <select id="tvideo"></select></label>
+        <div class="grid2">
+          <label class="field">Audio for everyone <select id="taudio"></select></label>
+          <label class="field">Subtitles for everyone <select id="tsub"></select></label>
+        </div>
+      </div>
+    </div>
     <div class="card">
       <h2>Viewers <span id="clientcount" class="muted"></span>
         <button id="tickall" class="btn sm ghost" type="button" style="margin-left:auto">Tick all</button></h2>
@@ -125,6 +147,7 @@
     <div id="clientform" class="card" hidden>
       <h2>Change <span id="tickedcount" class="muted"></span></h2>
       <div class="stack">
+        <div id="clientonly" class="stack">
         <div class="grid2">
           <label class="field">Audio <select id="caudio"></select></label>
           <label class="field">Subtitles <select id="csub"></select></label>
@@ -134,6 +157,7 @@
         <div class="row">
           <button id="seeknow" class="btn primary grow" type="button">Seek now</button>
           <button id="startat" class="btn grow" type="button">Start there next time</button>
+        </div>
         </div>
         <label class="field">Name
           <input id="cname" type="text" placeholder="Living-room TV" maxlength="40" spellcheck="false"></label>
