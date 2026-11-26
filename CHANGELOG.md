@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.19.0 (2026-11-26)
+
+### Features
+
+- Watch together on Linux ([#34](https://github.com/skj-skj/vpstream/pull/34),
+  [`ca58178`](https://github.com/skj-skj/vpstream/commit/ca58178be4cc0ea7de25945c4788663efb6b9a4a))
+
+
 ## v0.18.0 (2026-11-22)
 
 ### Features
