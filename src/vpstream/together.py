@@ -35,6 +35,7 @@ PAUSE = "pause"  # a press of play is PLAY True, of pause PLAY False
 ACTIONS = (PLAY, PAUSE, SEEK, SKIP, AUDIO, SUB, VIDEO)
 WINDOW_SECONDS = 2.0
 COOLDOWN_SECONDS = 10.0
+SYNC_SECONDS = 2.0  # a page further off the group than this is out of sync
 # A page whose browser was on the group's last video this shortly before it changed is
 # following it, and does not wait again.
 FOLLOW_SECONDS = 20.0
@@ -62,6 +63,18 @@ def as_press(action: Any, value: Any = None) -> tuple[str, Any]:
     if action not in ACTIONS:
         raise TogetherError(f"not an action: {action!r}. Use {', '.join(ACTIONS)}")
     return action, value
+
+
+def read_offset(value: Any) -> float | None:
+    """A page's own distance from the group, in seconds (`o` in a report), or None for one
+    that does not read."""
+    if not isinstance(value, str) or len(value) > 20:
+        return None
+    try:
+        offset = float(value)
+    except ValueError:
+        return None
+    return offset if is_finite(offset) and abs(offset) <= clients.MAX_SECONDS else None
 
 
 def read_value(kind: str, value: Any, videos: int) -> Any:
@@ -110,7 +123,7 @@ class Page:
     video: int = 0  # the video it is on, as it reported
     joined: float | None = None  # when it said it was loaded and at the group's place
     follows: bool = False  # it came with the group to another video: no cooldown
-    drift: float | None = None  # its position less the group's, at its last report
+    drift: float | None = None  # how far it is off the group, at its last report
 
 
 @dataclass
@@ -188,10 +201,15 @@ class Room:
         position: float | None = None,
         duration: float | None = None,
         ready: bool = False,
+        offset: float | None = None,
     ) -> Page:
         """Take one report of a page: the video it is on, where it is, how long the video is,
         and whether it is loaded and at the group's place (`ready`). Its cooldown starts
-        with the first report that says so."""
+        with the first report that says so.
+
+        Its drift is the `offset` it measured itself, where the report has one: `position`
+        is where it was when the report left, and over the internet the group has moved on
+        by the time it comes (a page in step would show as behind by the trip there)."""
         self.tick(now)
         known = self.join(page, device, now)
         known.video = video
@@ -199,7 +217,9 @@ class Room:
             # The longest any page says: one version of a video (subtitles burned in) may
             # end a little before another, and the group must not stop before the last.
             self.durations[video] = max(duration, self.durations.get(video, 0.0))
-        if video == self.video and position is not None:
+        if video == self.video and offset is not None:
+            known.drift = offset
+        elif video == self.video and position is not None:
             known.drift = position - self.live(now)
         else:
             known.drift = None
@@ -335,6 +355,7 @@ class Room:
                 "device": p.device,
                 "video": p.video,
                 "drift": None if p.drift is None else round(p.drift, 2),
+                "out_of_sync": p.drift is not None and abs(p.drift) > SYNC_SECONDS,
                 "cooldown": round(self.cooldown(key, now), 1),
                 "seen": p.seen,
             }

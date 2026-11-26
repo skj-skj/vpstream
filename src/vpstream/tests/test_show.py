@@ -238,6 +238,7 @@ def test_format_together() -> None:
             "pages": [
                 {"device": "b-000001", "drift": 0.34, "cooldown": 0},
                 {"device": "b-000009", "drift": None, "cooldown": 6.2},
+                {"device": "b-000001", "drift": -7.04, "cooldown": 0, "out_of_sync": True},
             ],
         },
     }
@@ -252,6 +253,7 @@ def test_format_together() -> None:
     assert lines[6].split() == ["DEVICE", "OFF", "BY", "COOLDOWN", "NAME"]
     assert lines[7].split() == ["b-000001", "+0.3", "s", "-", "TV"]
     assert lines[8].split() == ["b-000009", "-", "6", "s"]
+    assert lines[9].split() == ["b-000001", "-7.0", "s,", "out", "of", "sync", "-", "TV"]
     stream["together"].update(changed_by="", pages=[])  # type: ignore[attr-defined]
     assert show.format_together(stream).splitlines()[-1] == "Changed:      at the end, 3s ago"
     assert "not watched together" in show.format_together({"together": None})

@@ -183,7 +183,7 @@ class Config:
     # How much the stream may take of the host, 0 for no bound (see TERMUX_LIMITS):
     # requests Caddy asks the gate at once, Caddy's processors and memory (GOMAXPROCS,
     # GOMEMLIMIT), and the threads of one ffmpeg that prepares. The gate is bounded
-    # everywhere: past its socket's backlog (daemon.bind_unix, 16) a request Caddy hands it
+    # everywhere: past its socket's backlog (daemon.gate_backlog) a request Caddy hands it
     # is refused and the viewer gets a 502, where bounded it waits its turn.
     gate_connections: int = 16
     caddy_cpus: int = 0

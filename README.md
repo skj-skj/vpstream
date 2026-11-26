@@ -24,7 +24,7 @@ TV's web browser (browser mode). The stream's port is open only while a stream r
 - [Commands](#commands)
 - [More on Linux](#more-on-linux): [configuration](#configuration),
   [public dashboard](#public-dashboard), [local network mode](#local-network-mode),
-  [HTTPS for streams](#https-for-streams)
+  [HTTPS for streams](#https-for-streams), [watch together](#watch-together-over-the-internet)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -214,9 +214,13 @@ vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, 
 - Play, pause, a seek, audio, subtitles and (in a folder) another video, pressed on any
   device, apply to everyone. The first press applies at once; presses in the 2 seconds after
   it are settled when those end, the last of each kind winning.
+- A pause pauses the device it was pressed on at once, before the others hear of it.
 - A device that joins, or comes back, starts where the group is, and its buttons work only
-  10 seconds after it got there (Full screen and Hide always do).
-- A device that falls behind catches up by itself; the group pauses at the end of a video.
+  10 seconds after it got there (Full screen, Hide and Sync always do).
+- A device keeps close to the group by itself. One more than 2 seconds off (its video waits
+  for data on a slow link) is out of sync: it plays on where it is and shows **Sync**, which
+  puts it at the group's place, behind or ahead; Sync works in the cooldown too. Any change
+  for everyone puts every device at the group's place. The group pauses at the end of a video.
 - The dashboard's Start form has a Watch together switch; its Viewers tab shows the group
   and changes it for everyone.
 
@@ -293,6 +297,20 @@ certificate for the address (Caddy 2.10+: `vpstream install caddy`). Port 80 is 
 while a certificate is asked for; let 80/tcp in your provider's firewall too. A certificate is
 kept while it lasts (Let's Encrypt allows 5 a week per address). `vpstream start --http` starts
 one stream over plain HTTP. `sudo vpstream init --no-https` turns it off.
+
+### Watch together over the internet
+
+[Watch together](#watch-together) works the same for viewers anywhere, over HTTPS too.
+
+- A device keeps within a few tenths of a second of the group over trips of up to 300 ms.
+  One that joins seeks to the group's place, so its buttons work about 10 seconds after
+  the video loads.
+- The Viewers tab shows how far each device is off, as the device itself measures it, marks
+  one more than 2 seconds off as out of sync, and shows the seconds left of its cooldown.
+- A link slower than the video (look at its peak bitrate, not its average) makes a device
+  stop to load: it falls out of sync, and Sync brings it back once it has loaded.
+- Up to 24 pages (3 per device) wait for the group's changes at once. More still follow it,
+  a few seconds late.
 
 ## Troubleshooting
 

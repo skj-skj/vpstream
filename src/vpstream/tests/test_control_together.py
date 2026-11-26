@@ -91,6 +91,7 @@ def test_a_page_starts_where_the_group_is_with_its_tracks(rig: Group) -> None:
     assert page["audio"][page["start_audio"]]["number"] == 2
     group = page["together"]
     assert group["sync"] == "/aaa/1/sync" and "cooldown" not in group
+    assert group["tolerance"] == together.SYNC_SECONDS, "out of sync past it, as the daemon says"
     assert group["state"]["paused"] is False and group["state"]["audio"] == 2
 
 
@@ -322,6 +323,43 @@ def test_the_dashboard_sees_each_pages_drift_and_cooldown(rig: Group) -> None:
     assert pages["p1"]["device"] == rig.device("phone").id
 
 
+def test_the_drift_shown_is_the_one_the_page_measured(rig: Group) -> None:
+    """Over the internet a report is on its way for a while: a page in step with the group
+    said where it was when the report left, and the group has moved on since. The page's
+    own measure (o=) is shown; a report without one, or one that does not read, falls back
+    to its position."""
+    rig.start_together()
+    rig.join("tv", "t1")
+    rig.say("tv", "t1", act="play", id="t1-1", t=0)
+    rig.clock.now += 5
+    # It left 0.25 s ago, at 4.8 s, as the page knew the group to be: in step.
+    rig.clock.now += 0.25
+    rig.say("tv", "t1", t=4.8, o="0.03")
+    pages = {p["page"]: p for p in rig.control.status()["stream"]["together"]["pages"]}
+    assert pages["t1"]["drift"] == pytest.approx(0.03)
+    for bad in ("x", "nan", "1e9", "9" * 30):
+        rig.say("tv", "t1", t=4.8, o=bad)
+        pages = {p["page"]: p for p in rig.control.status()["stream"]["together"]["pages"]}
+        assert pages["t1"]["drift"] == pytest.approx(-0.45), bad
+    rig.say("tv", "t1", t=4.8, o="-1.5")
+    pages = {p["page"]: p for p in rig.control.status()["stream"]["together"]["pages"]}
+    assert pages["t1"]["drift"] == pytest.approx(-1.5), "behind is below 0"
+    assert pages["t1"]["out_of_sync"] is False
+
+
+def test_a_page_further_off_than_the_tolerance_is_shown_out_of_sync(rig: Group) -> None:
+    rig.start_together()
+    rig.join("tv", "t1")
+    rig.say("tv", "t1", act="play", id="t1-1", t=0)
+    rig.clock.now += 5
+    shown = {}
+    for o in ("2.0", "-2.0", "2.01", "-6.93"):
+        rig.say("tv", "t1", t=5, o=o)
+        (page,) = rig.control.status()["stream"]["together"]["pages"]
+        shown[o] = page["out_of_sync"]
+    assert shown == {"2.0": False, "-2.0": False, "2.01": True, "-6.93": True}
+
+
 def test_the_api_and_the_public_app_carry_it(rig: Group) -> None:
     rig.start_together()
     client = api.create_app(lambda: rig.control.status(), rig.control).test_client()
@@ -376,3 +414,36 @@ def test_a_window_closed_by_the_dashboards_look_wakes_the_waits(
     rig.control.status()  # closes the window, before the daemon's own tick does
     held.join(0.5)
     assert got and got[0].data["together"]["paused"] is True
+
+
+def test_on_the_public_dashboard_only_the_logged_in_owner_reaches_the_group(rig: Group) -> None:
+    """Linux's public dashboard: the group's card and its changes work through the login and
+    its token; a viewer, with the stream's cookie or through the stream's port, reaches none
+    of it."""
+    from vpstream import caddy, login, public
+    from vpstream.tests.test_dashboard_login import IP, get, log_in, post
+    from vpstream.tests.test_login import verifier
+
+    rig.start_together()
+    rig.let_in("tv")
+    auth = login.Login(verifier(), login.Limiter(None, log=lambda m: None))
+    web = api.create_app(rig.control.status, rig.control, auth).test_client()
+    play = {"action": "play"}
+    # A viewer's browser sends its stream cookie to the dashboard too: it counts for nothing.
+    web.set_cookie(gate.cookie_name(False), rig.cookies["tv"], domain="203.0.113.5")
+    assert post(web, "/api/v1/together", play).status_code == 401
+    assert get(web, "/api/v1/status").status_code == 401
+    viewer = public.create_app(rig.control).test_client()
+    viewer.set_cookie(gate.cookie_name(False), rig.cookies["tv"])
+    through = {caddy.HEADER_IP: IP["X-Vpstream-Ip"], player.REPORT_HEADER: "1"}
+    for path in ("/api/v1/together", "/api/v1/status"):
+        assert viewer.post(path, json=play, headers=through).status_code == 405  # GET only
+        assert viewer.get(path, headers=through).status_code == 404
+    assert rig.room().paused, "nothing a viewer sent reached the group"
+
+    _, csrf = log_in(web)
+    assert post(web, "/api/v1/together", play).status_code == 403, "not without the token"
+    done = post(web, "/api/v1/together", play, headers={login.CSRF_HEADER: csrf})
+    assert done.status_code == 200 and done.get_json()["outcome"] == "applied"
+    shown = get(web, "/api/v1/status").get_json()["stream"]["together"]
+    assert shown["paused"] is False and shown["changed_by"] == together.OWNER

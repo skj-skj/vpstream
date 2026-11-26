@@ -199,11 +199,12 @@ def format_together(stream: dict[str, Any]) -> str:
         rows = [["DEVICE", "OFF BY", "COOLDOWN", "NAME"]]
         for page in pages:
             drift = page.get("drift")
+            out = ", out of sync" if page.get("out_of_sync") else ""
             cool = float(page.get("cooldown") or 0)
             rows.append(
                 [
                     str(page.get("device")),
-                    "-" if drift is None else f"{float(drift):+.1f} s",
+                    "-" if drift is None else f"{float(drift):+.1f} s" + out,
                     f"{cool:.0f} s" if cool else "-",
                     str(names.get(page.get("device"), ""))[:40],
                 ]

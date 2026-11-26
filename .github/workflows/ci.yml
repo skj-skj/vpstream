@@ -87,10 +87,13 @@ jobs:
           fi
           vpstream install caddy
           vpstream update caddy
-      - name: HTTPS integration tests, Pebble included
+      - name: HTTPS integration tests, Pebble included, and watching together over HTTPS
         env:
           VPSTREAM_PEBBLE: ${{ runner.temp }}/bin/pebble
-        run: python -m pytest --integration -v -rs src/vpstream/tests/test_https_integration.py src/vpstream/tests/test_caddy.py
+        run: >-
+          python -m pytest --integration -v -rs -n auto
+          src/vpstream/tests/test_https_integration.py src/vpstream/tests/test_caddy.py
+          src/vpstream/tests/test_together_integration.py
 
   build:
     runs-on: ubuntu-latest

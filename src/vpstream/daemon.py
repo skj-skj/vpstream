@@ -28,6 +28,7 @@ from typing import Any, Protocol
 from vpstream import __version__, api, ffargs, local, net, platform, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
+    SYNC_CONNECTIONS,
     CaddyError,
     CaddyServer,
     CertificateCaddy,
@@ -44,6 +45,7 @@ from vpstream.platform.linux import tailscale
 from vpstream.tools import Runner
 
 SOCKET_MODE = 0o660  # the service user and its group; the folder keeps everyone else out
+BACKLOG = 16  # a unix socket's connections that wait to be taken, but the gate's (gate_backlog)
 RETRY_SECONDS = 10.0
 MAX_RETRY_SECONDS = 300.0  # a public dashboard that keeps failing is tried less and less often
 TICK_SECONDS = 1.0  # how often the stream's time limit, Caddy and the access log are looked at
@@ -90,7 +92,14 @@ def socket_in_use(path: Path) -> bool:
     return True
 
 
-def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
+def gate_backlog(config: Config) -> int:
+    """How many connections the gate's socket lets wait to be taken: as many as Caddy may
+    dial at once, for videos (`gate_connections`) and for the waits of players watching
+    together (caddy.SYNC_CONNECTIONS). Past it a dial is refused and the viewer gets a 502."""
+    return (config.gate_connections or BACKLOG) + SYNC_CONNECTIONS
+
+
+def bind_unix(path: Path, mode: int = SOCKET_MODE, backlog: int = BACKLOG) -> socket.socket:
     """Listen on a unix socket at `path`, replacing a socket file left by an earlier run.
 
     A socket that another daemon still listens on is never taken over.
@@ -112,7 +121,7 @@ def bind_unix(path: Path, mode: int = SOCKET_MODE) -> socket.socket:
             sock.bind(str(path))
         finally:
             os.umask(old)
-        sock.listen(16)
+        sock.listen(backlog)
     except OSError as exc:
         raise DaemonError(f"cannot listen on the socket {path}: {exc}") from exc
     return sock
@@ -435,7 +444,8 @@ class Daemon:
         }
 
     def _unix_server(self, path: Path, app: Any) -> tuple[socket.socket, Any]:
-        listener = bind_unix(path)
+        gate = path == self.paths.gate_socket
+        listener = bind_unix(path, backlog=gate_backlog(self.config) if gate else BACKLOG)
         return listener, _make_server(f"unix://{path}", 0, app, listener)
 
     def _tick(self, stop: threading.Event) -> None:
