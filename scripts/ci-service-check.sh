@@ -160,6 +160,10 @@ as_group "$BIN/vpstream together pause"   # inside the press's window: settled w
 sleep 3
 as_group "$BIN/vpstream status --json" | json '"%s %s" % (d["stream"]["together"]["paused"], len(d["stream"]["together"]["pages"]))' | grep -qx 'True 2'
 as_group "$BIN/vpstream stop"
+# What it prepared goes too: uninstall keeps prepared videos, and leaves no trace only
+# without them.
+as_group "$BIN/vpstream prepared rm --all --yes"
+sudo find /var/cache/vpstream -mindepth 1 -type d -empty -delete
 sudo rm -r "$MEDIA"
 
 step "the helper opens and closes only the configured port"

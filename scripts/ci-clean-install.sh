@@ -20,11 +20,12 @@ ROOTS=(/etc /var/lib /var/cache /var/log /var/tmp /opt /srv /usr/local /usr/shar
 # itself must go), root's pip cache, a user's standard ~/.local/state folders (the folders
 # only), the system's ufw lock, man cache, logrotate state, sudo's timestamps and systemd's
 # transient units and private temporary folders, the runner's Azure agent, and the fake
-# tailscale's own state.
+# tailscale's own state, and the runner's Microsoft Edge, which writes its apt key again
+# while the check runs.
 ALLOWED="^[<>] ($PIPX_HOME[/ ]|/root/\.cache[/ ]|/home/[^/ ]+/\.local(/state)? d |\
 /run/ufw\.lock |/var/cache/man[/ ]|/var/lib/logrotate/status |/run/sudo[/ ]|\
 /run/systemd/transient[/ ]|/var/tmp/systemd-private-|/var/lib/waagent[/ ]|\
-/var/tmp/ci-fake-tailscale\.json )"
+/var/tmp/ci-fake-tailscale\.json |/usr/share/keyrings/microsoft-edge\.gpg )"
 OURS="^[<>] ($PIPX_HOME/venvs/vpstream[/ ]|/usr/local/bin/vpstream|/opt/vpstream-ffmpeg|\
 /home/[^/ ]+/\.local/state/vpstream[/ ])"
 
