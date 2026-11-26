@@ -15,7 +15,11 @@
 // the group's state, here and on every other page. Nothing the browser does by itself (a
 // pause when the tab is put away or the headphones come out) goes to the group. The page
 // waits for the group to change on S.together.sync, a request the daemon holds until it
-// does. It keeps up with the group by its playback rate, or by a seek when it is far off.
+// does. It keeps close to the group by its playback rate, and a change of the group's (a
+// press anywhere, its join) puts it at the group's place by a seek. A page that drifts
+// more than T.tolerance off by itself (its video waits for data on a slow link) is out of
+// sync: it is not seeked, which would throw away what it has fetched; it plays on where it
+// is, and its Sync button puts it at the group's place, behind or ahead.
 // A page that just joined has a cooldown: its buttons do nothing for a while, but Full
 // screen and Hide.
 (function () {
@@ -49,7 +53,7 @@
 
   // Watching together (see the top)
   var T = S.together || null;
-  var SEEK_OFF = 2;  // seconds off the group: a seek
+  var SYNC_OFF = (T && T.tolerance) || 2;  // seconds off the group: out of sync
   var RATE_OFF = 0.3;  // ...a little faster or slower, until it is this close:
   var RATE_DONE = 0.2;
   var RATE_ONLY_SEEK = 1;  // where the rate cannot be changed, a seek from this far off
@@ -75,6 +79,8 @@
   // the group plays on meanwhile: a seek to keep up aims ahead by what the last one took.
   var seekCost = 0, seekBegan = 0;
   var joinSeeks = 0;
+  var follow = false;  // the group changed: a seek may put this page at its new place
+  var behind = false;  // out of sync: the Sync button shows
 
   function $(id) { return document.getElementById(id); }
 
@@ -397,6 +403,7 @@
       acts.shift();
       if (answer.outcome === "queued") { showHint(HINTS[act.act]); }
       if (answer.outcome === "refused") { showHint(REFUSED); }
+      if (answer.outcome === "cooldown") { showHint(COOLING); }
     }
     if (said && typeof answer.cooldown === "number") {
       heard = true;
@@ -414,6 +421,8 @@
   };
 
   var REFUSED = "That cannot be done for everyone right now.";
+  // A page away long enough has joined again (together.PAGE_SECONDS), before it heard so.
+  var COOLING = "Not done: you joined again, the controls work in a few seconds.";
 
   function showHint(text) {
     hint = text || "";
@@ -449,6 +458,7 @@
       return;
     }
     if (fresh) {
+      follow = true;
       hint = "";
       if (s.audio !== null && s.audio !== undefined) { setAudio(s.audio); }
       if (s.sub !== null && s.sub !== undefined) { setSub(s.sub); }
@@ -488,21 +498,36 @@
     var off = video.currentTime - target;
     var far = Math.abs(off);
     var free = Date.now() - lastSeek >= SEEK_GAP_MS;
+    var out = false;
     if (group.paused) {
       setRate(1);
       if (!video.paused) { video.pause(); }
       if (far > PAUSED_OFF && free) { catchUp(target); }
-    } else {
-      if (video.paused) {
-        if (!held && !starting) { startHere(); }
-      } else if ((far > (joined || joinSeeks >= JOIN_SEEKS ? SEEK_OFF : JOINED_OFF) ||
-                  (!rateWorks && far > RATE_ONLY_SEEK)) && free) {
-        // A page that has just come is put at the group's place by a seek, not by its
-        // rate: its buttons wait for it to get there. Seeks that take very uneven times
-        // never land near it: after a few, its rate does the rest.
-        if (!joined) { joinSeeks += 1; }
+      follow = false;
+    } else if (video.paused) {
+      if (!held && !starting) { startHere(); }
+    } else if (!joined && joinSeeks < JOIN_SEEKS && far > JOINED_OFF) {
+      // A page that has just come is put at the group's place by a seek, not by its rate:
+      // its buttons wait for it to get there. Seeks that take very uneven times never land
+      // near it: after a few it is in, by its rate when near, out of sync when not.
+      if (free) {
+        joinSeeks += 1;
+        follow = false;
         setRate(1);
         catchUp(target, true);
+      }
+    } else if (far > SYNC_OFF) {
+      setRate(1);
+      if (!follow) {
+        out = true;
+      } else if (free) {
+        follow = false;
+        catchUp(target, true);
+      }
+    } else {
+      if (free) { follow = false; }
+      if (!rateWorks && far > RATE_ONLY_SEEK) {
+        if (free) { catchUp(target, true); }
       } else if (rated && far < RATE_DONE) {
         setRate(1);
       } else if (rateWorks && far > RATE_OFF) {
@@ -510,11 +535,28 @@
       }
     }
     // Not while a seek runs: the video's time is already the seek's, but it is not there.
-    if (!joined && !video.seeking && Math.abs(video.currentTime - target) < JOINED_OFF &&
-        (group.paused || !video.paused)) {
+    // Out of sync after its seeks to join, it is in all the same: its cooldown starts.
+    if (!joined && !video.seeking && (group.paused || !video.paused) &&
+        (Math.abs(video.currentTime - target) < JOINED_OFF || (out && free))) {
       joined = true;
       reportSoon();
     }
+    if (out !== behind) {
+      behind = out;
+      if (behind) { showControls(); }
+      note();
+    }
+  }
+
+  // Sync: this page only, to the group's place, aimed ahead by what a seek takes. It works
+  // in the cooldown too: the group is not changed.
+  function syncHere() {
+    if (!group || group.paused) { return; }
+    behind = false;
+    follow = false;
+    setRate(1);
+    catchUp(Math.min(groupAt(), video.duration ? video.duration - 0.5 : Infinity), true);
+    note();
   }
 
   // Play here only. A browser that will not play without a tap shows the join button.
@@ -549,6 +591,7 @@
     ["play", "back", "forward", "audio", "subs", "episodes", "next"].forEach(function (id) {
       if ($(id).disabled !== off) { $(id).disabled = off; }
     });
+    if ($("sync").hidden === behind) { $("sync").hidden = !behind; }
     var tap = held && group && !group.paused;
     if ($("join").hidden === !!tap) { $("join").hidden = !tap; }
   }
@@ -678,6 +721,7 @@
     if (S.next) { window.location.href = S.next; }
   });
   on("full", toggleFull);
+  on("sync", syncHere);
   on("join", function () { held = false; startHere(); note(); });
   $("bar").addEventListener("click", function (event) {
     event.stopPropagation();

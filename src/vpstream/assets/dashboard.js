@@ -374,8 +374,9 @@
     var chips = [];
     if (p.drift !== null && p.drift !== undefined) {
       var off = Math.abs(p.drift);
-      chips.push(pill((p.drift >= 0 ? "+" : "−") + off.toFixed(1) + " s off the group",
-        off > 2 ? "bad" : off > 0.5 ? "warn" : "ok"));
+      chips.push(pill((p.out_of_sync ? "out of sync: " : "") +
+        (p.drift >= 0 ? "+" : "−") + off.toFixed(1) + " s off the group",
+        p.out_of_sync ? "bad" : off > 0.5 ? "warn" : "ok"));
     }
     if (p.cooldown > 0) { chips.push(pill("just joined: " + Math.ceil(p.cooldown) + " s", "warn")); }
     return chips;

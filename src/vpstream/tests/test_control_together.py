@@ -91,6 +91,7 @@ def test_a_page_starts_where_the_group_is_with_its_tracks(rig: Group) -> None:
     assert page["audio"][page["start_audio"]]["number"] == 2
     group = page["together"]
     assert group["sync"] == "/aaa/1/sync" and "cooldown" not in group
+    assert group["tolerance"] == together.SYNC_SECONDS, "out of sync past it, as the daemon says"
     assert group["state"]["paused"] is False and group["state"]["audio"] == 2
 
 
@@ -343,6 +344,20 @@ def test_the_drift_shown_is_the_one_the_page_measured(rig: Group) -> None:
     rig.say("tv", "t1", t=4.8, o="-1.5")
     pages = {p["page"]: p for p in rig.control.status()["stream"]["together"]["pages"]}
     assert pages["t1"]["drift"] == pytest.approx(-1.5), "behind is below 0"
+    assert pages["t1"]["out_of_sync"] is False
+
+
+def test_a_page_further_off_than_the_tolerance_is_shown_out_of_sync(rig: Group) -> None:
+    rig.start_together()
+    rig.join("tv", "t1")
+    rig.say("tv", "t1", act="play", id="t1-1", t=0)
+    rig.clock.now += 5
+    shown = {}
+    for o in ("2.0", "-2.0", "2.01", "-6.93"):
+        rig.say("tv", "t1", t=5, o=o)
+        (page,) = rig.control.status()["stream"]["together"]["pages"]
+        shown[o] = page["out_of_sync"]
+    assert shown == {"2.0": False, "-2.0": False, "2.01": True, "-6.93": True}
 
 
 def test_the_api_and_the_public_app_carry_it(rig: Group) -> None:

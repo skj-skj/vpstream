@@ -216,7 +216,10 @@ vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, 
   it are settled when those end, the last of each kind winning.
 - A device that joins, or comes back, starts where the group is, and its buttons work only
   10 seconds after it got there (Full screen and Hide always do).
-- A device that falls behind catches up by itself; the group pauses at the end of a video.
+- A device keeps close to the group by itself. One more than 2 seconds off (its video waits
+  for data on a slow link) is out of sync: it plays on where it is and shows **Sync**, which
+  puts it at the group's place, behind or ahead; Sync works in the cooldown too. Any change
+  for everyone puts every device at the group's place. The group pauses at the end of a video.
 - The dashboard's Start form has a Watch together switch; its Viewers tab shows the group
   and changes it for everyone.
 
@@ -301,8 +304,10 @@ one stream over plain HTTP. `sudo vpstream init --no-https` turns it off.
 - A device keeps within a few tenths of a second of the group over trips of up to 300 ms.
   One that joins seeks to the group's place, so its buttons work about 10 seconds after
   the video loads.
-- The Viewers tab shows how far each device is off, as the device itself measures it, and
-  the seconds left of its cooldown.
+- The Viewers tab shows how far each device is off, as the device itself measures it, marks
+  one more than 2 seconds off as out of sync, and shows the seconds left of its cooldown.
+- A link slower than the video (look at its peak bitrate, not its average) makes a device
+  stop to load: it falls out of sync, and Sync brings it back once it has loaded.
 - Up to 24 pages (3 per device) wait for the group's changes at once. More still follow it,
   a few seconds late.
 

@@ -209,8 +209,9 @@ function seeded(seed) {
 // control does (until the group changes, 20 s at most, saying how long: `waited`). The
 // video plays at its playbackRate, and a seek takes `seekMs` (half to one and a half of
 // it) before it plays on, as it fetches from the new place. `changes`: [ms, fn(group)]
-// the group's changes from elsewhere. Returns how far the page was from the group (every
-// 100 ms), its seeks, and its changes of rate.
+// the group's changes from elsewhere; `stalls`: [ms, for ms] when the video waits for data
+// (a link slower than the video); `presses`: [ms, fn(page)] the viewer's. Returns how far
+// the page was from the group (every 100 ms), its seeks, and its changes of rate.
 async function netRun(o) {
   const rng = seeded(o.seed || 1);
   const g = { rev: 1, position: o.start || 100, anchor: 0, paused: !!o.paused, duration: 600 };
@@ -254,10 +255,12 @@ async function netRun(o) {
     if (playing) { seeks += 1; seeking = true; seekUntil = clock() + (o.seekMs || 0) * (0.5 + rng()); }
   } });
   Object.defineProperty(v, "seeking", { get: () => seeking });
-  let frames = 0;
+  let frames = 0, base = Infinity;
   const frame = () => {
     if (seeking && clock() >= seekUntil) { seeking = false; v.dispatch("seeked"); }
-    if (!seeking && !v.paused) { pos += 0.05 * v.playbackRate; }
+    const t = clock() - base;  // as `changes` count
+    const stalled = (o.stalls || []).some(([at, ms]) => t >= at && t < at + ms);
+    if (!seeking && !stalled && !v.paused) { pos += 0.05 * v.playbackRate; }
     if (v.playbackRate !== lastRate) { rates += 1; lastRate = v.playbackRate; }
     frames += 1;
     if (frames % 5 === 0) { v.dispatch("timeupdate"); }
@@ -270,12 +273,16 @@ async function netRun(o) {
   playing = true;
   frame();
   const changes = (o.changes || []).slice().sort((a, b) => a[0] - b[0]);
+  const presses = (o.presses || []).slice().sort((a, b) => a[0] - b[0]);
   const off = [];
+  base = clock();
   for (let t = 0; t < o.seconds * 1000; t += 100) {
     while (changes.length && changes[0][0] <= t) { change(changes.shift()[1]); }
+    while (presses.length && presses[0][0] <= t) { presses.shift()[1](page); }
     page.tick(100);
     await settle();
-    off.push({ t: t + 100, off: pos - live(clock()), rate: v.playbackRate, paused: v.paused, locked: page.$("play").disabled });
+    off.push({ t: t + 100, off: pos - live(clock()), rate: v.playbackRate, paused: v.paused, locked: page.$("play").disabled,
+      sync: !page.$("sync").hidden, seeks });
   }
   const open = off.find((s) => !s.locked);
   return { off, seeks, rates, unlocked: open ? open.t / 1000 : Infinity };
@@ -562,7 +569,7 @@ const { check, finish } = runner();
   await check("together over the internet: a page that loads late is put at the group's place by a seek", async () => {
     for (const [name, o] of INTERNET) {
       for (const seed of SEEDS) {
-        // It loads 1.5 s after it was told where the group is: behind, but under SEEK_OFF.
+        // It loads 1.5 s after it was told where the group is: behind, but in tolerance.
         // At its place it says so, and its cooldown starts (here the daemon gives none);
         // what is left, under JOINED_OFF, its rate makes up before the cooldown ends.
         const run = await netRun(Object.assign({ seconds: 25, seed, loadMs: 1500 }, o));
@@ -586,7 +593,7 @@ const { check, finish } = runner();
     }
   });
 
-  await check("together over the internet: a seek that takes longer than SEEK_OFF is not made again and again", async () => {
+  await check("together over the internet: a seek that takes longer than the tolerance is not made again and again", async () => {
     for (const seed of SEEDS) {
       const changes = [[10000, (g) => { g.position = 300; }], [30000, (g) => { g.position = 100; }]];
       const run = await netRun({ seconds: 60, seed, up: 150, down: 150, jitter: 100, seekMs: 2500, changes });
@@ -601,6 +608,25 @@ const { check, finish } = runner();
       const run = await netRun(Object.assign({ seconds: 30, changes }, o));
       ok(run.off.filter((x) => x.t > 11000 && x.t < 15000).every((x) => x.paused), `${name}: paused`);
       ok(worst(run, 16000) < 0.3, `${name}: and on with the group (${worst(run, 16000)})`);
+    }
+  });
+
+  await check("together over the internet: a video that waits for data plays on out of sync, unseeked, until Sync", async () => {
+    for (const [name, o] of INTERNET) {
+      for (const seed of SEEDS) {
+        // A link slower than the video: it stops for 6 s at 20 s. Seeking then only threw
+        // away what it had and stopped it again (the VPS hand test, 2026-11-26).
+        const sync = (page) => press(page, "sync");
+        const run = await netRun(Object.assign({ seconds: 50, seed, stalls: [[20000, 6000]], presses: [[35000, sync]] }, o));
+        const at = (t) => run.off.find((x) => x.t >= t);
+        ok(!at(19000).sync && at(30000).sync, `${name}, seed ${seed}: Sync shows once it is out of sync`);
+        ok(Math.abs(at(30000).off) > 5, `${name}, seed ${seed}: left where it is (${at(30000).off})`);
+        eq(at(34900).seeks, at(19000).seeks, `${name}, seed ${seed}: no seek of its own`);
+        ok(!at(30000).paused, `${name}, seed ${seed}: it plays on`);
+        // A seek takes half to one and a half of seekMs: where it lands, its rate does the rest.
+        ok(settledBy(run, 35000, 1) < 3, `${name}, seed ${seed}: Sync puts it back (${settledBy(run, 35000, 1)} s)`);
+        ok(worst(run, 45000) < 0.31 && !at(40000).sync, `${name}, seed ${seed}: and near (${worst(run, 45000)})`);
+      }
     }
   });
 
@@ -749,13 +775,20 @@ const { check, finish } = runner();
     page.tick(0);  // the next wait goes out
   };
 
-  await check("together: it keeps up by a seek when far off, by its rate when near", async () => {
+  await check("together: it keeps close by its rate; far off by itself it is out of sync until Sync", async () => {
     const page = loadGroup({ paused: false, position: 100 });
     inGroup(page, { paused: false, position: 100 }, 100);
     await settle();
     page.tick(1000);
+    eq(page.$("sync").hidden, true, "no Sync while it is with the group");
     at(page, 100, 103.5);
-    eq([page.video.currentTime, page.video.playbackRate], [100, 1], "3.5 s ahead: a seek");
+    eq([page.video.currentTime, page.video.playbackRate], [103.5, 1], "3.5 s ahead: no seek");
+    eq(page.$("sync").hidden, false, "but Sync");
+    press(page, "sync");
+    eq(page.video.currentTime, 100, "Sync goes back to the group's place");
+    eq(page.$("sync").hidden, true);
+    ok(!("act" in exchange(page, [], 2000)), "nothing went to the group");
+    page.tick(1000);
     at(page, 100, 101);
     eq([page.video.currentTime, page.video.playbackRate], [101, 0.95], "1 s ahead: a little slower");
     at(page, 100, 98.5);
@@ -768,9 +801,55 @@ const { check, finish } = runner();
     eq(page.video.playbackRate, 1, "0.25 s off is near enough");
     page.tick(1000);
     at(page, 100, 98);
-    eq(page.video.currentTime, 98, "2 s behind is not yet a seek");
+    eq([page.video.currentTime, page.$("sync").hidden], [98, true], "2 s behind is in tolerance");
     at(page, 100, 97.9);
-    eq(page.video.currentTime, 100, "more is");
+    eq([page.video.currentTime, page.video.playbackRate, page.$("sync").hidden], [97.9, 1, false], "more is out of sync");
+    press(page, "sync");
+    eq(page.video.currentTime, 100, "Sync goes ahead to it too");
+  });
+
+  await check("together: a change of the group's still moves it, ahead or back, by a seek", async () => {
+    const page = loadGroup({ paused: false, position: 100 });
+    inGroup(page, { paused: false, position: 100 }, 100);
+    await settle();
+    page.tick(1000);
+    const change = (rev, position) => {
+      open(waits(page)).pop().respond(200, { together: groupState({ rev, paused: false, position }), waited: 1e6 });
+      page.tick(0);
+    };
+    change(2, 300);
+    eq(page.video.currentTime, 300, "someone's seek ahead");
+    page.tick(1000);
+    change(3, 50);
+    eq(page.video.currentTime, 50, "someone's seek back");
+    page.tick(1000);
+    page.video.currentTime = 40;  // fell behind by itself, out of sync...
+    open(waits(page)).pop().respond(200, { together: groupState({ rev: 3, paused: false, position: 50 }), waited: 1e6 });
+    page.tick(250);
+    eq([page.video.currentTime, page.$("sync").hidden], [40, false]);
+    change(4, 50);  // ...and someone pressed something: the group's change puts it back
+    eq([page.video.currentTime, page.$("sync").hidden], [50, true]);
+  });
+
+  await check("together: Sync works in the cooldown, and a press refused for it says so", async () => {
+    const page = loadGroup({ paused: false, position: 100 });
+    page.hls().emit("manifest");
+    page.video.ready(600, 100);
+    page.tick(550);
+    answer(page, { paused: false, position: 100 }, { cooldown: 10 });
+    ok(page.$("play").disabled, "in its cooldown");
+    page.tick(1000);
+    at(page, 100, 95);
+    ok(!page.$("sync").hidden && !page.$("sync").disabled, "Sync shows and works");
+    press(page, "sync");
+    eq(page.video.currentTime, 100);
+    page.tick(10000);
+    open(page.reports()).forEach((x) => x.respond(200, { together: groupState({ paused: false, position: 110 }), cooldown: 0 }));
+    ok(!page.$("play").disabled);
+    // Away longer than together.PAGE_SECONDS, the page has joined again: the daemon says so.
+    press(page, "play");
+    answer(page, { paused: false, position: 110 }, { outcome: "cooldown", cooldown: 9.8 });
+    eq(text(page.$("note")), "Not done: you joined again, the controls work in a few seconds.");
   });
 
   await check("together: half the trip of an answer is allowed for", async () => {

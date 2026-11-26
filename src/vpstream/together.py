@@ -35,6 +35,7 @@ PAUSE = "pause"  # a press of play is PLAY True, of pause PLAY False
 ACTIONS = (PLAY, PAUSE, SEEK, SKIP, AUDIO, SUB, VIDEO)
 WINDOW_SECONDS = 2.0
 COOLDOWN_SECONDS = 10.0
+SYNC_SECONDS = 2.0  # a page further off the group than this is out of sync
 # A page whose browser was on the group's last video this shortly before it changed is
 # following it, and does not wait again.
 FOLLOW_SECONDS = 20.0
@@ -354,6 +355,7 @@ class Room:
                 "device": p.device,
                 "video": p.video,
                 "drift": None if p.drift is None else round(p.drift, 2),
+                "out_of_sync": p.drift is not None and abs(p.drift) > SYNC_SECONDS,
                 "cooldown": round(self.cooldown(key, now), 1),
                 "seen": p.seen,
             }

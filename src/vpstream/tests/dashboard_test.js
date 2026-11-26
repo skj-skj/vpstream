@@ -604,7 +604,7 @@ const { check, finish } = runner();
     const s = watched(devices);
     s.together = { rev: 4, video: 1, position: 754, paused: false, audio: 2, sub: null, duration: 5400,
       window: 0, changed_by: "b-000002", changed_ago: 3, now: NOW, pending: [],
-      pages: [{ page: "a", device: "b-000001", drift: 0.3, cooldown: 0 }, { page: "b", device: "b-000002", drift: -2.5, cooldown: 0 },
+      pages: [{ page: "a", device: "b-000001", drift: 0.3, cooldown: 0 }, { page: "b", device: "b-000002", drift: -2.5, cooldown: 0, out_of_sync: true },
         { page: "c", device: "b-000003", drift: null, cooldown: 6.2 }] };
     let sent = null;
     const page = load({ status: status({ stream: s }), together: (body) => { sent = body; return status({ stream: s, outcome: "applied" }); } });
@@ -618,7 +618,8 @@ const { check, finish } = runner();
     eq(text(page.$("tplay")), "Pause");
     const items = page.$("clients").querySelectorAll(".item");
     ok(text(items[0]).includes("+0.3 s off the group"), text(items[0]));
-    ok(text(items[1]).includes("\u22122.5 s off the group"), text(items[1]));
+    ok(text(items[1]).includes("out of sync: \u22122.5 s off the group"), text(items[1]));
+    ok(!text(items[0]).includes("out of sync"), text(items[0]));
     ok(text(items[2]).includes("just joined: 7 s"), text(items[2]));
     items[0].click();
     eq(page.$("clientonly").hidden, true, "no per-viewer audio, subtitles or seeks");
