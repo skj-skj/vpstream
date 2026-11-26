@@ -214,8 +214,9 @@ vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, 
 - Play, pause, a seek, audio, subtitles and (in a folder) another video, pressed on any
   device, apply to everyone. The first press applies at once; presses in the 2 seconds after
   it are settled when those end, the last of each kind winning.
+- A pause pauses the device it was pressed on at once, before the others hear of it.
 - A device that joins, or comes back, starts where the group is, and its buttons work only
-  10 seconds after it got there (Full screen and Hide always do).
+  10 seconds after it got there (Full screen, Hide and Sync always do).
 - A device keeps close to the group by itself. One more than 2 seconds off (its video waits
   for data on a slow link) is out of sync: it plays on where it is and shows **Sync**, which
   puts it at the group's place, behind or ahead; Sync works in the cooldown too. Any change

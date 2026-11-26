@@ -210,7 +210,8 @@ function seeded(seed) {
 // video plays at its playbackRate, and a seek takes `seekMs` (half to one and a half of
 // it) before it plays on, as it fetches from the new place. `changes`: [ms, fn(group)]
 // the group's changes from elsewhere; `stalls`: [ms, for ms] when the video waits for data
-// (a link slower than the video); `presses`: [ms, fn(page)] the viewer's. Returns how far
+// (a link slower than the video); `presses`: [ms, fn(page)] the viewer's; `seekMsFrom`:
+// [ms, seekMs] a seek's time from then on. Returns how far
 // the page was from the group (every 100 ms), its seeks, and its changes of rate.
 async function netRun(o) {
   const rng = seeded(o.seed || 1);
@@ -252,7 +253,9 @@ async function netRun(o) {
   let pos = 0, seeking = false, seekUntil = 0, seeks = 0, rates = 0, lastRate = 1, playing = false;
   Object.defineProperty(v, "currentTime", { get: () => pos, set: (t) => {
     pos = t;
-    if (playing) { seeks += 1; seeking = true; seekUntil = clock() + (o.seekMs || 0) * (0.5 + rng()); }
+    const from = (o.seekMsFrom || []).filter(([at]) => clock() - base >= at).pop();
+    const ms = from ? from[1] : (o.seekMs || 0);
+    if (playing) { seeks += 1; seeking = true; seekUntil = clock() + ms * (0.5 + rng()); }
   } });
   Object.defineProperty(v, "seeking", { get: () => seeking });
   let frames = 0, base = Infinity;
@@ -630,6 +633,18 @@ const { check, finish } = runner();
     }
   });
 
+  await check("together over the internet: a seek that lands early waits there for the group", async () => {
+    for (const seed of SEEDS) {
+      // Sync after a slow seek aims far ahead; this seek is quick, and lands early: it
+      // was left ahead out of sync (the VPS hand test, 2026-11-26, 3.1 s ahead).
+      const sync = (page) => press(page, "sync");
+      const run = await netRun({ seconds: 70, seed, up: 100, down: 100, jitter: 20, seekMs: 4000,
+        seekMsFrom: [[45000, 200]], stalls: [[10000, 8000], [35000, 8000]], presses: [[25000, sync], [50000, sync]] });
+      ok(settledBy(run, 50000, 0.3) < 6, `seed ${seed}: with the group after ${settledBy(run, 50000, 0.3)} s`);
+      ok(!run.off.find((x) => x.t >= 60000).sync, `seed ${seed}: in sync`);
+    }
+  });
+
   await check("together: it starts paused where the group is, and waits for it to change", async () => {
     const page = loadGroup({ position: 120, rev: 4 });
     eq(page.hls().config.startPosition, 120);
@@ -731,6 +746,37 @@ const { check, finish } = runner();
     page.document.activeElement = null;  // Space on a button is the browser's own click
     space();
     eq(answer(page, { rev: 2, paused: false }).act, "play", "and now Space plays for everyone");
+  });
+
+  await check("together: a pause pressed here pauses this page at once, while the press is on its way", async () => {
+    const page = loadGroup({ paused: false, position: 100 });
+    inGroup(page, { paused: false, position: 100 }, 100);
+    await settle();
+    page.tick(1000);
+    ok(!page.video.paused);
+    press(page, "play");
+    ok(page.video.paused, "paused here at once: its answer may be slow to come back");
+    eq(text(page.$("play")), "Play");
+    const x = open(page.reports()).pop();
+    eq(x.query.act, "pause");
+    page.tick(5000);
+    ok(page.video.paused, "and it stays paused while the press is on its way");
+    x.respond(200, { together: groupState({ rev: 2, paused: true, position: 101 }), cooldown: 0, outcome: "applied" });
+    page.tick(1000);
+    ok(page.video.paused, "the group paused too");
+    // A press of pause that was not done: the group plays on, and so does this page.
+    open(waits(page)).forEach((w) => w.respond(200, { together: groupState({ rev: 3, paused: false, position: 101 }), waited: 1e6 }));
+    page.tick(1000);
+    await settle();
+    ok(!page.video.paused, "playing with the group again");
+    press(page, "play");
+    ok(page.video.paused);
+    let q;
+    do { q = answer(page, { rev: 3, paused: false, position: 102 }, { outcome: "refused" }); } while (!q.act);
+    eq(q.act, "pause");
+    page.tick(1000);
+    await settle();
+    ok(!page.video.paused, "refused: it plays on with the group");
   });
 
   await check("together: three quick -10 s taps are three steps the daemon stacks", async () => {
