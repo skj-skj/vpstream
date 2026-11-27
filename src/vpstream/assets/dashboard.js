@@ -249,6 +249,8 @@
       return d.passes && d.last_seen && info.now - d.last_seen < ACTIVE_SECONDS;
     }).length);
     $("port").textContent = info.stream_port + " " + info.stream_port_state;
+    $("uirow").hidden = !stream.ui;
+    if (stream.ui) { segment("uis", stream.ui); }
     renderVideos(stream);
   }
 
@@ -388,6 +390,7 @@
         p.out_of_sync ? "bad" : off > 0.5 ? "warn" : "ok"));
     }
     if (p.cooldown > 0) { chips.push(pill("just joined: " + Math.ceil(p.cooldown) + " s", "warn")); }
+    if (p.name) { chips.push(pill("name: " + p.name, "")); }
     return chips;
   }
 
@@ -725,9 +728,9 @@
     var ttl = $("ttl").value.trim();
     var options = { ttl: ttl === "" ? null : Number(ttl), mode: segmentValue("mode") };
     options[segmentValue("kind")] = $("path").value.trim();
-    ["alias", "policy", "audio", "sub"].forEach(function (name) {
+    ["alias", "policy", "audio", "sub", "ui"].forEach(function (name) {
       var value = $(name).value.trim();
-      if (value && (options.mode === "browser" || (name !== "audio" && name !== "sub"))) {
+      if (value && (options.mode === "browser" || (name !== "audio" && name !== "sub" && name !== "ui"))) {
         options[name] = value;
       }
     });
@@ -744,6 +747,15 @@
     var alias = $("newalias").value.trim();
     if (!alias) { $("newalias").focus(); return; }
     change("stream/alias", { alias: alias }, function () { $("newalias").value = ""; }, "Renamed to /" + alias);
+  });
+  // The player's look, for the pages open now too: each loads again with it.
+  $("uis").addEventListener("click", function (event) {
+    var b = event.target.closest("button");
+    if (!b || !last || !last.stream) { return; }
+    var ui = b.getAttribute("data-value");
+    if (ui !== last.stream.ui) {
+      change("stream/ui", { ui: ui }, null, ui === "new" ? "The new player: open pages switch to it" : "The old player: open pages switch to it");
+    }
   });
   $("policies").addEventListener("click", function (event) {
     var b = event.target.closest("button");

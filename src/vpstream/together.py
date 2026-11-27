@@ -12,7 +12,11 @@ the window, so three quick steps move 30 s.
 Each open page of the player is known by its id (as in `clients`). A page that joins, late
 or again, starts where the group is, and its presses count only COOLDOWN_SECONDS after it
 said it is loaded and at that place: someone who just came in cannot pause everyone by
-accident. A page that follows the group to another video does not wait again.
+accident. A page that follows the group to another video does not wait again, nor does
+one that loads again with the player's other look (`reload`).
+
+Each change says what it was and whose press it was, by page and by the name the viewer
+gave themselves on the player, so the other players can say who paused (`changes`).
 
 The position is the room's at `anchor` (a time of the clock); while it plays, it moves on
 with the clock. Every change bumps `rev`, which the players wait on (see `control`).
@@ -112,6 +116,7 @@ class Proposal:
     page: str  # "" for the owner
     device: str
     video: int  # a seek is for the video the group was on when it was pressed
+    name: str = ""  # the presser's own name, as their page last said it
 
 
 @dataclass
@@ -122,8 +127,9 @@ class Page:
     seen: float
     video: int = 0  # the video it is on, as it reported
     joined: float | None = None  # when it said it was loaded and at the group's place
-    follows: bool = False  # it came with the group to another video: no cooldown
+    follows: bool = False  # it came with the group to another video, or loaded again: no cooldown
     drift: float | None = None  # how far it is off the group, at its last report
+    name: str = ""  # the name the viewer gave themselves on the player; "" for none
 
 
 @dataclass
@@ -138,7 +144,10 @@ class Room:
     rev: int = 1
     changed_by: str = ""  # device id, OWNER, or "" for the group reaching the end
     changed_at: float = 0.0
+    # What the last change did, each kind with whose press it was (see `state`).
+    changes: list[dict[str, Any]] = field(default_factory=list)
     video_changed: float = 0.0
+    reloaded: float = 0.0  # when every page was told to load again (see `reload`)
     window_until: float | None = None  # while a window is open: when it closes
     pending: dict[str, Proposal] = field(default_factory=dict)
     pages: dict[str, Page] = field(default_factory=dict)
@@ -165,15 +174,19 @@ class Room:
         if paused is not None:
             self.paused = paused
 
-    def _changed(self, device: str, now: float) -> None:
+    def _changed(
+        self, device: str, now: float, changes: list[dict[str, Any]] | None = None
+    ) -> None:
         self.rev += 1
         self.changed_by, self.changed_at = device, now
+        self.changes = changes or []
 
     # --- what pages say and do
 
     def join(self, page: str, device: str, now: float) -> Page:
         """The page `page` of `device`, known from now on. A page new to the room joins it;
-        one whose browser had a page on the group's last video follows the group. A page
+        one whose browser had a page on the group's last video, or before the pages were told
+        to load again, follows the group. A page
         that was quiet PAGE_SECONDS joins again, with a cooldown."""
         known = self.pages.get(page)
         if known is not None:
@@ -181,9 +194,10 @@ class Room:
                 known.joined, known.follows = None, False
             known.seen = now
             return known
-        follows = bool(self.video_changed) and now - self.video_changed <= FOLLOW_SECONDS
+        since = max(self.video_changed, self.reloaded)
+        follows = bool(since) and now - since <= FOLLOW_SECONDS
         follows = follows and any(
-            p.device == device and p.seen >= self.video_changed - clients.ACTIVE_SECONDS
+            p.device == device and p.seen >= since - clients.ACTIVE_SECONDS
             for p in self.pages.values()
         )
         kept = [(k, p) for k, p in self.pages.items() if now - p.seen <= PAGE_SECONDS]
@@ -191,6 +205,11 @@ class Room:
         self.pages = dict(kept)
         self.pages[page] = joined = Page(device[:MAX_DEVICE], now, follows=follows)
         return joined
+
+    def reload(self, now: float) -> None:
+        """Every page loads again (the stream switched the player's look): the pages that
+        come back from the browsers that had one are in at once, with no cooldown."""
+        self.reloaded = now
 
     def report(
         self,
@@ -202,6 +221,7 @@ class Room:
         duration: float | None = None,
         ready: bool = False,
         offset: float | None = None,
+        name: str = "",
     ) -> Page:
         """Take one report of a page: the video it is on, where it is, how long the video is,
         and whether it is loaded and at the group's place (`ready`). Its cooldown starts
@@ -213,6 +233,7 @@ class Room:
         self.tick(now)
         known = self.join(page, device, now)
         known.video = video
+        known.name = name[: clients.MAX_NAME]
         if video == self.video and duration and duration > 0:
             # The longest any page says: one version of a video (subtitles burned in) may
             # end a little before another, and the group must not stop before the last.
@@ -267,7 +288,9 @@ class Room:
                 kind, value = SEEK, max(0.0, base + value)
             if self.duration and kind == SEEK:
                 value = min(value, self.duration)
-            proposal = Proposal(value, page, device[:MAX_DEVICE], self.video)
+            known = self.pages.get(page)
+            name = known.name if known is not None else ""
+            proposal = Proposal(value, page, device[:MAX_DEVICE], self.video, name)
             if self.window_until is None:
                 # A press that changes nothing opens no window: it holds up no one.
                 if self._apply({kind: proposal}, now):
@@ -296,6 +319,7 @@ class Room:
         """Apply the proposals, in KINDS order, that change something; one rev for all.
         True when one did."""
         changed = ""
+        changes: list[dict[str, Any]] = []
         for kind in KINDS:
             p = proposals.get(kind)
             if p is None:
@@ -317,8 +341,10 @@ class Room:
             else:
                 continue
             changed = p.device or OWNER
+            what = kind if kind != PLAY else (PLAY if p.value else PAUSE)
+            changes.append({"what": what, "by": changed, "page": p.page, "name": p.name})
         if changed:
-            self._changed(changed, now)
+            self._changed(changed, now, changes)
         return bool(changed)
 
     def _forget_actions(self, now: float) -> None:
@@ -343,6 +369,7 @@ class Room:
             "window": round(max(0.0, (self.window_until or now) - now), 3),
             "changed_by": self.changed_by,
             "changed_ago": round(max(0.0, now - self.changed_at), 1) if self.changed_at else None,
+            "changes": [dict(c) for c in self.changes],
             "now": now,
         }
 
@@ -358,6 +385,7 @@ class Room:
                 "out_of_sync": p.drift is not None and abs(p.drift) > SYNC_SECONDS,
                 "cooldown": round(self.cooldown(key, now), 1),
                 "seen": p.seen,
+                "name": p.name,
             }
             for key, p in sorted(self.pages.items(), key=lambda item: item[1].seen)
             if now - p.seen <= clients.ACTIVE_SECONDS

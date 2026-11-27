@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from vpstream import certificate, clients, local, platform, text
+from vpstream import certificate, clients, local, platform, player, text
 
 
 def dashboard_line(dash: dict[str, Any]) -> str:
@@ -227,6 +227,8 @@ def format_stream(stream: dict[str, Any]) -> str:
     left = stream.get("seconds_left")
     limit = "no time limit" if left is None else f"stops in {text.duration(float(left))}"
     mode = str(stream.get("mode")) + (", watched together" if stream.get("together") else "")
+    if stream.get("ui") == player.OLD_UI:
+        mode += ", old player"
     lines = [
         f"Stream:       /{stream.get('alias')} ({mode}, policy {stream.get('policy')}, {limit})",
         f"Source:       {stream.get('source')}",

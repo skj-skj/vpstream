@@ -331,3 +331,50 @@ def test_a_restart_drops_pages_whose_ids_do_not_read() -> None:
     data = joined(Room(), "a").to_dict(T0)
     data["pages"]["Bad id!"] = data["pages"]["a"]
     assert set(Room.from_dict(data, 1).pages) == {"a"}
+
+
+def test_each_change_says_what_it_was_and_whose_press_it_was() -> None:
+    room = joined(Room(), "a", "b")
+    room.report("a", "b-a", T0, room.video, 0.0, 600.0, True, name="Asha")
+    assert press(room, "a", "play") == APPLIED
+    state = room.state(T0)
+    assert state["changes"] == [{"what": "play", "by": "b-a", "page": "a", "name": "Asha"}]
+    # In one window, each kind with its own presser: b has no name.
+    press(room, "b", "pause", now=T0 + 0.5)
+    press(room, "a", "seek", 100, now=T0 + 1.0)
+    room.tick(T0 + WINDOW_SECONDS)
+    assert room.state(T0 + WINDOW_SECONDS)["changes"] == [
+        {"what": "pause", "by": "b-b", "page": "b", "name": ""},
+        {"what": "seek", "by": "b-a", "page": "a", "name": "Asha"},
+    ]
+    room.propose(together.AUDIO, 2, "", together.OWNER, "", T0 + 10)
+    assert room.state(T0 + 10)["changes"] == [
+        {"what": "audio", "by": together.OWNER, "page": "", "name": ""}
+    ]
+
+
+def test_the_end_of_a_video_is_no_ones_change() -> None:
+    room = joined(Room(), "a")
+    press(room, "a", "play")
+    room.tick(T0 + 601)
+    assert room.state(T0 + 601)["paused"] is True
+    assert room.state(T0 + 601)["changes"] == []
+
+
+def test_a_page_says_its_viewers_name_with_each_report() -> None:
+    room = joined(Room(), "a")
+    room.report("a", "b-a", T0, room.video, name="Asha")
+    assert room.describe(T0)["pages"][0]["name"] == "Asha"
+    room.report("a", "b-a", T0 + 1, room.video)
+    assert room.describe(T0 + 1)["pages"][0]["name"] == "", "a page that stops saying it"
+
+
+def test_a_page_that_loads_again_with_the_other_look_does_not_wait_again() -> None:
+    room = joined(Room(), "a")
+    room.report("a", "b-a", T0, 1, 0.0, 600.0)
+    room.reload(T0 + 1)  # the owner switched the player's look
+    room.report("a2", "b-a", T0 + 3, 1, 0.0, 600.0, ready=True)
+    assert room.cooldown("a2", T0 + 3) == 0.0
+    # A browser that was not watching is a joiner all the same.
+    room.report("x", "b-x", T0 + 3, 1, 0.0, 600.0, ready=True)
+    assert room.cooldown("x", T0 + 3) == COOLDOWN_SECONDS

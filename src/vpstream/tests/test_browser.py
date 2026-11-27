@@ -259,4 +259,8 @@ def test_the_page_cannot_be_broken_out_of_by_a_file_name() -> None:
     assert json.loads(data)["title"] == title
     head = page.split("<title>")[1].split("</title>")[0]
     assert "&lt;/script&gt;" in head and "{{SETTINGS}}" in head
-    assert '<script src="/aaa/assets/player.js"></script>' in page
+    assert '<script src="/aaa/assets/modern.js"></script>' in page
+    # The look: the new player by default, the old one when the stream says so.
+    old = player.page({"title": "x", "assets": "/aaa/assets/", "subs": [], "ui": "old"})
+    assert '<script src="/aaa/assets/player.js"></script>' in old
+    assert "modern.js" in player.page({"title": "x", "assets": "/aaa/assets/", "ui": "bogus"})

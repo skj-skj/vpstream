@@ -15,14 +15,16 @@ from typing import Any
 from flask import Flask, Response, jsonify, request
 from werkzeug.exceptions import HTTPException
 
-from vpstream import caddy, gate, media, player, text
+from vpstream import caddy, clients, gate, media, player, text
 from vpstream.control import Control
 from vpstream.net import normal_ip
 from vpstream.stream import Answer
 
 M3U_TYPE = "audio/x-mpegurl"
 COOKIE_SECONDS = 30 * 24 * 3600  # the cookie outlives a TV turned off; its stream may not
-MAX_VALUES, MAX_VALUE = 16, 32  # what is read of a report's query
+# What is read of a report's query: a few more names than the fullest report has (16, as
+# sync.js makes it), each as long as the longest value (a viewer's name, clients.MAX_NAME).
+MAX_VALUES, MAX_VALUE = 20, clients.MAX_NAME
 _HOST = re.compile(r"[A-Za-z0-9.:\[\]-]{1,255}")
 
 _PAGE = """<!doctype html>

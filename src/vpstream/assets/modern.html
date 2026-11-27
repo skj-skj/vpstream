@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>{{TITLE}}</title>
+<style>
+  :root { --accent: #ffd400; --bar: rgba(255, 255, 255, .28); --glass: rgba(20, 20, 24, .72);
+    --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px); --safe-r: env(safe-area-inset-right, 0px); }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+    font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body { cursor: none; }
+  body.controls { cursor: default; }
+  [hidden] { display: none !important; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0;
+    cursor: pointer; touch-action: manipulation; }
+  button[disabled] { opacity: .4; cursor: default; }
+  button:focus { outline: none; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  svg.ic { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round; display: block; }
+  svg.solid { fill: currentColor; stroke: none; }
+
+  /* The stage: the whole window, or turned a quarter on it (see rotate in modern.js). */
+  #stage { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; }
+  body.turned #stage { width: 100vh; width: 100dvh; height: 100vw; transform-origin: top left;
+    transform: translateX(100vw) rotate(90deg); }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
+  #taps { position: absolute; inset: 0; touch-action: manipulation; }
+
+  /* Subtitles, above the bottom bar while it shows */
+  #overlay { position: absolute; left: 5%; right: 5%; bottom: calc(6% + var(--safe-b)); text-align: center;
+    pointer-events: none; white-space: pre-line; font-size: 22px; line-height: 1.25;
+    transition: bottom .2s; }
+  #overlay span { display: inline-block; background: rgba(0, 0, 0, .7); color: #fff;
+    padding: .1em .4em; border-radius: .2em; text-shadow: 0 0 3px #000; }
+  body.controls #overlay { bottom: calc(132px + var(--safe-b)); }
+
+  #message { position: absolute; top: 18%; left: 8%; right: 8%; text-align: center; font-size: 17px;
+    pointer-events: none; text-shadow: 0 0 6px #000; }
+
+  /* The controls fade in and out together */
+  .chrome { opacity: 0; visibility: hidden; transition: opacity .2s, visibility .2s; }
+  body.controls .chrome { opacity: 1; visibility: visible; }
+  #shade { position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(rgba(0,0,0,.55), transparent 22%, transparent 60%, rgba(0,0,0,.75)); }
+
+  #top { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 8px;
+    padding: calc(10px + var(--safe-t)) calc(12px + var(--safe-r)) 10px calc(12px + var(--safe-l)); }
+  #top .grow { flex: 1; }
+  .icon { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%; flex: none; }
+  .icon:active { background: rgba(255, 255, 255, .16); }
+  #cc.on { color: var(--accent); }
+
+  /* The viewer's face: their initial, or a figure until they give a name */
+  .face { width: 32px; height: 32px; border-radius: 50%; display: inline-flex; align-items: center;
+    justify-content: center; font-weight: 700; font-size: 15px; background: #555; flex: none; }
+  .face.anon { background: rgba(255, 255, 255, .18); }
+  #me .figure { display: none; }
+  #me .face.anon + .figure { display: block; position: absolute; }
+  #me { position: relative; }
+
+  #center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: flex; align-items: center; gap: 44px; pointer-events: none; }
+  #center button { pointer-events: auto; }
+  #center .step { width: 56px; height: 56px; position: relative; display: flex; align-items: center;
+    justify-content: center; border-radius: 50%; }
+  #center .step svg.ic { width: 40px; height: 40px; stroke-width: 1.6; }
+  #center .step span { position: absolute; font-size: 11px; font-weight: 700; top: 22px; }
+  #play { width: 76px; height: 76px; border-radius: 50%; background: rgba(0, 0, 0, .45);
+    display: flex; align-items: center; justify-content: center; }
+  #play svg { width: 44px; height: 44px; }
+  .i-pause { display: none !important; }
+  body.playing #play .i-play { display: none !important; }
+  body.playing #play .i-pause { display: block !important; }
+  body.waiting #play { opacity: 0; }
+
+  #spinner { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px;
+    border: 4px solid rgba(255, 255, 255, .25); border-top-color: #fff; border-radius: 50%;
+    animation: spin 0.9s linear infinite; display: none; pointer-events: none; }
+  body.waiting #spinner { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #bottom { position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 0 calc(14px + var(--safe-r)) calc(6px + var(--safe-b)) calc(14px + var(--safe-l)); }
+  #note { text-align: center; color: var(--accent); font-size: 14px; min-height: 0; margin: 0 0 4px; }
+  #note:empty { display: none; }
+  #title { text-align: center; font-weight: 600; font-size: 15px; margin: 0 6% 2px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0, 0, 0, .8); }
+
+  /* The bar: a tall place to put a finger, a thin line to see */
+  #bar { position: relative; height: 36px; cursor: pointer; touch-action: none; }
+  #bar.locked { cursor: default; opacity: .6; }
+  #track { position: absolute; left: 0; right: 0; top: 16px; height: 4px; border-radius: 2px;
+    background: var(--bar); transition: height .1s, top .1s; }
+  #bar.drag #track { top: 15px; height: 6px; }
+  #buffered { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px;
+    background: rgba(255, 255, 255, .35); }
+  #fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--accent); }
+  #thumb { position: absolute; top: 50%; left: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 rgba(255, 212, 0, .3);
+    transition: transform .1s, box-shadow .1s; }
+  #bar.drag #thumb { transform: scale(1.35); box-shadow: 0 0 0 8px rgba(255, 212, 0, .25); }
+  #bubble { position: absolute; bottom: 34px; left: 0; transform: translateX(-50%); padding: 3px 8px;
+    border-radius: 6px; background: var(--glass); font-size: 14px; font-variant-numeric: tabular-nums;
+    display: none; pointer-events: none; }
+  #bar.drag #bubble { display: block; }
+
+  #row { display: flex; align-items: center; gap: 2px; margin-top: -4px; }
+  #row .grow { flex: 1; }
+  #clock { font-size: 14px; font-variant-numeric: tabular-nums; padding: 0 6px; color: #ddd; white-space: nowrap; }
+  #duration:not(:empty)::before { content: " / "; color: #999; }
+  #sync { padding: 6px 14px; border-radius: 16px; background: var(--accent); color: #000; font-weight: 700;
+    font-size: 14px; margin-right: 4px; }
+  #next.glow { color: var(--accent); }
+  .i-exit { display: none !important; }
+  body.full #full .i-enter { display: none !important; }
+  body.full #full .i-exit { display: block !important; }
+
+  /* Double taps: a sign on the side that steps */
+  .ripple { position: absolute; top: 0; bottom: 0; width: 38%; display: flex; align-items: center;
+    justify-content: center; pointer-events: none; opacity: 0; transition: opacity .25s;
+    background: radial-gradient(circle at center, rgba(255, 255, 255, .16), transparent 70%); }
+  .ripple.show { opacity: 1; }
+  #rippleback { left: 0; border-radius: 0 50% 50% 0 / 0 50% 50% 0; }
+  #rippleforward { right: 0; border-radius: 50% 0 0 50% / 50% 0 0 50%; }
+  .ripple b { font-size: 17px; padding: 8px 14px; border-radius: 20px; background: rgba(0, 0, 0, .45); }
+
+  #flash { position: absolute; left: 50%; top: 50%; width: 84px; height: 84px; margin: -42px 0 0 -42px;
+    border-radius: 50%; background: rgba(0, 0, 0, .5); display: flex; align-items: center; justify-content: center;
+    opacity: 0; transform: scale(.8); transition: opacity .35s, transform .35s; pointer-events: none; }
+  #flash.show { opacity: 1; transform: scale(1); }
+  #flash svg { width: 44px; height: 44px; }
+  #flash[data-kind="pause"] .i-play, #flash[data-kind="play"] .f-pause { display: none; }
+  body.controls #flash { display: none; }
+
+  /* Who changed the group */
+  #toast { position: absolute; top: calc(64px + var(--safe-t)); left: 50%; transform: translateX(-50%);
+    max-width: 88%; display: flex; align-items: center; gap: 10px; padding: 8px 16px 8px 10px;
+    border-radius: 24px; background: var(--glass); -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px); box-shadow: 0 4px 18px rgba(0, 0, 0, .4); font-size: 15px; z-index: 4;
+    animation: drop .25s ease-out; }
+  #toast .face { width: 28px; height: 28px; font-size: 13px; }
+  @keyframes drop { from { opacity: 0; transform: translate(-50%, -10px); } }
+
+  /* The sheet of audio, subtitles and size: from the bottom on a phone, at the side when wide */
+  .shade { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); z-index: 5; }
+  #panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: 72%; overflow-y: auto;
+    -webkit-overflow-scrolling: touch; background: rgba(24, 24, 28, .96); border-radius: 18px 18px 0 0;
+    padding: 6px 18px calc(18px + var(--safe-b)); }
+  @media (min-width: 700px) {
+    #panel { left: auto; top: 0; width: 380px; max-height: none; border-radius: 0;
+      padding-top: calc(10px + var(--safe-t)); padding-right: calc(18px + var(--safe-r)); }
+  }
+  #panelhead { display: flex; align-items: center; justify-content: space-between; }
+  #panelhead h2 { font-size: 17px; margin: 0; }
+  .group h3 { font-size: 13px; font-weight: 600; color: #aaa; text-transform: uppercase; letter-spacing: .06em;
+    margin: 14px 0 8px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .opt { padding: 9px 14px; border-radius: 20px; background: rgba(255, 255, 255, .1); font-size: 15px;
+    border: 1px solid transparent; text-align: left; }
+  .opt.on { background: rgba(255, 212, 0, .16); border-color: var(--accent); color: var(--accent); }
+  .opt.on::before { content: "\2713  "; }
+  .none { color: #aaa; }
+
+  /* The viewer's name */
+  #nameform { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(360px, 88%);
+    background: rgba(24, 24, 28, .97); border-radius: 16px; padding: 18px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); }
+  #nameform h2 { font-size: 17px; margin: 0 0 4px; }
+  #nameform p { margin: 0 0 12px; color: #aaa; font-size: 14px; }
+  #name { width: 100%; font: inherit; font-size: 17px; color: #fff; background: rgba(255, 255, 255, .1);
+    border: 1px solid rgba(255, 255, 255, .2); border-radius: 10px; padding: 10px 12px;
+    -webkit-user-select: text; user-select: text; }
+  #name:focus { outline: none; border-color: var(--accent); }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .actions button { padding: 9px 18px; border-radius: 10px; background: rgba(255, 255, 255, .1); font-weight: 600; }
+  .actions .primary { background: var(--accent); color: #000; }
+
+  #list { position: absolute; inset: 0; overflow-y: auto; background: rgba(10, 10, 12, .94); z-index: 5;
+    padding: calc(20px + var(--safe-t)) calc(18px + var(--safe-r)) calc(20px + var(--safe-b)) calc(18px + var(--safe-l)); }
+  #list h3 { margin: 0 0 12px; font-size: 17px; }
+  #list .opt { display: block; width: 100%; margin: 0 0 8px; border-radius: 12px; padding: 12px 14px; }
+
+  #join { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6;
+    padding: 16px 26px; border-radius: 30px; background: var(--accent); color: #000; font-weight: 700; font-size: 18px; }
+
+  @media (max-height: 420px) {
+    #center { gap: 32px; }
+    body.controls #overlay { bottom: calc(112px + var(--safe-b)); }
+  }
+</style>
+</head>
+<body class="controls">
+<div id="stage">
+  <video id="video" playsinline webkit-playsinline preload="auto"></video>
+  <div id="overlay"></div>
+  <div id="taps"></div>
+  <div id="rippleback" class="ripple"><b></b></div>
+  <div id="rippleforward" class="ripple"><b></b></div>
+  <div id="flash" data-kind="play">
+    <svg class="ic solid i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z"></path></svg>
+    <svg class="ic solid f-pause" viewBox="0 0 24 24"><path d="M6.5 5h4v14h-4zM13.5 5h4v14h-4z"></path></svg>
+  </div>
+  <div id="spinner"></div>
+  <div id="shade" class="chrome"></div>
+
+  <div id="top" class="chrome">
+    <button id="episodes" class="icon" type="button" aria-label="Videos" hidden>
+      <svg class="ic" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"></path></svg>
+    </button>
+    <span class="grow"></span>
+    <button id="me" class="icon" type="button" aria-label="Set your name" hidden>
+      <span id="initial" class="face anon"></span>
+      <svg class="ic figure" viewBox="0 0 24 24"><circle cx="12" cy="9" r="3.2"></circle><path d="M6 18.5c.8-2.6 3.2-4 6-4s5.2 1.4 6 4"></path></svg>
+    </button>
+  </div>
+
+  <div id="center" class="chrome">
+    <button id="back" class="step" type="button" aria-label="Back 10 seconds">
+      <svg class="ic" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v4h4"></path></svg>
+      <span>10</span>
+    </button>
+    <button id="play" type="button" aria-label="Play">
+      <svg class="ic solid i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z"></path></svg>
+      <svg class="ic solid i-pause" viewBox="0 0 24 24"><path d="M6.5 5h4v14h-4zM13.5 5h4v14h-4z"></path></svg>
+    </button>
+    <button id="forward" class="step" type="button" aria-label="On 10 seconds">
+      <svg class="ic" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"></path></svg>
+      <span>10</span>
+    </button>
+  </div>
+
+  <div id="bottom" class="chrome">
+    <div id="note"></div>
+    <div id="title"></div>
+    <div id="bar">
+      <div id="track"><div id="buffered"></div><div id="fill"></div><div id="thumb"></div></div>
+      <div id="bubble"></div>
+    </div>
+    <div id="row">
+      <span id="clock"><span id="time"></span><span id="duration"></span></span>
+      <span class="grow"></span>
+      <button id="sync" type="button" hidden>Sync</button>
+      <button id="next" class="icon" type="button" aria-label="Next video" hidden>
+        <svg class="ic solid" viewBox="0 0 24 24"><path d="M6 6l9 6-9 6zM16.5 6h2v12h-2z"></path></svg>
+      </button>
+      <button id="cc" class="icon" type="button" aria-label="Audio and subtitles">
+        <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"></rect><path d="M7 12.5h4M13.5 12.5H17M7 15.5h7"></path></svg>
+      </button>
+      <button id="rotate" class="icon" type="button" aria-label="Rotate" hidden>
+        <svg class="ic" viewBox="0 0 24 24"><rect x="9" y="6" width="9" height="15" rx="1.8"></rect><path d="M3 10.5A8 8 0 0 1 9.5 3M3 10.5V7M3 10.5h3.5"></path></svg>
+      </button>
+      <button id="full" class="icon" type="button" aria-label="Full screen" hidden>
+        <svg class="ic i-enter" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"></path></svg>
+        <svg class="ic i-exit" viewBox="0 0 24 24"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"></path></svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="message"></div>
+
+  <div id="toast" hidden><span id="toastface" class="face"></span><span id="toasttext"></span></div>
+
+  <div id="sheet" class="shade" hidden>
+    <div id="panel">
+      <div id="panelhead"><h2>Audio and subtitles</h2>
+        <button id="sheetclose" class="icon" type="button" aria-label="Close">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button></div>
+      <div id="sheetbody"></div>
+    </div>
+  </div>
+
+  <div id="namebox" class="shade" hidden>
+    <form id="nameform" autocomplete="off">
+      <h2>Your name</h2>
+      <p>The others watching see it when you pause, seek or change the audio or subtitles.</p>
+      <input id="name" type="text" maxlength="40" placeholder="Your name" spellcheck="false" enterkeyhint="done">
+      <div class="actions">
+        <button id="namecancel" type="button">Cancel</button>
+        <button id="namesave" class="primary" type="submit">Save</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="list" hidden></div>
+  <button id="join" type="button" hidden>Tap to join playback</button>
+</div>
+<script id="settings" type="application/json">{{SETTINGS}}</script>
+<script src="{{ASSETS}}hls.min.js"></script>
+<script src="{{ASSETS}}vtt.js"></script>
+<script src="{{ASSETS}}sync.js"></script>
+<script src="{{ASSETS}}modern.js"></script>
+</body>
+</html>

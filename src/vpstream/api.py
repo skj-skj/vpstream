@@ -150,6 +150,7 @@ def create_app(
             "stream/stop": lambda body: control.stop(),
             "stream/alias": lambda body: control.set_alias(body.get("alias")),
             "stream/policy": lambda body: control.set_policy(body.get("policy")),
+            "stream/ui": lambda body: control.set_ui(body.get("ui")),
             "stream/unlock": lambda body: control.unlock(),
             "devices": lambda body: control.set_device(body.get("device"), body.get("allowed")),
             "clients": control.set_clients,

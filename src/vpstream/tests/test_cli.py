@@ -250,6 +250,22 @@ def test_together_command_sends_the_action(
     assert "12:30, paused" in out and "in the last 2s is being settled" in out
 
 
+def test_ui_command_switches_the_player(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sent: list[object] = []
+    answer = {"stream": {"alias": "aaa", "mode": "browser", "videos": [], "ui": "old"}}
+    monkeypatch.setattr(
+        cli, "_daemon", lambda route, payload=None: sent.append((route, payload)) or answer
+    )
+    assert cli.main(["ui", "old"]) == 0
+    assert sent == [("stream/ui", {"ui": "old"})]
+    out = capsys.readouterr().out
+    assert "Player: old" in out and "browser, old player" in out
+    with pytest.raises(SystemExit):
+        cli.main(["ui", "shiny"])
+
+
 def test_together_command_refusals(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["together", "seek"]) == 2
     assert "vpstream together seek 12:30" in capsys.readouterr().err

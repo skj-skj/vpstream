@@ -180,8 +180,8 @@ vpstream stop
 
 ### Browser mode
 
-For a TV's web browser: the video is prepared as HLS first, with a player page made for a TV
-remote.
+For a web browser (a phone, a laptop or a TV): the video is prepared as HLS first, with a player
+page of its own.
 
 ```text
 vpstream track-info /srv/media/film.mkv                    # its tracks, with their numbers
@@ -195,10 +195,18 @@ vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
   subtitles become soft subtitles; image and ASS subtitles are burned in (one encode each). It
   asks first when it would take longer than the film (`--yes`); `--no-wait` queues it and
   returns.
-- **Player:** play, ±10 s, audio, subtitles, subtitle size (extra small to extra large),
-  episodes, next, full screen. `vpstream clients` (or the dashboard's Viewers tab) changes
-  the audio, subtitles, subtitle size or position of a TV from afar. The subtitle size is
-  each device's own, also when watching together, and is there for soft subtitles only.
+- **Player:** touch controls by default. A tap in the middle plays or pauses, a double tap on
+  the left or right steps 10 s back or on (each tap after it 10 s more), and the bar is
+  dragged to seek. The subtitles button opens a sheet with the audio, the subtitles and their
+  size (extra small to extra large). The bottom row has full screen and, on a phone, rotate.
+  Full screen turns the screen to the video's shape where the browser allows it (Android).
+  On an iPhone it is the system's own video player, and the soft subtitles go with it; there
+  rotate turns the page on the screen, as iOS lets no page lock the screen.
+- **The old player** (`--ui old`): large buttons for a TV's remote. Switch a running stream
+  with `vpstream ui old` / `vpstream ui new`, or on the dashboard; open pages load again with it.
+- `vpstream clients` (or the dashboard's Viewers tab) changes the audio, subtitles, subtitle
+  size or position of a TV from afar. The subtitle size is each device's own, also when
+  watching together, and is there for soft subtitles only.
 - **Remove:** `vpstream prepared rm PATH`, `--stale` or `--all`.
 
 #### Watch together
@@ -222,6 +230,9 @@ vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, 
   for data on a slow link) is out of sync: it plays on where it is and shows **Sync**, which
   puts it at the group's place, behind or ahead; Sync works in the cooldown too. Any change
   for everyone puts every device at the group's place. The group pauses at the end of a video.
+- With the new player, each viewer can give themselves a name (the face at the top). Every
+  device then says who paused, seeked or changed the audio or subtitles ("Asha paused"), so
+  nobody takes it for a fault. Full screen, rotation and the subtitle size stay each device's own.
 - The dashboard's Start form has a Watch together switch; its Viewers tab shows the group
   and changes it for everyone.
 
@@ -241,7 +252,7 @@ vpstream devices lock            # nobody new from now on
 
 | Command | What it does |
 | --- | --- |
-| `vpstream start --file F` / `--dir D` | Starts a stream (`--mode browser`, `--alias`, `--ttl`, `--policy`, `--audio`, `--sub`, `--http`, `--together`) |
+| `vpstream start --file F` / `--dir D` | Starts a stream (`--mode browser`, `--alias`, `--ttl`, `--policy`, `--audio`, `--sub`, `--http`, `--together`, `--ui`) |
 | `vpstream stop`, `vpstream status [--json]` | Stops the stream; shows its addresses and state |
 | `vpstream ls [FOLDER]` | A folder's videos, their tracks and what is prepared |
 | `vpstream track-info FILE` | A file's tracks, with the numbers prepare and start take for subtitles and audio |
@@ -249,6 +260,7 @@ vpstream devices lock            # nobody new from now on
 | `vpstream prepared [rm PATH \| --stale \| --all \| cancel]` | Lists, removes or cancels prepared versions |
 | `vpstream devices [enable\|disable DEVICE \| lock \| unlock]` | Who asked for the stream, and who gets in |
 | `vpstream clients [set DEVICE... \| --all]` | Browser mode: what each TV plays; `--audio`, `--sub`, `--seek`, `--sub-size`, `--start-at` (`--video` in a folder), `--name` |
+| `vpstream ui new` / `vpstream ui old` | Browser mode: the running stream's player, touch controls or large buttons for a TV remote |
 | `vpstream together [status \| play \| pause \| seek T \| skip S \| audio N \| sub S \| video N]` | Watching together: the group's state, or a change for everyone |
 | `vpstream alias NAME` | Changes the name in the address |
 | `vpstream doctor` | Checks this machine, and says how to fix what is missing |

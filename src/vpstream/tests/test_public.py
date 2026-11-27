@@ -467,4 +467,10 @@ def test_the_dashboard_behaves() -> None:
 def test_the_player_behaves() -> None:
     """The real player page and scripts in node (player_test.js): where it starts, what it
     reports, and how the owner's commands and the viewer's own buttons meet."""
-    harness.run("player_test.js", "player.html", "vtt.js", "player.js", at_least=10)
+    harness.run("player_test.js", "player.html", "vtt.js", "sync.js", "player.js", at_least=10)
+
+
+def test_the_new_player_behaves() -> None:
+    """The new player's real page and scripts in node (modern_test.js): taps, the bar, the
+    sheet, full screen and rotation, the viewer's name, and the same watching together."""
+    harness.run("modern_test.js", "modern.html", "vtt.js", "sync.js", "modern.js", at_least=20)
