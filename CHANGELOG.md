@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.21.0 (2026-11-27)
+
+### Features
+
+- A touch player for phones and laptops, with viewer names when watching together
+  ([#37](https://github.com/skj-skj/vpstream/pull/37),
+  [`3841834`](https://github.com/skj-skj/vpstream/commit/384183449b400b08b5208ea2a80f8ecd976128ed))
+
+### Testing
+
+- Wait for the LAN dashboard's close message, not the cleared address
+  ([#36](https://github.com/skj-skj/vpstream/pull/36),
+  [`bf0789f`](https://github.com/skj-skj/vpstream/commit/bf0789f571a5f2efdeed2c3b6c6031735d4babe0))
+
+
 ## v0.20.0 (2026-11-27)
 
 ### Features
