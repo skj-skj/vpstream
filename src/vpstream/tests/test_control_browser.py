@@ -516,3 +516,39 @@ def test_the_index_marks_what_is_not_ready(rig: Rig) -> None:
     assert index.text.count("(not ready)") == 2
     rig.preparer.cancel()
     rig.preparer.wait(15)
+
+
+def test_the_player_look_is_the_new_one_unless_asked_and_switches_live(rig: Rig) -> None:
+    info = rig.start()
+    assert info["stream"]["ui"] == "new"
+    rig.preparer.wait()
+    viewer = public.create_app(rig.control).test_client()
+    ip = {"X-Vpstream-Ip": "192.0.2.1"}
+    page = viewer.get("/aaa", headers={**ip, "Accept": "text/html"})
+    assert page.status_code == 200 and "modern.js" in page.text and '"ui": "new"' in page.text
+    script = viewer.get("/aaa/assets/modern.js", headers=ip)
+    assert script.status_code == 200 and script.mimetype == "text/javascript" and script.data
+    # The dashboard switches it; an open page hears so in the answer to its next report.
+    dash = api.create_app(rig.control.status, rig.control).test_client()
+    switched = dash.post(f"{api.API}/stream/ui", json={"ui": "old"}).get_json()
+    assert switched["stream"]["ui"] == "old" and rig.recorded_stream()["ui"] == "old"
+    cookie = page.headers["Set-Cookie"].split(";")[0]
+    report = viewer.get(
+        "/aaa/1/client?t=1&p=0&ack=0&pg=abc",
+        headers={**ip, "X-Vpstream-Player": "1", "Cookie": cookie},
+    )
+    assert report.get_json()["ui"] == "old"
+    again = viewer.get("/aaa", headers={**ip, "Accept": "text/html", "Cookie": cookie})
+    assert "/aaa/assets/player.js" in again.text and "modern.js" not in again.text
+    refused = dash.post(f"{api.API}/stream/ui", json={"ui": "shiny"})
+    assert refused.status_code == 400 and "not a player look" in refused.get_json()["error"]
+
+
+def test_the_old_look_can_be_asked_for_at_the_start_but_not_in_direct_mode(rig: Rig) -> None:
+    assert rig.start(ui="old")["stream"]["ui"] == "old"
+    rig.control.stop()
+    with pytest.raises(StreamError, match="for browser mode"):
+        rig.start(mode="direct", ui="old")
+    assert rig.start(mode="direct")["stream"]["ui"] is None
+    with pytest.raises(StreamError, match="for browser mode"):
+        rig.control.set_ui("new")

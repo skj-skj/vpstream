@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from vpstream import api, control, gate, player, together
+from vpstream import api, clients, control, gate, player, public, together
 from vpstream.stream import Answer, StreamError
 from vpstream.tests.test_control_clients import Viewers
 
@@ -466,3 +466,38 @@ def test_on_the_public_dashboard_only_the_logged_in_owner_reaches_the_group(rig:
     assert done.status_code == 200 and done.get_json()["outcome"] == "applied"
     shown = get(web, "/api/v1/status").get_json()["stream"]["together"]
     assert shown["paused"] is False and shown["changed_by"] == together.OWNER
+
+
+def test_a_switch_of_the_look_brings_the_pages_back_with_no_cooldown(rig: Group) -> None:
+    rig.start_together()
+    rig.join("tv", "abc")
+    rig.say("tv", "abc", t=0, d=600, **{"in": 1})
+    rig.control.set_ui("old")
+    assert rig.say("tv", "abc", t=0, d=600)["ui"] == "old"  # the page loads again
+    rig.clock.now += 2
+    assert rig.page("tv")["ui"] == "old"
+    rig.say("tv", "new1", t=0, d=600, **{"in": 1})
+    assert rig.room().cooldown("new1", rig.clock.now) == 0.0
+    rig.control.set_ui("old")  # the look it has: nothing to load again
+    assert rig.room().reloaded < rig.clock.now
+
+
+def test_a_viewers_whole_name_comes_through_http(rig: Group) -> None:
+    rig.start_together()
+    web = public.create_app(rig.control).test_client()
+    ip = {"X-Vpstream-Ip": "192.0.2.9", "User-Agent": "phone"}
+    page = web.get("/aaa", headers={**ip, "Accept": "text/html"})
+    cookie = page.headers["Set-Cookie"].split(";")[0]
+    assert rig.control.stream is not None
+    device = rig.control.stream.devices.browser(cookie.split("=", 1)[1])
+    assert device is not None
+    rig.control.set_device(device.id, True)
+    name = "Bartholomew Montgomery-Fitzgerald X"  # 35 characters: more than any other value
+    assert 32 < len(name) <= clients.MAX_NAME
+    answer = web.get(
+        "/aaa/1/client",
+        query_string={"pg": "abc", "t": "0", "n": name},
+        headers={**ip, player.REPORT_HEADER: "1", "Cookie": cookie},
+    )
+    assert answer.status_code == 200
+    assert rig.room().pages["abc"].name == name

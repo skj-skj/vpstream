@@ -459,10 +459,12 @@ def test_a_tv_is_known_by_its_cookie_and_obeys_through_caddy(live: Live, sample:
     tv_player = {**tv, "X-Vpstream-Player": "1"}  # as player.js sends a report
     status, headers, body = live.get(f"{report}?t=4.5&d=12&p=0&a=1&s=off&ack=0", headers=tv_player)
     assert status == 200 and headers["content-type"].startswith("application/json")
-    assert headers["cache-control"] == "no-store" and json.loads(body) == {"commands": []}
+    assert headers["cache-control"] == "no-store"
+    assert json.loads(body) == {"commands": [], "ui": "new"}
     live.api("clients", {"devices": [device["id"]], "audio": "2", "seek": "0:08"})
     status, _, body = live.get(f"{report}?t=5&ack=0", headers=tv_player)
-    assert json.loads(body) == {"commands": [{"seq": 1, "audio": 2}, {"seq": 2, "seek": 8.0}]}
+    commands = [{"seq": 1, "audio": 2}, {"seq": 2, "seek": 8.0}]
+    assert json.loads(body) == {"commands": commands, "ui": "new"}
     live.get(f"{report}?t=8&a=2&ack=2", headers=tv_player)
     (shown,) = [d for d in live.api("status")["stream"]["devices"] if d["id"] == device["id"]]
     assert shown["client"]["audio"] == 2 and shown["client"]["pending"] == {}

@@ -500,6 +500,9 @@ class Control:
         new = check_alias(alias)
         return self._change(lambda s: setattr(s, "alias", new))
 
+    def set_ui(self, ui: Any) -> dict[str, Any]:
+        return self._change(lambda s: s.set_ui(ui, self.clock()))
+
     def set_policy(self, policy: Any) -> dict[str, Any]:
         return self._change(lambda s: s.set_policy(policy))
 

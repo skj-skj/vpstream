@@ -384,7 +384,7 @@ def test_the_cookie_is_sent_as_a_browser_needs_it(rig: Viewers) -> None:
     page = web.get("/aaa", headers=headers)
     assert page.status_code == 200 and "Set-Cookie" not in page.headers
     report = web.get("/aaa/1/client?t=12.5&d=60&p=0&ack=0", headers={"X-Vpstream-Ip": TV, **PLAYER})
-    assert report.status_code == 200 and report.get_json() == {"commands": []}
+    assert report.status_code == 200 and report.get_json() == {"commands": [], "ui": "new"}
     assert report.headers["Cache-Control"] == "no-store"
     assert device.client is not None and device.client.position == 12.5
 

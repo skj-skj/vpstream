@@ -56,6 +56,9 @@ def test_the_pages_know_the_same_subtitle_sizes() -> None:
     listed = re.search(r"var SUB_SIZES = \[(.*)\];", dashboard)
     assert block and listed
     assert tuple(re.findall(r'id: "(\w+)"', block[1])) == clients.SUB_SIZES
+    modern = (assets / "modern.js").read_text(encoding="utf-8")
+    touch = re.search(r"var SIZES = \[(.*?)\];", modern, re.S)
+    assert touch and touch[1] == block[1], "the new player's sizes are the old one's"
     assert tuple(re.findall(r'\["(\w+)", "', listed[1])) == clients.SUB_SIZES
     names = re.findall(r'\["\w+", "([^"]+)"\]', listed[1])
     assert [n.lower() for n in names] == list(clients.SUB_SIZE_NAMES.values())

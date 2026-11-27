@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, clients, gate, platform, stream, text, together
+from vpstream import __version__, clients, gate, platform, player, stream, text, together
 from vpstream.net import url_host
 from vpstream.show import (
     ACTIVE,
@@ -342,7 +342,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         options["http"] = True
     if args.together:
         options["together"] = True
-    for name in ("alias", "policy", "audio", "sub"):
+    for name in ("alias", "policy", "audio", "sub", "ui"):
         if getattr(args, name):
             options[name] = getattr(args, name)
     info = _request("stream/start", kind, options, args.yes)
@@ -539,6 +539,16 @@ def cmd_clients(args: argparse.Namespace) -> int:
         payload["video"] = args.video
     payload.update({"all": True} if args.all else {"devices": args.devices})
     return _show(_daemon("clients", payload), clients=True)
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Switch the running stream's player look; the pages open now load again with it."""
+    info = _daemon("stream/ui", {"ui": args.ui})
+    if info is None:
+        return 1
+    if info.get("stream"):
+        print(f"Player: {args.ui}. Open pages switch to it within a few seconds.")
+    return _show(info)
 
 
 TOGETHER_ACTIONS = ("status", *together.ACTIONS)
@@ -965,6 +975,12 @@ def build_parser(windows: bool = False) -> argparse.ArgumentParser:
         action="store_true",
         help="browser mode: watch together, every device at the same place (approval policy)",
     )
+    go.add_argument(
+        "--ui",
+        choices=player.UIS,
+        help="browser mode: the player's look: new (touch controls, the default) or old "
+        "(large buttons for a TV remote); switch it later with vpstream ui",
+    )
     go.add_argument("--yes", action="store_true", help="do not ask before a long transcode")
     go.set_defaults(func=cmd_start)
 
@@ -1051,6 +1067,11 @@ def build_parser(windows: bool = False) -> argparse.ArgumentParser:
         "sub: such as 1-soft, 3-burn or off; video: its number",
     )
     tg.set_defaults(func=cmd_together)
+    ui = sub.add_parser(
+        "ui", help="browser mode: switch the player's look; open pages load again with it"
+    )
+    ui.add_argument("ui", choices=player.UIS, help="new (touch controls) or old (TV remote)")
+    ui.set_defaults(func=cmd_ui)
 
     sub.add_parser(
         "up", help="Termux: start the daemon in the background and keep the phone awake"

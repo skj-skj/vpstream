@@ -1,14 +1,15 @@
 // Runs the real player page and scripts (vtt.js, player.js) in node, with the small DOM of
 // dom.js, a stand-in hls.js, a video element that does what it is told, requests that the
-// checks answer themselves and a clock they move. Usage: node player_test.js PAGE VTT PLAYER
+// checks answer themselves and a clock they move. Usage: node player_test.js PAGE VTT SYNC PLAYER
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
 const { Node, parse, newDocument, settle, runner, eq, ok, text } = require("./dom.js");
 
-const [pagePath, vttPath, playerPath] = process.argv.slice(2);
+const [pagePath, vttPath, syncPath, playerPath] = process.argv.slice(2);
 const PAGE = fs.readFileSync(pagePath, "utf8");
 const VTT = fs.readFileSync(vttPath, "utf8");
+const SYNC = fs.readFileSync(syncPath, "utf8");
 const PLAYER = fs.readFileSync(playerPath, "utf8");
 
 // --- what the daemon tells the page
@@ -138,6 +139,7 @@ function load(over, options) {
   vm.createContext(context);
   vm.runInContext(VTT, context);
   context.VpVtt = window.VpVtt;
+  vm.runInContext(SYNC, context);
   vm.runInContext(PLAYER, context);
   const reports = () => xhrs.filter((x) => x.url.indexOf(S.report + "?") === 0);
   const later = (fn, ms) => addTimer(fn, ms, false);

@@ -194,6 +194,24 @@ const { check, finish } = runner();
     eq(page.posts(), [{ method: "POST", route: "devices", body: { device: "b-0a0a0a", allowed: false } }]);
   });
 
+  await check("the player: a browser stream's look switches on the live card; a direct one has none", async () => {
+    let s = stream({ mode: "browser", ui: "new" });
+    const page = load({ status: () => status({ stream: s }), "stream/ui": (b) => { s = stream({ mode: "browser", ui: b.ui }); return status({ stream: s }); } });
+    await settle();
+    eq(page.$("uirow").hidden, false);
+    ok(page.$("uis").querySelector('[data-value="new"]').classes.includes("on"));
+    page.$("uis").querySelector('[data-value="new"]').click();
+    await settle();
+    eq(page.posts(), [], "the look it has already: nothing to do");
+    page.$("uis").querySelector('[data-value="old"]').click();
+    await settle();
+    eq(page.posts()[0], { method: "POST", route: "stream/ui", body: { ui: "old" } });
+    ok(page.$("uis").querySelector('[data-value="old"]').classes.includes("on"));
+    const direct = load({ status: status({ stream: stream({ ui: null }) }) });
+    await settle();
+    eq(direct.$("uirow").hidden, true);
+  });
+
   await check("policies: switch, lock and unlock", async () => {
     let s = stream({ policy: "open" });
     const page = load({ status: () => status({ stream: s }), "stream/policy": (b) => { s = stream({ policy: b.policy }); return status({ stream: s }); },

@@ -28,7 +28,12 @@ SYNC = "sync"
 REPORT_HEADER = "X-Vpstream-Player"
 JS = "text/javascript; charset=utf-8"
 # Name under /ALIAS/assets/ -> content type. Only these are served.
-ASSETS = {"player.js": JS, "vtt.js": JS, "hls.min.js": JS}
+ASSETS = {"player.js": JS, "modern.js": JS, "sync.js": JS, "vtt.js": JS, "hls.min.js": JS}
+# The player's look, the stream's choice (see Stream.ui): the touch-friendly one by default
+# (modern.html), or the one of large buttons for a TV's remote (player.html).
+NEW_UI, OLD_UI = "new", "old"
+UIS = (NEW_UI, OLD_UI)
+_TEMPLATES = {NEW_UI: "modern.html", OLD_UI: "player.html"}
 _PLACEHOLDER = re.compile(r"\{\{(TITLE|ASSETS|SETTINGS)\}\}")
 
 
@@ -115,6 +120,7 @@ def settings(
     client: clients.Client | None = None,
     group: dict[str, Any] | None = None,
     own: clients.Client | None = None,
+    ui: str = NEW_UI,
 ) -> dict[str, Any]:
     """What the player page is told about video `number` (1-based) of a stream: its audio
     tracks, the subtitles that are prepared, which of them it starts with, where it starts
@@ -146,6 +152,7 @@ def settings(
         "report": f"/{alias}/{number}/{REPORT}",
         "assets": f"/{alias}/assets/",
         "together": None,
+        "ui": ui,
     }
     if group is not None:
         data["start"] = group.get("position") or 0.0
@@ -169,7 +176,8 @@ def page(data: dict[str, Any]) -> str:
         "ASSETS": escape(str(data.get("assets") or "")),
         "SETTINGS": settings,
     }
-    template = resources.files("vpstream.assets").joinpath("player.html").read_text("utf-8")
+    name = _TEMPLATES.get(str(data.get("ui")), _TEMPLATES[NEW_UI])
+    template = resources.files("vpstream.assets").joinpath(name).read_text("utf-8")
     # In one pass, so a title that holds "{{SETTINGS}}" stays text.
     return _PLACEHOLDER.sub(lambda m: values[m[1]], template)
 

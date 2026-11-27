@@ -224,6 +224,15 @@ def test_unlock_goes_back_to_approval_when_that_was_the_policy(film: Path) -> No
         s.set_policy("unlock")
 
 
+def test_a_record_from_before_the_new_player_keeps_the_old_one(film: Path) -> None:
+    data = make(file=str(film), mode="browser").to_dict()
+    assert data["ui"] == "new"
+    data["entries"] = data["videos"]  # where its prepared versions would be
+    del data["ui"]
+    assert Stream.from_dict(data).ui == "old", "pages open then keep the look they have"
+    assert Stream.from_dict({**data, "ui": "odd"}).ui == "old"
+
+
 def test_a_stream_can_start_locked(film: Path) -> None:
     s = make(file=str(film), policy="locked")
     assert s.policy == "locked" and s.unlocked_policy == "open"

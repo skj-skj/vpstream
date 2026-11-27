@@ -168,6 +168,18 @@ def check_choice(name: str, value: Any, many: bool = False) -> str | None:
     return value
 
 
+def check_ui(value: Any) -> str:
+    """The player's look: new or old (see player.UIS)."""
+    if value in player.UIS:
+        return str(value)
+    raise StreamError(f"not a player look: {value!r}. Use {' or '.join(player.UIS)}")
+
+
+def _viewer_name(value: Any) -> str:
+    """The name a viewer gave themselves on the player (n= in a report), or "" for none."""
+    return clients.name_value(value) if isinstance(value, str) else ""
+
+
 def _always(video: str) -> bool:
     return True
 
@@ -291,6 +303,7 @@ class Stream:
     # Watch together (browser mode): the group every player follows; None when each plays
     # on its own.
     together: Room | None = None
+    ui: str = player.NEW_UI  # browser mode: the player's look (see player.UIS)
 
     def __post_init__(self) -> None:
         if len(self.served) != len(self.videos):
@@ -321,6 +334,7 @@ class Stream:
             "confirmed",
             "http",
             "together",
+            "ui",
         }
         if extra := sorted(set(options) - known):
             raise StreamError(f"unknown option: {', '.join(extra)}")
@@ -344,6 +358,9 @@ class Stream:
                 "watch together lets in only the devices you approve: leave out the policy, "
                 "or give approval"
             )
+        ui = check_ui(options.get("ui") or player.NEW_UI)
+        if options.get("ui") and mode != BROWSER:
+            raise StreamError("the player's look is for browser mode (--mode browser)")
         ttl = _ttl_seconds(options.get("ttl"), https)
         audio = check_choice("audio", options.get("audio"))
         sub = check_choice("sub", options.get("sub"))
@@ -369,11 +386,22 @@ class Stream:
             sub=sub,
             https=https,
             together=Room(videos=len(videos)) if group else None,
+            ui=ui,
         )
         stream.set_policy(policy)
         return stream
 
     # --- changes
+
+    def set_ui(self, ui: Any, now: float) -> None:
+        """Switch the player's look. Open pages see it in the answer to their next report,
+        and load again with it; watching together, they come back with no cooldown."""
+        if self.mode != BROWSER:
+            raise StreamError("the player's look is for browser mode")
+        new = check_ui(ui)
+        if new != self.ui and self.together is not None:
+            self.together.reload(now)
+        self.ui = new
 
     def set_policy(self, policy: str) -> None:
         """Switch the policy. A lock keeps the devices that get in right now."""
@@ -537,6 +565,7 @@ class Stream:
             client=client,
             group=None if room is None else room.state(now),
             own=own,
+            ui=self.ui,
         )
         used = client is not None and client.start_at is not None and client.start_at[0] == number
         if client is not None:
@@ -557,7 +586,7 @@ class Stream:
             device.client = clients.Client()
         commands = device.client.report(number, query, now)
         if self.together is None:
-            data: dict[str, Any] = {"commands": commands}
+            data: dict[str, Any] = {"commands": commands, "ui": self.ui}
             return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
         # The subtitle size is this browser's own: the only command a page of the group gets.
         mine = [c for c in commands if clients.SUB_SIZE in c]
@@ -573,9 +602,15 @@ class Stream:
             duration=clients.read_float(query.get("d")),
             ready=query.get("in") == "1",
             offset=together.read_offset(query.get("o")),
+            name=_viewer_name(query.get("n")),
         )
         outcome = self._act(page, device.id, query, now) if query.get("act") else None
-        data = {**self.group_state(page, now), "outcome": outcome, "commands": mine}
+        data = {
+            **self.group_state(page, now),
+            "outcome": outcome,
+            "commands": mine,
+            "ui": self.ui,
+        }
         return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
 
     def _act(self, page: str, device: str, query: dict[str, str], now: float) -> str:
@@ -660,6 +695,7 @@ class Stream:
             "sub": self.sub,
             "https": self.https,
             "together": None if self.together is None else self.together.to_dict(now),
+            "ui": self.ui,
         }
 
     @classmethod
@@ -721,6 +757,8 @@ class Stream:
                     if data.get("together") is not None and data["mode"] == BROWSER
                     else None
                 ),
+                # A record from before 0.21 has none: the stream keeps the look it had.
+                ui=data["ui"] if data.get("ui") in player.UIS else player.OLD_UI,
             )
         except (KeyError, TypeError, ValueError) as exc:  # StreamError is a ValueError
             raise StreamError(f"the recorded stream is not usable: {exc}") from exc
@@ -741,6 +779,7 @@ class Stream:
             "unlocked_policy": self.unlocked_policy,
             "https": self.https,
             "together": None if self.together is None else self.together.describe(now),
+            "ui": self.ui if self.mode == BROWSER else None,
             "started": self.started,
             "expires": self.expires,
             "seconds_left": None if self.expires is None else max(0.0, self.expires - now),
