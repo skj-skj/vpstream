@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.20.0 (2026-11-27)
+
+### Features
+
+- Subtitle size in browser mode, sized by the video's height
+  ([#35](https://github.com/skj-skj/vpstream/pull/35),
+  [`e7c7498`](https://github.com/skj-skj/vpstream/commit/e7c7498e7f6cf8a6989bd64fe25880d44367238f))
+
+
 ## v0.19.0 (2026-11-26)
 
 ### Features
