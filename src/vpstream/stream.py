@@ -522,9 +522,10 @@ class Stream:
             return Answer(503, "notready", number=number)
         if not wants_html:
             return Answer(302, "redirect", number=number, location=self.master_url(number))
-        client = device.client if device is not None and device.kind == gate.BROWSER else None
-        if room is not None:
-            client = None  # the page follows the group, not what this browser chose
+        own = device.client if device is not None and device.kind == gate.BROWSER else None
+        # Watching together, the page follows the group, not what this browser chose; its
+        # subtitle size stays its own.
+        client = own if room is None else None
         settings = player.settings(
             Path(self.entries[number - 1]),
             alias=self.alias,
@@ -535,6 +536,7 @@ class Stream:
             sub=self.sub,
             client=client,
             group=None if room is None else room.state(now),
+            own=own,
         )
         used = client is not None and client.start_at is not None and client.start_at[0] == number
         if client is not None:
@@ -557,6 +559,8 @@ class Stream:
         if self.together is None:
             data: dict[str, Any] = {"commands": commands}
             return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
+        # The subtitle size is this browser's own: the only command a page of the group gets.
+        mine = [c for c in commands if clients.SUB_SIZE in c]
         room, page = self.together, clients.page_key(query.get("pg"))
         if not page:
             return MISSING
@@ -571,7 +575,7 @@ class Stream:
             offset=together.read_offset(query.get("o")),
         )
         outcome = self._act(page, device.id, query, now) if query.get("act") else None
-        data = {**self.group_state(page, now), "outcome": outcome}
+        data = {**self.group_state(page, now), "outcome": outcome, "commands": mine}
         return Answer(200, "client", number=number, data=data, saves=SAVE_LATER)
 
     def _act(self, page: str, device: str, query: dict[str, str], now: float) -> str:

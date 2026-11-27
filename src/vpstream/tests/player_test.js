@@ -42,6 +42,9 @@ function load(over, options) {
     setTimeout: (fn, ms) => addTimer(fn, ms || 0, false),
     clearTimeout: (id) => { if (timers[id - 1]) { timers[id - 1].live = false; } },
     location: { href: "" },
+    innerWidth: 1000, innerHeight: 400,  // a phone on its side: the video fills the height
+    listeners: {},
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
   };
   // Moves the clock, running each timer that comes due, in time order.
   const tick = (ms) => {
@@ -327,7 +330,7 @@ const { check, finish } = runner();
     let q = exchange(page);
     ok(typeof q.pg === "string" && /^[a-z0-9]{1,16}$/.test(q.pg), "a page id the daemon takes: " + q.pg);
     delete q.pg;
-    eq(q, { p: "1", ack: "0", a: "1", s: "off" }, "no position while loading, no duration yet");
+    eq(q, { p: "1", ack: "0", a: "1", s: "off", z: "m" }, "no position while loading, no duration yet");
     page.video.ready(5400, 600);
     page.video.paused = false;
     q = exchange(page);
@@ -672,7 +675,7 @@ const { check, finish } = runner();
     const page = loadGroup();
     inGroup(page);
     let q = exchange(page, [], 2000);
-    ok(!("act" in q) && !("ack" in q) && !("pk" in q), "status only: " + JSON.stringify(q));
+    ok(!("act" in q) && !("pk" in q) && !("pz" in q), "status only: " + JSON.stringify(q));
     eq([q.p, q.rev, q.in, q.t, q.a, q.s], ["1", "1", "1", "0.0", "1", "off"]);
     press(page, "play");
     q = answer(page, { rev: 2, paused: false });
@@ -1019,6 +1022,96 @@ const { check, finish } = runner();
     eq(text(page.$("note")), "That cannot be done for everyone right now.");
     page.tick(4000);
     eq(text(page.$("note")), "", "and then it goes");
+  });
+
+  await check("subtitle size: a press goes to the next size, drawn by the video's height", async () => {
+    const page = load({ start_sub: 0 });
+    eq(page.$("size").hidden, false, "shown while soft subtitles are on");
+    eq(text(page.$("size")), "Subtitle size: Medium");
+    eq(page.$("overlay").style.fontSize, "18px", "4.5% of a 400 px high video");
+    press(page, "size");
+    eq(text(page.$("size")), "Subtitle size: Large");
+    eq(page.$("overlay").style.fontSize, "22px");
+    press(page, "size");
+    press(page, "size");
+    eq(text(page.$("size")), "Subtitle size: Extra small", "after the largest, the smallest");
+    eq(page.$("overlay").style.fontSize, "12px", "3% of 400 px");
+    const q = exchange(page, [], 300);
+    eq(q.z, "xs");
+    ok("pz" in q, "the press is reported");
+    page.window.innerWidth = 1920;
+    page.window.innerHeight = 1080;
+    press(page, "size");
+    page.window.listeners.resize.forEach((fn) => fn());
+    eq(page.$("overlay").style.fontSize, "41px", "a TV: 3.75% of 1080 px");
+    page.window.innerHeight = 2000;  // a page taller than the video: its black bars do not count
+    page.window.listeners.resize.forEach((fn) => fn());
+    eq(page.$("overlay").style.fontSize, "41px");
+  });
+
+  await check("subtitle size: a phone held upright counts half its height (at most its width), so each size differs", async () => {
+    const page = load({ start_sub: 0 });
+    page.window.innerWidth = 412;
+    page.window.innerHeight = 915;  // the video is 232 px high: half the window, 458, is more; its width less
+    page.window.listeners.resize.forEach((fn) => fn());
+    const seen = [];
+    for (let i = 0; i < 5; i++) {
+      seen.push(page.$("overlay").style.fontSize);
+      press(page, "size");
+    }
+    eq(seen, ["19px", "23px", "29px", "12px", "15px"], "medium, large, extra large, then the smallest");
+    page.window.innerWidth = 400;
+    page.window.innerHeight = 2000;  // very narrow: its width is the floor
+    page.window.listeners.resize.forEach((fn) => fn());
+    eq(page.$("overlay").style.fontSize, "18px", "medium again: 4.5% of 400 px");
+  });
+
+  await check("subtitle size: the button is there only while soft subtitles are on", async () => {
+    const page = load();
+    eq(page.$("size").hidden, true, "subtitles off");
+    press(page, "subs");
+    eq([text(page.$("subs")), page.$("size").hidden], ["Subtitles: English", false]);
+    press(page, "subs");
+    eq([text(page.$("subs")), page.$("size").hidden], ["Subtitles: Signs (burned in)", true], "burned in: drawn into the video");
+    exchange(page, [{ seq: 1, sub: "1-soft" }]);
+    eq(page.$("size").hidden, false, "and when the owner turns soft ones on");
+    page.$("size").focus();
+    exchange(page, [{ seq: 2, sub: "3-burn" }]);
+    eq([page.$("size").hidden, page.document.activeElement === page.$("subs")], [true, true], "a remote on it goes to Subtitles");
+    const burned = [{ id: "3-burn", label: "Signs", number: 3, kind: "burn", url: "/aaa/1/hls/burn/3/master.m3u8" }];
+    eq(load({ subs: burned, start_sub: 0 }).$("size").hidden, true, "only burned-in subtitles");
+    eq(load({ subs: [], start_sub: -1 }).$("size").hidden, true, "no subtitles");
+  });
+
+  await check("subtitle size: the page starts with this browser's, and the owner changes it", async () => {
+    const page = load({ start_sub_size: "xl" });
+    eq(text(page.$("size")), "Subtitle size: Extra large");
+    exchange(page, [{ seq: 1, sub_size: "s" }]);
+    eq(text(page.$("size")), "Subtitle size: Small");
+    eq(load({ start_sub_size: "huge" }).$("overlay").style.fontSize, "18px", "one it does not know: medium");
+    page.tick(2000);  // a report goes out...
+    press(page, "size");  // ...the viewer presses: that wins over a command that crosses it
+    open(page.reports()).pop().respond(200, { commands: [{ seq: 2, sub_size: "xs" }] });
+    eq(text(page.$("size")), "Subtitle size: Medium");
+  });
+
+  await check("together: the subtitle size is this page's own, and works in the cooldown", async () => {
+    const page = loadGroup();
+    page.hls().emit("manifest");
+    page.video.ready(600, 0);
+    eq(page.$("audio").disabled, true, "in its cooldown");
+    eq(page.$("size").disabled, false);
+    press(page, "size");
+    eq(text(page.$("size")), "Subtitle size: Large", "at once, here only");
+    page.tick(600);  // it is at the group's place too: one report says both
+    let q = answer(page, {}, { cooldown: 10 });
+    ok(!("act" in q), "nothing for the group");
+    eq([q.z, "pz" in q], ["l", true]);
+    page.tick(2000);
+    q = answer(page, {}, { commands: [{ seq: 4, sub_size: "xs" }] });
+    eq(text(page.$("size")), "Subtitle size: Extra small", "the owner's command for this browser");
+    page.tick(2000);
+    eq(answer(page, {}).ack, "4", "it says it saw it");
   });
 
   await check("together: a wait that was aborted goes again", async () => {

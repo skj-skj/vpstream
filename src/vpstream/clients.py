@@ -28,7 +28,25 @@ from vpstream.checks import is_digits, is_finite, is_whole
 OFF = "off"
 SOFT, BURN = "soft", "burn"  # subtitles the player draws, or a version with them burned in
 AUDIO, SUB, SEEK = "audio", "sub", "seek"  # the commands, one of each kind at most
-COMMANDS = (AUDIO, SUB, SEEK)
+# How large the player draws subtitles. It is each browser's own, also watching together.
+SUB_SIZE = "sub_size"
+COMMANDS = (AUDIO, SUB, SEEK, SUB_SIZE)
+# Smallest first; player.js and dashboard.js know each (test_clients checks they agree).
+SUB_SIZE_NAMES = {
+    "xs": "extra small",
+    "s": "small",
+    "m": "medium",
+    "l": "large",
+    "xl": "extra large",
+}
+SUB_SIZES = tuple(SUB_SIZE_NAMES)
+DEFAULT_SUB_SIZE = "m"
+# For messages: "xs, s, m, l or xl (extra small to extra large)"
+SUB_SIZE_CHOICES = (
+    f"{', '.join(SUB_SIZES[:-1])} or {SUB_SIZES[-1]} "
+    f"({SUB_SIZE_NAMES[SUB_SIZES[0]]} to {SUB_SIZE_NAMES[SUB_SIZES[-1]]})"
+)
+_SIZE_WORDS = {name.replace(" ", "-"): size for size, name in SUB_SIZE_NAMES.items()}
 MAX_SECONDS = 7 * 24 * 3600.0  # longer than any film; keeps a forged report in bounds
 MAX_NAME = 40
 RESUME_MIN = 10.0  # a position this early starts from the beginning
@@ -36,7 +54,8 @@ RESUME_END = 30.0  # nor does a video watched to this close to its end resume
 ACTIVE_SECONDS = 10.0  # a player reports every 2 s; one quiet this long has gone
 PAGE_SECONDS = ACTIVE_SECONDS  # a page that has not reported this long no longer holds commands
 MAX_PAGES = 4
-PRESSED = {AUDIO: "pa", SUB: "ps", SEEK: "pk"}  # report keys: seconds since that press
+# Report keys: seconds since that press
+PRESSED = {AUDIO: "pa", SUB: "ps", SEEK: "pk", SUB_SIZE: "pz"}
 _PAGE = re.compile(r"[a-z0-9]{1,16}")
 _SUB = re.compile(rf"([1-9][0-9]{{0,3}})-({SOFT}|{BURN})")
 _CLOCK = re.compile(r"(?:(\d{1,3}):)?([0-5]?\d):([0-5]\d)(?:\.\d+)?", re.ASCII)
@@ -70,6 +89,16 @@ def sub_value(value: Any) -> str:
         f"not a subtitle choice: {value!r}. Give off, or a track number with how it is "
         "shown, such as 2-soft or 3-burn"
     )
+
+
+def sub_size_value(value: Any) -> str:
+    """A subtitle size: xs, s, m, l or xl, or its name (extra-small ... extra-large)."""
+    text = value.strip().lower() if isinstance(value, str) else ""
+    text = text.replace(" ", "-").replace("_", "-")
+    text = _SIZE_WORDS.get(text, text)
+    if text in SUB_SIZES:
+        return text
+    raise ClientError(f"not a subtitle size: {value!r}. Give {SUB_SIZE_CHOICES}")
 
 
 def seconds_value(value: Any) -> float:
@@ -134,6 +163,7 @@ class Client:
     paused: bool = True
     audio: int | None = None  # what the player last reported (see audio_value)
     sub: str | None = None  # likewise (see sub_value)
+    sub_size: str | None = None  # likewise (see sub_size_value)
     reported: float = 0.0  # when; 0 for never
     positions: dict[int, float] = field(default_factory=dict)  # video -> where to resume
     start_at: tuple[int, float] | None = None  # (video, seconds): the next load starts there
@@ -170,8 +200,9 @@ class Client:
         return self.positions.get(video, 0.0)
 
     def wanted(self, kind: str) -> Any:
-        """The audio or subtitles a page loaded now starts with: what waits for the player,
-        else what it reported last. The page counts as having seen what waits (`seq`)."""
+        """The audio, subtitles or subtitle size a page loaded now starts with: what waits
+        for the player, else what it reported last. The page counts as having seen what
+        waits (`seq`)."""
         command = self.commands.get(kind)
         return command.value if command is not None else getattr(self, kind)
 
@@ -179,11 +210,11 @@ class Client:
         """Take one report of the player on `video` and answer with the commands for it.
 
         `values` are the query of the report: t (position), d (duration), p (1 when
-        paused), a and s (audio and subtitles, as audio_value and sub_value read them), ack
-        (the last command the page has seen), pg (which page) and pa, ps and pk (seconds
-        since the viewer last pressed audio, subtitles or a seek, after the page's last
-        report). Anything that does not read is left as it was: a report is never refused
-        for one bad value.
+        paused), a, s and z (audio, subtitles and subtitle size, as audio_value, sub_value
+        and sub_size_value read them), ack (the last command the page has seen), pg (which
+        page) and pa, ps, pk and pz (seconds since the viewer last pressed audio,
+        subtitles, a seek or the subtitle size, after the page's last report). Anything that
+        does not read is left as it was: a report is never refused for one bad value.
         """
         self.video = video
         self.reported = now
@@ -203,7 +234,7 @@ class Client:
             self.position = position
             self._remember(video, position)
         self.paused = values.get("p") != "0"
-        for key, read, name in (("a", audio_value, AUDIO), ("s", sub_value, SUB)):
+        for key, read, name in _REPORTED:
             if key in values:
                 with contextlib.suppress(ClientError):
                     setattr(self, name, read(values[key]))
@@ -241,6 +272,7 @@ class Client:
             "paused": self.paused,
             "audio": self.audio,
             "sub": self.sub,
+            "sub_size": self.sub_size,
             "reported": self.reported,
             "positions": {str(n): at for n, at in self.positions.items()},
             "start_at": list(self.start_at) if self.start_at else None,
@@ -273,7 +305,7 @@ class Client:
             value = read_float(data.get(name), limit=None if name == "reported" else MAX_SECONDS)
             setattr(client, name, value or 0.0)
         client.paused = data.get("paused") is not False
-        for name, read in ((AUDIO, audio_value), (SUB, sub_value)):
+        for _, read, name in _REPORTED:
             if data.get(name) is not None:
                 with contextlib.suppress(ClientError):
                     setattr(client, name, read(data[name]))
@@ -296,7 +328,9 @@ class Client:
         return client
 
 
-_READ = {AUDIO: audio_value, SUB: sub_value, SEEK: seconds_value}
+_READ = {AUDIO: audio_value, SUB: sub_value, SEEK: seconds_value, SUB_SIZE: sub_size_value}
+# What a report says the player uses: its key, how it reads, and the field it goes in.
+_REPORTED = (("a", audio_value, AUDIO), ("s", sub_value, SUB), ("z", sub_size_value, SUB_SIZE))
 
 
 def _command(kind: Any, raw: Any, last: int) -> Command | None:

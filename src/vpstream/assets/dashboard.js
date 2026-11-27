@@ -347,6 +347,14 @@
     return String(value);
   }
 
+  // The subtitle sizes (see clients.SUB_SIZES), smallest first.
+  var SUB_SIZES = [["xs", "Extra small"], ["s", "Small"], ["m", "Medium"], ["l", "Large"], ["xl", "Extra large"]];
+
+  function sizeLabel(value) {
+    for (var i = 0; i < SUB_SIZES.length; i++) { if (SUB_SIZES[i][0] === value) { return SUB_SIZES[i][1]; } }
+    return "?";
+  }
+
   function viewerState(c, now) {
     if (!c || !c.reported) { return ["Not playing yet", ""]; }
     if (!c.active) { return ["Left " + duration(now - c.reported) + " ago", "bad"]; }
@@ -359,6 +367,7 @@
     if ("audio" in waits) { chips.push(pill("asked: audio " + trackLabel(menu.audio, waits.audio), "accent")); }
     if ("sub" in waits) { chips.push(pill("asked: subtitles " + trackLabel(menu.subs, waits.sub), "accent")); }
     if ("seek" in waits) { chips.push(pill("asked: seek to " + clock(waits.seek), "accent")); }
+    if ("sub_size" in waits) { chips.push(pill("asked: subtitle size " + sizeLabel(waits.sub_size), "accent")); }
     if (c && c.start_at) { chips.push(pill("next start: video " + c.start_at[0] + " at " + clock(c.start_at[1]), "")); }
     return chips;
   }
@@ -401,7 +410,8 @@
         h("div", { className: "meta" }, [
           video ? h("span", {}, clock(c.position) + (c.duration ? " / " + clock(c.duration) : "")) : null,
           h("span", {}, "Audio: " + trackLabel(menu.audio, c && c.audio)),
-          h("span", {}, "Subtitles: " + trackLabel(menu.subs, c && c.sub))
+          h("span", {}, "Subtitles: " + trackLabel(menu.subs, c && c.sub)),
+          c && c.sub_size ? h("span", {}, "Size: " + sizeLabel(c.sub_size)) : null
         ]),
         chips.length ? h("div", { className: "chips" }, chips) : null
       ])
@@ -480,6 +490,7 @@
     }
     showChoice("caudio", sharedChoice(list, "audio"));
     showChoice("csub", sharedChoice(list, "sub"));
+    showChoice("csubsize", sharedChoice(list, "sub_size"));
   }
 
   // --- watching together: the group's state, and changes for everyone
@@ -749,7 +760,10 @@
     if (!all) { list.forEach(function (d) { ticked[d.id] = true; }); }
     renderViewers(last);
   });
-  [["caudio", "audio", "Audio"], ["csub", "sub", "Subtitles"]].forEach(function (pick) {
+  fill($("csubsize"), [h("option", { value: "" }, "Choose...")].concat(SUB_SIZES.map(function (z) {
+    return h("option", { value: z[0] }, z[1]);
+  })));
+  [["caudio", "audio", "Audio"], ["csub", "sub", "Subtitles"], ["csubsize", "sub_size", "Subtitle size"]].forEach(function (pick) {
     $(pick[0]).addEventListener("change", function () {
       var value = $(pick[0]).value;
       if (!value) { return; }

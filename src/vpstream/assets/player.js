@@ -21,7 +21,10 @@
 // sync: it is not seeked, which would throw away what it has fetched; it plays on where it
 // is, and its Sync button puts it at the group's place, behind or ahead.
 // A page that just joined has a cooldown: its buttons do nothing for a while, but Full
-// screen and Hide.
+// screen, Hide and the subtitle size.
+//
+// The subtitle size is each browser's own, also watching together: a press changes it on
+// this page only, and the owner's command for it comes with the answer to a report.
 (function () {
   "use strict";
   var S = JSON.parse(document.getElementById("settings").textContent);
@@ -43,10 +46,30 @@
   var settled = false;  // the loaded version is at its start position: its time is real
   var seekWhenReady = null;  // a seek asked for before the video could take it
   var seen = S.ack || 0;  // the newest command seen; the page itself carries the older ones
-  var pressed = { audio: 0, sub: 0, seek: 0 };  // counts the viewer's own presses
-  var told = { audio: 0, sub: 0, seek: 0 };  // ...as far as a report that arrived said
-  var pressedAt = { audio: 0, sub: 0, seek: 0 };  // when the last one was (Date.now)
-  var KEYS = { audio: "pa", sub: "ps", seek: "pk" };  // see clients.PRESSED
+  var KEYS = { audio: "pa", sub: "ps", seek: "pk", size: "pz" };  // see clients.PRESSED
+  // Each kind of press (the keys of KEYS) to a number, or a copy of `from`.
+  function counts(from) {
+    var out = {};
+    for (var kind in KEYS) { out[kind] = from ? from[kind] : 0; }
+    return out;
+  }
+  var pressed = counts();  // counts the viewer's own presses
+  var told = counts();  // ...as far as a report that arrived said
+  var pressedAt = counts();  // when the last one was (Date.now)
+  // Subtitle sizes (see clients.SUB_SIZES): the height of a letter as a share of the
+  // video's height as shown, so a phone and a TV show the same, as a player app does. A
+  // video much lower than the window (a phone held upright) counts as FLOOR of the
+  // window's height, so its subtitles stay readable and each size still differs; never
+  // more than the window's width, so a narrow window still fits a line.
+  var SIZES = [
+    { id: "xs", label: "Extra small", share: 0.03 },
+    { id: "s", label: "Small", share: 0.0375 },
+    { id: "m", label: "Medium", share: 0.045 },
+    { id: "l", label: "Large", share: 0.055 },
+    { id: "xl", label: "Extra large", share: 0.07 }
+  ];
+  var FLOOR = 0.5;
+  var size = 2;  // an index into SIZES
   var page = Math.random().toString(36).slice(2, 10) || "p";
   var asking = null;  // the report on its way
   var soonTimer = null;
@@ -205,6 +228,7 @@
     if (master !== current) { load(master, video.currentTime, !video.paused); }
     if (choice && choice.kind === "soft") { fetchCues(choice.url, subLoad); }
     $("subs").textContent = subLabel();
+    showSize();
   }
 
   function fetchCues(url, ticket) {
@@ -239,6 +263,48 @@
   }
 
   function subValue() { return sub < 0 ? "off" : S.subs[sub].id; }
+
+  // --- subtitle size: each press goes to the next, from the largest back to the smallest
+
+  // The height the sizes are a share of: the video as shown (the window, less the black
+  // bars of its shape), but FLOOR of the window's height (at most its width) at least.
+  function sizeHeight() {
+    var w = window.innerWidth || 0, h = window.innerHeight || 0;
+    if (!w || !h) { return 0; }
+    var shape = video.videoWidth && video.videoHeight ? video.videoHeight / video.videoWidth : 9 / 16;
+    return Math.max(Math.min(FLOOR * h, w), Math.min(h, w * shape));
+  }
+
+  function applySize() {
+    var height = sizeHeight();
+    if (height) { $("overlay").style.fontSize = Math.round(SIZES[size].share * height) + "px"; }
+    $("size").textContent = "Subtitle size: " + SIZES[size].label;
+  }
+
+  // The size button is there while soft subtitles are on: only those does the page draw.
+  // A remote that was on it goes to Subtitles, so the arrows still start from somewhere.
+  function showSize() {
+    var choice = sub >= 0 ? S.subs[sub] : null;
+    var hide = !(choice && choice.kind === "soft");
+    if (hide && document.activeElement === $("size")) { $("subs").focus(); }
+    $("size").hidden = hide;
+  }
+
+  function nextSize() {
+    size = (size + 1) % SIZES.length;
+    applySize();
+  }
+
+  // A size by its id. False for one that this page does not know.
+  function setSize(id) {
+    for (var i = 0; i < SIZES.length; i++) {
+      if (SIZES[i].id === id) {
+        if (i !== size) { size = i; applySize(); }
+        return true;
+      }
+    }
+    return false;
+  }
 
   function draw() {
     var text = cues.length ? window.VpVtt.at(cues, video.currentTime) : "";
@@ -328,13 +394,13 @@
     if (settled) { q.push("t=" + Math.max(0, video.currentTime).toFixed(1)); }
     if (isFinite(video.duration) && video.duration > 0) { q.push("d=" + video.duration.toFixed(1)); }
     if (S.audio.length) { q.push("a=" + audioValue()); }
-    q.push("s=" + encodeURIComponent(subValue()));
+    q.push("s=" + encodeURIComponent(subValue()), "z=" + SIZES[size].id);
     return q.join("&");
   }
 
   function report() {
     if (asking || !S.report) { return; }
-    var before = { audio: pressed.audio, sub: pressed.sub, seek: pressed.seek };
+    var before = counts(pressed);
     var x = new XMLHttpRequest();
     var sent = Date.now(), act = T ? acts[0] : null, said = joined;
     asking = x;
@@ -347,7 +413,7 @@
       told = before;  // the daemon knows of these presses now
       var answer;
       try { answer = JSON.parse(x.responseText); } catch (e) { return; }
-      if (T) { return answered(answer, sent, act, said); }
+      if (T) { return answered(answer, sent, act, said, before); }
       obey(answer.commands || [], before);
     };
     x.onerror = x.ontimeout = x.onabort = function () { asking = null; };
@@ -370,6 +436,7 @@
       if ("audio" in c && pressed.audio === before.audio) { changed = setAudio(c.audio) || changed; }
       if ("sub" in c && pressed.sub === before.sub) { changed = setSub(c.sub) || changed; }
       if ("seek" in c && pressed.seek === before.seek) { seekTo(c.seek); changed = true; }
+      if ("sub_size" in c && pressed.size === before.size) { changed = setSize(c.sub_size) || changed; }
     }
     if (newest > seen) {
       seen = newest;
@@ -381,7 +448,11 @@
   // --- watching together
 
   function groupQuery() {
-    var q = ["p=" + (video.paused ? 1 : 0), "pg=" + page, "rev=" + (group ? group.rev : 0)];
+    var q = ["p=" + (video.paused ? 1 : 0), "pg=" + page, "rev=" + (group ? group.rev : 0), "ack=" + seen];
+    // Only the subtitle size is pressed here (see mark): the rest goes to the group.
+    if (pressed.size !== told.size) {
+      q.push("pz=" + Math.max(0, (Date.now() - pressedAt.size) / 1000).toFixed(1));
+    }
     if (settled) { q.push("t=" + Math.max(0, video.currentTime).toFixed(1)); }
     // How far it is off the group, as it measures it: the daemon cannot tell how long the
     // report took to get there (see together.Room.report).
@@ -391,7 +462,7 @@
     }
     if (isFinite(video.duration) && video.duration > 0) { q.push("d=" + video.duration.toFixed(1)); }
     if (S.audio.length) { q.push("a=" + audioValue()); }
-    q.push("s=" + encodeURIComponent(subValue()));
+    q.push("s=" + encodeURIComponent(subValue()), "z=" + SIZES[size].id);
     if (joined) { q.push("in=1"); }
     if (acts.length) {
       q.push("act=" + acts[0].act, "id=" + acts[0].id);
@@ -400,8 +471,10 @@
     return q.join("&");
   }
 
-  // The answer to a report: the group's state, and what became of the press it carried.
-  function answered(answer, sent, act, said) {
+  // The answer to a report: the group's state, what became of the press it carried, and
+  // the owner's commands for this browser (its subtitle size).
+  function answered(answer, sent, act, said, before) {
+    obey(answer.commands || [], before);
     if (act && acts[0] === act) {
       acts.shift();
       if (answer.outcome === "queued") { showHint(HINTS[act.act]); }
@@ -749,6 +822,7 @@
     if (T) { return S.subs.length && propose("sub", nextSubValue()); }
     press("sub", nextSub)();
   });
+  on("size", press("size", nextSize));  // this page's own, also watching together
   on("episodes", function () {
     if (T) { return locked() || showList(); }
     window.location.href = S.index;
@@ -796,6 +870,7 @@
   });
   document.addEventListener("fullscreenchange", fullLabel);
   document.addEventListener("webkitfullscreenchange", fullLabel);
+  if (window.addEventListener) { window.addEventListener("resize", applySize); }
 
   ["timeupdate", "play", "pause", "seeked", "durationchange"].forEach(function (name) {
     video.addEventListener(name, update);
@@ -808,6 +883,7 @@
     if (T && group && !groupPaused() && settled && !video.ended && !pausingHere) { held = true; note(); }
   });
   video.addEventListener("loadedmetadata", function () {
+    applySize();  // the video's shape is known now
     // After the start position of the load is set, so the seek asked for since wins.
     window.setTimeout(function () {
       if (seekWhenReady !== null) { var t = seekWhenReady; seekWhenReady = null; seekTo(t); }
@@ -828,6 +904,9 @@
   $("next").hidden = !S.next;
   $("audio").hidden = !S.audio.length;
   $("subs").hidden = !S.subs.length;
+  showSize();
+  setSize(S.start_sub_size);
+  applySize();
   $("full").hidden = !canFull();
   $("audio").textContent = audioLabel();
   $("subs").textContent = subLabel();
