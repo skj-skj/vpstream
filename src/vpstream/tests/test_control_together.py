@@ -153,6 +153,25 @@ def test_per_device_commands_are_refused_but_a_name_is_not(rig: Group) -> None:
     assert rig.device("tv").name == "Living room"
 
 
+def test_the_subtitle_size_is_each_devices_own(rig: Group) -> None:
+    rig.start_together()
+    rig.join("tv", "t1")
+    rig.join("phone", "p1")
+    assert rig.page("tv")["start_sub_size"] == "m"
+    info = rig.ask("phone", sub_size="s")
+    phone = next(d for d in info["stream"]["devices"] if d["id"] == rig.device("phone").id)
+    assert phone["client"]["pending"] == {"sub_size": "s"}
+    assert rig.say("tv", "t1")["commands"] == [], "not the other devices"
+    answer = rig.say("phone", "p1", z="m")
+    assert answer["commands"] == [{"seq": 1, "sub_size": "s"}] and "together" in answer
+    assert rig.page("phone")["start_sub_size"] == "s", "a page loaded now starts with it"
+    rig.say("phone", "p1", z="s", ack=1)
+    assert rig.say("phone", "p1", ack=1)["commands"] == []
+    assert rig.page("tv")["start_sub_size"] == "m"
+    rig.say("tv", "t1", z="xl")  # the TV's own button
+    assert rig.page("tv")["start_sub_size"] == "xl"
+
+
 def test_the_owner_changes_it_for_everyone(rig: Group) -> None:
     rig.start_together(folder=True)
     info = rig.control.together({"action": "play"})

@@ -464,6 +464,7 @@ const { check, finish } = runner();
       devices.filter((d) => body.devices.includes(d.id)).forEach((d) => {
         if ("audio" in body) { d.client.pending.audio = body.audio === "off" ? 0 : Number(body.audio); }
         if ("sub" in body) { d.client.pending.sub = body.sub; }
+        if ("sub_size" in body) { d.client.pending.sub_size = body.sub_size; }
       });
       return answer();
     };
@@ -495,6 +496,12 @@ const { check, finish } = runner();
     page.refresh();
     await settle();
     eq([page.$("caudio").value, page.$("csub").value], ["2", "3-burn"], "and through the next status");
+    page.$("csubsize").value = "xl";
+    page.$("csubsize").dispatch("change");
+    await settle();
+    eq(page.posts()[2].body, { sub_size: "xl", devices: ["b-000001", "b-000002"] });
+    ok(text(page.$("clients")).includes("asked: subtitle size Extra large"), "it shows what waits");
+    eq(page.$("csubsize").value, "xl");
     // Ticking only the TV shows what the TV plays with.
     Array.from(page.$("clients").querySelectorAll(".item"))[1].click();
     eq(text(page.$("tickedcount")), "1 ticked");
@@ -508,20 +515,20 @@ const { check, finish } = runner();
     page.$("csub").blur();
     Array.from(page.$("clients").querySelectorAll(".item"))[1].click();  // both again
     page.$("seeknow").click();
-    eq(page.posts().length, 2, "no position, nothing sent");
+    eq(page.posts().length, 3, "no position, nothing sent");
     eq(page.$("cat").getAttribute("inputmode"), null, "a keyboard that has a colon (Android's number pad has none)");
     eq(page.$("cat").getAttribute("type"), "text");
     page.$("cat").value = " 10:10 ";
     page.$("seeknow").click();
     await settle();
-    eq(page.posts()[2].body, { seek: "10:10", devices: ["b-000001", "b-000002"] });
+    eq(page.posts()[3].body, { seek: "10:10", devices: ["b-000001", "b-000002"] });
     page.$("startat").click();
     await settle();
-    eq(page.posts()[3].body, { start_at: "10:10", devices: ["b-000001", "b-000002"] });
+    eq(page.posts()[4].body, { start_at: "10:10", devices: ["b-000001", "b-000002"] });
     page.$("cname").value = "Kids";
     page.$("rename").click();
     await settle();
-    eq(page.posts()[4].body, { name: "Kids", devices: ["b-000001", "b-000002"] });
+    eq(page.posts()[5].body, { name: "Kids", devices: ["b-000001", "b-000002"] });
     // The ticks stay through the next status.
     eq(page.$("clients").querySelectorAll(".item.ticked").length, 2);
   });

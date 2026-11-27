@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from vpstream import certificate, local, platform, text
+from vpstream import certificate, clients, local, platform, text
 
 
 def dashboard_line(dash: dict[str, Any]) -> str:
@@ -112,6 +112,11 @@ def _clock(seconds: float) -> str:
     return f"{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"{rest // 60}:{rest % 60:02d}"
 
 
+def _size(value: Any) -> str:
+    """A subtitle size by its name, such as "extra large"; "-" for none."""
+    return clients.SUB_SIZE_NAMES.get(value, str(value)) if value else "-"
+
+
 def _track(menu: list[dict[str, Any]], value: Any) -> str:
     """A client's audio or subtitle choice by its label in the video's menu."""
     if value is None:
@@ -127,7 +132,7 @@ def format_clients(stream: dict[str, Any], now: float) -> str:
     if not browsers:
         return "No browser has opened the stream yet."
     videos = stream.get("videos") or []
-    rows = [["DEVICE", "STATE", "VIDEO", "AT", "AUDIO", "SUBTITLES", "WAITING", "NAME"]]
+    rows = [["DEVICE", "STATE", "VIDEO", "AT", "AUDIO", "SUBTITLES", "SIZE", "WAITING", "NAME"]]
     for d in browsers:
         c = d.get("client") or {}
         number = int(c.get("video") or 0)
@@ -143,7 +148,10 @@ def format_clients(stream: dict[str, Any], now: float) -> str:
         at = _clock(float(c.get("position") or 0))
         if c.get("duration"):
             at += f" / {_clock(float(c['duration']))}"
-        waiting = [f"{k} {v}" for k, v in sorted((c.get("pending") or {}).items())]
+        waiting = [
+            f"subtitle size {_size(v)}" if k == clients.SUB_SIZE else f"{k} {v}"
+            for k, v in sorted((c.get("pending") or {}).items())
+        ]
         if c.get("start_at"):
             video, seconds = c["start_at"]
             waiting.append(f"start {video} at {_clock(float(seconds))}")
@@ -155,6 +163,7 @@ def format_clients(stream: dict[str, Any], now: float) -> str:
                 at if number else "-",
                 _track(menu.get("audio", []), c.get("audio")),
                 _track(menu.get("subs", []), c.get("sub")),
+                _size(c.get("sub_size")),
                 ", ".join(waiting) or "-",
                 _device_name(d)[:40],
             ]

@@ -114,11 +114,14 @@ def settings(
     sub: str | None,
     client: clients.Client | None = None,
     group: dict[str, Any] | None = None,
+    own: clients.Client | None = None,
 ) -> dict[str, Any]:
     """What the player page is told about video `number` (1-based) of a stream: its audio
     tracks, the subtitles that are prepared, which of them it starts with, where it starts
     and where it reports (see `clients`). Watching together, `group` is the group's state
-    (see `together`): the page starts with it, and follows it."""
+    (see `together`): the page starts with it, and follows it. `own` is this browser's
+    record even then: the subtitle size is its own (by default `client`)."""
+    own = own or client
     hls = f"/{alias}/{number}/hls/"
     audio_tracks, options = choices(entry, hls)
     start_audio, start_sub = _start_tracks(audio_tracks, options, audio, sub, client, group)
@@ -136,8 +139,10 @@ def settings(
         "start_audio": start_audio,
         "subs": [option for _, option in options],
         "start_sub": start_sub,
+        "start_sub_size": (own.wanted(clients.SUB_SIZE) if own else None)
+        or clients.DEFAULT_SUB_SIZE,
         "start": client.start_position(number, consume=False) if client else 0.0,
-        "ack": client.seq if client else 0,
+        "ack": own.seq if own else 0,
         "report": f"/{alias}/{number}/{REPORT}",
         "assets": f"/{alias}/assets/",
         "together": None,

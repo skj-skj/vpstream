@@ -195,9 +195,10 @@ vpstream start --file /srv/media/film.mkv --mode browser --audio eng --sub 1
   subtitles become soft subtitles; image and ASS subtitles are burned in (one encode each). It
   asks first when it would take longer than the film (`--yes`); `--no-wait` queues it and
   returns.
-- **Player:** play, ±10 s, audio, subtitles, episodes, next, full screen. `vpstream clients`
-  (or the dashboard's Viewers tab) changes the audio, subtitles or position of a TV from
-  afar.
+- **Player:** play, ±10 s, audio, subtitles, subtitle size (extra small to extra large),
+  episodes, next, full screen. `vpstream clients` (or the dashboard's Viewers tab) changes
+  the audio, subtitles, subtitle size or position of a TV from afar. The subtitle size is
+  each device's own, also when watching together, and is there for soft subtitles only.
 - **Remove:** `vpstream prepared rm PATH`, `--stale` or `--all`.
 
 #### Watch together
@@ -247,7 +248,7 @@ vpstream devices lock            # nobody new from now on
 | `vpstream prepare --file F` / `--dir D` | Prepares for browser mode (`--sub 1,3` / `eng` / `none`, `--yes`, `--no-wait`) |
 | `vpstream prepared [rm PATH \| --stale \| --all \| cancel]` | Lists, removes or cancels prepared versions |
 | `vpstream devices [enable\|disable DEVICE \| lock \| unlock]` | Who asked for the stream, and who gets in |
-| `vpstream clients [set DEVICE... \| --all]` | Browser mode: what each TV plays; `--audio`, `--sub`, `--seek`, `--start-at` (`--video` in a folder), `--name` |
+| `vpstream clients [set DEVICE... \| --all]` | Browser mode: what each TV plays; `--audio`, `--sub`, `--seek`, `--sub-size`, `--start-at` (`--video` in a folder), `--name` |
 | `vpstream together [status \| play \| pause \| seek T \| skip S \| audio N \| sub S \| video N]` | Watching together: the group's state, or a change for everyone |
 | `vpstream alias NAME` | Changes the name in the address |
 | `vpstream doctor` | Checks this machine, and says how to fix what is missing |

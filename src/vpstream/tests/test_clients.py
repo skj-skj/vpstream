@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -30,6 +32,46 @@ def test_subtitle_choices(value: str, spec: str) -> None:
 def test_subtitle_choices_that_do_not_read(value: Any) -> None:
     with pytest.raises(ClientError, match="not a subtitle choice"):
         clients.sub_value(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "size"),
+    [("xs", "xs"), (" M ", "m"), ("Extra large", "xl"), ("extra_small", "xs"), ("small", "s")],
+)
+def test_subtitle_sizes(value: str, size: str) -> None:
+    assert clients.sub_size_value(value) == size
+
+
+@pytest.mark.parametrize("value", ["xxl", "", "medium-ish", 2, None, True])
+def test_subtitle_sizes_that_do_not_read(value: Any) -> None:
+    with pytest.raises(ClientError, match="not a subtitle size"):
+        clients.sub_size_value(value)
+
+
+def test_the_pages_know_the_same_subtitle_sizes() -> None:
+    assets = Path(clients.__file__).parent / "assets"
+    player = (assets / "player.js").read_text(encoding="utf-8")
+    dashboard = (assets / "dashboard.js").read_text(encoding="utf-8")
+    block = re.search(r"var SIZES = \[(.*?)\];", player, re.S)
+    listed = re.search(r"var SUB_SIZES = \[(.*)\];", dashboard)
+    assert block and listed
+    assert tuple(re.findall(r'id: "(\w+)"', block[1])) == clients.SUB_SIZES
+    assert tuple(re.findall(r'\["(\w+)", "', listed[1])) == clients.SUB_SIZES
+    names = re.findall(r'\["\w+", "([^"]+)"\]', listed[1])
+    assert [n.lower() for n in names] == list(clients.SUB_SIZE_NAMES.values())
+
+
+def test_the_subtitle_size_is_reported_commanded_and_kept() -> None:
+    client = Client()
+    report(client, z="l", ack="0")
+    assert client.sub_size == "l" and client.wanted(clients.SUB_SIZE) == "l"
+    client.command(clients.SUB_SIZE, "xs", now=50.0)
+    assert client.wanted(clients.SUB_SIZE) == "xs", "a page loaded now starts with it"
+    assert report(client, z="huge") == [{"seq": 1, "sub_size": "xs"}]
+    assert client.sub_size == "l", "one that does not read keeps what was there"
+    assert Client.from_dict(client.to_dict(), videos=1) == client
+    # The viewer pressed the size button after the owner asked: the press wins.
+    assert report(client, pz="10") == [] and not client.commands
 
 
 @pytest.mark.parametrize(

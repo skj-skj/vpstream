@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from vpstream import __version__, gate, platform, stream, text, together
+from vpstream import __version__, clients, gate, platform, stream, text, together
 from vpstream.net import url_host
 from vpstream.show import (
     ACTIVE,
@@ -519,7 +519,7 @@ def cmd_devices(args: argparse.Namespace) -> int:
     return _show(info, devices=True)
 
 
-CLIENT_CHANGES = ("audio", "sub", "seek", "start_at", "name")
+CLIENT_CHANGES = ("audio", "sub", "seek", "sub_size", "start_at", "name")
 
 
 def cmd_clients(args: argparse.Namespace) -> int:
@@ -532,7 +532,9 @@ def cmd_clients(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {k: getattr(args, k) for k in CLIENT_CHANGES}
     payload = {k: v for k, v in payload.items() if v is not None}
     if not payload:
-        return _error("say what to change: --audio, --sub, --seek, --start-at or --name", 2)
+        return _error(
+            "say what to change: --audio, --sub, --seek, --sub-size, --start-at or --name", 2
+        )
     if args.video is not None:
         payload["video"] = args.video
     payload.update({"all": True} if args.all else {"devices": args.devices})
@@ -1015,8 +1017,8 @@ def build_parser(windows: bool = False) -> argparse.ArgumentParser:
     dv.set_defaults(func=cmd_devices)
     cl = sub.add_parser(
         "clients",
-        help="list the browsers of a browser stream, or set their audio, subtitles, position "
-        "or name",
+        help="list the browsers of a browser stream, or set their audio, subtitles, "
+        "subtitle size, position or name",
     )
     cl.add_argument("action", nargs="?", choices=["list", "set"], help="(default list)")
     cl.add_argument("devices", nargs="*", metavar="DEVICE", help="for set: device ids")
@@ -1024,6 +1026,12 @@ def build_parser(windows: bool = False) -> argparse.ArgumentParser:
     cl.add_argument("--audio", help="an audio track number, or off")
     cl.add_argument("--sub", help="subtitles such as 2-soft or 3-burn, or off")
     cl.add_argument("--seek", help="jump there now: seconds, or a time such as 10:10")
+    cl.add_argument(
+        "--sub-size",
+        dest="sub_size",
+        help=f"how large its subtitles are: {clients.SUB_SIZE_CHOICES}; its own, also "
+        "watching together",
+    )
     cl.add_argument(
         "--start-at", dest="start_at", help="where the next load of the video starts, once"
     )

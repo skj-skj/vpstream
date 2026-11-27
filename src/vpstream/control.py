@@ -515,9 +515,10 @@ class Control:
 
     def set_clients(self, options: dict[str, Any]) -> dict[str, Any]:
         """Change the browsers of a browser stream: `devices` (ids) or `all`, and any of
-        `audio`, `sub`, `seek` (commands to their players), `start_at` (where the next load
-        of `video`, by default the one each is on, starts) and `name`."""
-        known = {"devices", "all", "audio", "sub", "seek", "start_at", "video", "name"}
+        `audio`, `sub`, `seek`, `sub_size` (commands to their players), `start_at` (where the
+        next load of `video`, by default the one each is on, starts) and `name`. Watching
+        together, only `sub_size` and `name`: the rest is the group's."""
+        known = {"devices", "all", "audio", "sub", "seek", "sub_size", "start_at", "video", "name"}
         if extra := sorted(set(options) - known):
             raise StreamError(f"unknown option: {', '.join(extra)}")
         try:
@@ -529,14 +530,14 @@ class Control:
         except clients.ClientError as exc:
             raise StreamError(str(exc)) from exc
         if not values:
-            raise StreamError("say what to change: audio, sub, seek, start_at or name")
+            raise StreamError("say what to change: audio, sub, seek, sub_size, start_at or name")
         if options.get("video") is not None and "start_at" not in values:
             raise StreamError("a video goes with start_at: it says which video starts there")
 
         def change(stream: Stream) -> None:
             if stream.mode != BROWSER and set(values) - {"name"}:
                 raise StreamError("players are told what to do in browser mode only")
-            if stream.together is not None and set(values) - {"name"}:
+            if stream.together is not None and set(values) - {"name", clients.SUB_SIZE}:
                 raise StreamError(
                     "watching together, every player does what the group does: change it "
                     "for everyone with vpstream together (or on the dashboard)"
@@ -881,6 +882,7 @@ _CLIENT_VALUES: dict[str, Callable[[Any], Any]] = {
     "audio": clients.audio_value,
     "sub": clients.sub_value,
     "seek": clients.seconds_value,
+    "sub_size": clients.sub_size_value,
     "start_at": clients.seconds_value,
     "name": clients.name_value,
 }

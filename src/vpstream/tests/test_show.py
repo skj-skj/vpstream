@@ -192,9 +192,10 @@ def test_format_clients() -> None:
                 "client": {
                     **client,
                     "sub": "3-burn",
+                    "sub_size": "l",
                     "reported": 99,
                     "active": True,
-                    "pending": {"seek": 3723},
+                    "pending": {"seek": 3723, "sub_size": "xs"},
                     "start_at": [1, 65],
                 },
             },
@@ -214,7 +215,8 @@ def test_format_clients() -> None:
     tv = lines[1]
     assert tv.startswith("b-000001") and "playing" in tv and "10:10 / 1:30:00" in tv
     assert "Japanese" in tv and "Signs (burned in)" in tv and "Living-room TV" in tv
-    assert "seek 3723, start 1 at 1:05" in tv
+    assert " large " in tv, "the subtitle size by its name"
+    assert "seek 3723, subtitle size extra small, start 1 at 1:05" in tv
     assert "gone 1m 30s ago" in lines[2] and "off" in lines[2] and lines[2].endswith("Chrome")
     assert "not playing yet" in lines[3]
     assert "waiting WL" in lines[4]
