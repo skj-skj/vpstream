@@ -225,8 +225,10 @@ def test_the_lan_dashboard_goes_with_the_address_and_comes_back(
     port = run.daemon.config.dashboard_port
     _wait(lambda: run.daemon.lan_address, "lan up", run)
     here.on = False  # the Wi-Fi is turned off
-    _wait(lambda: run.daemon.lan_address is None, "lan closed", run)
-    assert any("is closed: the address is gone" in m for m in run.log)
+    # The daemon says so once the dashboard is closed, after it forgets the address: wait
+    # for that, so the closing has really happened.
+    _wait(lambda: any("is closed: the address is gone" in m for m in run.log), "lan closed", run)
+    assert run.daemon.lan_address is None
     with pytest.raises(OSError):
         _get(LAN, port)
     assert _get("127.0.0.1", port, "/api/v1/status")[0] == 200  # this device's stays
