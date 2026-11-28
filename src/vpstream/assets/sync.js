@@ -21,8 +21,9 @@
 // its join) puts it at the group's place by a seek. A page that drifts more than
 // T.tolerance off by itself (its video waits for data on a slow link) is out of sync: it is
 // not seeked, which would throw away what it has fetched; it plays on where it is, and Sync
-// puts it at the group's place, behind or ahead. A page that just joined has a cooldown:
-// its controls for the group do nothing for a while.
+// puts it at the group's place, behind or ahead. A page that watches alone is never out of
+// sync: the daemon takes the group where it is (see together.Room.report). A page that just
+// joined has a cooldown: its controls for the group do nothing for a while.
 //
 // The subtitle size is each browser's own, also watching together: a press changes it on
 // this page only, and the owner's command for it comes with the answer to a report.
@@ -64,10 +65,12 @@
   // viewer's own name, "" for none; setAudio(number), setSub(id), setSize(id) false where
   // this video has no such; seekTo(t); showControls(); update() the time and the play
   // button; render() what status() says. Optional: changed(state, first) after a new state
-  // of the group, joined() once this page is at the group's place.
+  // of the group, joined() once this page is at the group's place, outOfSync() when Sync
+  // comes up (by default the controls show, with it).
   window.VpSync = function (S, video, ui, look) {
     var hooks = { changed: nothing, joined: nothing, name: function () { return ""; } };
     for (var key in look) { hooks[key] = look[key]; }
+    hooks.outOfSync = hooks.outOfSync || hooks.showControls;
     var T = S.together || null;
     var SYNC_OFF = (T && T.tolerance) || 2;  // seconds off the group: out of sync
     var page = Math.random().toString(36).slice(2, 10) || "p";
@@ -96,7 +99,8 @@
     var landed = false;  // a seek aimed ahead is done: if it was quicker, it waits there
     var early = false;  // paused ahead of the group, for it to come
     var behind = false;  // out of sync: Sync shows
-    var pausingHere = false;  // a pause of this page's own is being made
+    var alone = false;  // no other page watches: the group goes where this page is
+    var pausingHere = false;  // a pause of this page's own, till its pause event
 
     // --- reporting to the daemon, and doing what the owner asks
 
@@ -255,6 +259,7 @@
       var s = answer && answer.together;
       if (!s || typeof s.rev !== "number") { return; }
       if (group && (s.rev < group.rev || (s.rev === group.rev && s.now < group.now))) { return; }
+      alone = answer.alone === true;
       var trip = Math.max(0, (Date.now() - sent) / 1000 - (answer.waited || 0));
       var fresh = !group || s.rev !== group.rev;
       var first = !group;
@@ -311,6 +316,7 @@
       var far = Math.abs(off);
       var free = Date.now() - lastSeek >= SEEK_GAP_MS;
       var out = false;
+      var stays = false;  // alone, it stays where it is
       var ahead = landed && off > RATE_OFF && off <= MAX_SEEK_COST + 1;
       landed = false;
       if (groupPaused()) {
@@ -339,6 +345,10 @@
           setRate(1);
           catchUp(to, true);
         }
+      } else if (alone && !follow) {
+        // Nobody else watches: where this page is, the group goes. No seek, no Sync.
+        stays = true;
+        setRate(1);
       } else if (far > SYNC_OFF) {
         setRate(1);
         if (!follow) {
@@ -358,16 +368,16 @@
         }
       }
       // Not while a seek runs: the video's time is already the seek's, but it is not there.
-      // Out of sync after its seeks to join, it is in all the same: its cooldown starts.
+      // Out of sync after its seeks to join, or alone, it is in all the same: its cooldown starts.
       if (!joined && !video.seeking && (groupPaused() || !video.paused) &&
-          (Math.abs(video.currentTime - to) < JOINED_OFF || (out && free))) {
+          (Math.abs(video.currentTime - to) < JOINED_OFF || ((out || stays) && free))) {
         joined = true;
         reportSoon();
         hooks.joined();
       }
       if (out !== behind) {
         behind = out;
-        if (behind) { hooks.showControls(); }
+        if (behind) { hooks.outOfSync(); }
         hooks.render();
       }
     }
@@ -384,11 +394,12 @@
       hooks.render();
     }
 
-    // A pause of this page's own: not one the browser made (see browserPaused).
+    // A pause of this page's own: not one the browser made (see pauseKind). Browsers send
+    // the pause event later, not from pause(): the mark waits for it.
     function pauseHere() {
+      if (video.paused) { return; }
       pausingHere = true;
       video.pause();
-      pausingHere = false;
     }
 
     // Whether the group is paused, as far as this page goes: a press of pause here pauses it
@@ -470,10 +481,15 @@
       startHere: startHere,
       seekDone: seekDone,
       hint: showHint,
-      // A pause the browser made by itself while the group plays (the tab put away, the
-      // headphones out): not this page's own, nor one at the end.
-      browserPaused: function () {
-        return !!(T && group && !groupPaused() && hooks.settled() && !video.ended && !pausingHere);
+      // Once for each pause event, while the group plays: "own" for this page's own pause,
+      // a moment's wait for the group; "browser" for one the browser made by itself (the
+      // tab put away, the headphones out); "" for any other, and at the end.
+      pauseKind: function () {
+        var own = pausingHere;
+        pausingHere = false;
+        if (!T || !group || groupPaused() || video.ended) { return ""; }
+        if (own) { return "own"; }
+        return hooks.settled() ? "browser" : "";
       },
       hold: function () { held = true; hooks.render(); },
       // The join button: a tap starts this page where the browser would not by itself.

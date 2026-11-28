@@ -603,6 +603,7 @@ class Stream:
             ready=query.get("in") == "1",
             offset=together.read_offset(query.get("o")),
             name=_viewer_name(query.get("n")),
+            rev=clients.read_int(query.get("rev")),
         )
         outcome = self._act(page, device.id, query, now) if query.get("act") else None
         data = {
@@ -657,10 +658,15 @@ class Stream:
         return Answer(200, "hold", number=number, data=data)
 
     def group_state(self, page: str, now: float) -> dict[str, Any]:
-        """What a page of the group is told: the group's state and its own cooldown."""
+        """What a page of the group is told: the group's state, its own cooldown, and
+        whether it watches alone (the group then goes where it is)."""
         room = self.together
         assert room is not None
-        return {"together": room.state(now), "cooldown": round(room.cooldown(page, now), 2)}
+        return {
+            "together": room.state(now),
+            "cooldown": round(room.cooldown(page, now), 2),
+            "alone": room.alone(page, now),
+        }
 
     def _prepared_file(self, number: int, rel: str) -> Answer:
         found = prepared.served_file(Path(self.entries[number - 1]), rel)

@@ -300,6 +300,45 @@ def test_a_page_that_reports_often_keeps_its_place() -> None:
     assert room.cooldown("a", T0 + 80) == 0
 
 
+def playing(*pages: str) -> Room:
+    """A group that plays from 100 s at T0, with the pages joined and quiet since."""
+    room = joined(Room(), *pages)
+    room._set(T0, 100.0, paused=False)
+    return room
+
+
+def test_a_page_alone_takes_the_group_where_it_is() -> None:
+    room = playing("a")
+    assert room.alone("a", T0)
+    # Its video waited 5 s for data: alone, it is not out of sync with nobody.
+    room.report("a", "b-a", T0 + 10, 1, 105.0, 600.0, True, offset=-5.0, rev=room.rev)
+    assert room.live(T0 + 10) == pytest.approx(105.0) and room.pages["a"].drift == 0.0
+    rev = room.rev
+    room.report("a", "b-a", T0 + 12, 1, 107.0, 600.0, True, offset=0.2, rev=room.rev)
+    assert room.live(T0 + 12) == pytest.approx(107.0), "a little off is left to it"
+    assert room.rev == rev, "no change for the pages to follow: the answers say where it is"
+
+
+@pytest.mark.parametrize(
+    "case", ["another watches", "an older rev", "not joined", "paused", "a window is open"]
+)
+def test_only_a_page_alone_in_the_groups_place_takes_it_along(case: str) -> None:
+    room = playing("a", "b")
+    # b reported a moment ago, or long enough ago that it has gone.
+    room.pages["b"].seen = T0 + 9 if case == "another watches" else T0 - 1
+    rev = room.rev - 1 if case == "an older rev" else room.rev
+    if case == "not joined":
+        room.pages["a"].joined = None
+    if case == "paused":
+        room._set(T0, 100.0, paused=True)
+    if case == "a window is open":
+        room.window_until = T0 + 11
+    room.report("a", "b-a", T0 + 10, 1, 105.0, 600.0, True, offset=-5.0, rev=rev)
+    expected = 100.0 if case == "paused" else 110.0
+    assert room.live(T0 + 10) == pytest.approx(expected)
+    assert room.pages["a"].drift == pytest.approx(-5.0)
+
+
 def test_the_longest_duration_any_page_reports_is_the_videos() -> None:
     room = joined(Room(), "a", "b", duration=600.0)
     room.report("b", "b-b", T0, 1, 0.0, 599.4, True)  # a version that ends a little sooner

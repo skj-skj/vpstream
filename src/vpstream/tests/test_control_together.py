@@ -366,6 +366,23 @@ def test_the_drift_shown_is_the_one_the_page_measured(rig: Group) -> None:
     assert pages["t1"]["out_of_sync"] is False
 
 
+def test_a_page_alone_takes_the_group_where_it_is(rig: Group) -> None:
+    """Watching alone, a video that waited for data is not out of sync with nobody: the
+    group goes where the page is. With another page watching, it stays."""
+    rig.start_together()
+    rig.join("tv", "t1")
+    answer = rig.say("tv", "t1", act="play", id="t1-1", t=0)
+    assert answer["alone"] is True
+    rev = rig.room().rev
+    rig.clock.now += 10
+    answer = rig.say("tv", "t1", t=6, o="-4.00", rev=rev)
+    assert answer["together"]["position"] == pytest.approx(6.0) and answer["together"]["rev"] == rev
+    rig.join("phone", "p1")  # joins where the tv is
+    assert rig.say("phone", "p1", t=16, o="0", rev=rev)["alone"] is False
+    answer = rig.say("tv", "t1", t=12, o="-4.00", rev=rev)
+    assert answer["alone"] is False and answer["together"]["position"] == pytest.approx(16.0)
+
+
 def test_a_page_further_off_than_the_tolerance_is_shown_out_of_sync(rig: Group) -> None:
     rig.start_together()
     rig.join("tv", "t1")

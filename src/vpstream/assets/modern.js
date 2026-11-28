@@ -71,6 +71,7 @@
     showControls: showControls,
     update: update,
     render: note,
+    outOfSync: function () {},  // Sync shows by itself, over the video (see note)
     changed: announce,
     joined: function () {
       if (!name && !asked()) { toast("Tap the face at the top to tell the others your name.", ""); }
@@ -1009,17 +1010,20 @@
   ["timeupdate", "play", "pause", "seeked", "durationchange", "progress"].forEach(function (kind) {
     video.addEventListener(kind, update);
   });
-  video.addEventListener("pause", showControls);
   video.addEventListener("seeked", core.seekDone);
   video.addEventListener("waiting", function () { flag(document.body, "waiting", true); });
   ["playing", "canplay", "seeked", "pause"].forEach(function (kind) {
     video.addEventListener(kind, function () { flag(document.body, "waiting", false); });
   });
-  // A pause the browser made by itself while the group plays (the tab put away, the
-  // headphones out): this page waits for a tap, and the group goes on. In an iPhone's own
-  // full screen, its buttons are the viewer's: a pause there is a press for the group.
+  // A pause shows the controls, but not this page's own wait for the group. One the browser
+  // made by itself while the group plays (the tab put away, the headphones out): this page
+  // waits for a tap, and the group goes on. In an iPhone's own full screen, its buttons are
+  // the viewer's: a pause there is a press for the group.
   video.addEventListener("pause", function () {
-    if (!core.browserPaused()) { return; }
+    var kind = core.pauseKind();
+    if (kind === "own") { return; }
+    showControls();
+    if (kind !== "browser") { return; }
     if (nativeFull() && !core.locked()) { core.propose("pause"); return; }
     core.hold();
   });

@@ -222,10 +222,15 @@ class Room:
         ready: bool = False,
         offset: float | None = None,
         name: str = "",
+        rev: int | None = None,
     ) -> Page:
         """Take one report of a page: the video it is on, where it is, how long the video is,
         and whether it is loaded and at the group's place (`ready`). Its cooldown starts
         with the first report that says so.
+
+        A page that watches alone, in the group's place, takes the group with it: one whose
+        video waits for data is not out of sync with nobody. Its `offset` must be from the
+        group as it is now (`rev`), with no change on its way.
 
         Its drift is the `offset` it measured itself, where the report has one: `position`
         is where it was when the report left, and over the internet the group has moved on
@@ -244,10 +249,28 @@ class Room:
             known.drift = position - self.live(now)
         else:
             known.drift = None
+        if (
+            known.drift is not None
+            and offset is not None
+            and abs(offset) > SAME_SECONDS
+            and known.joined is not None
+            and rev == self.rev
+            and not self.paused
+            and self.window_until is None
+            and self.alone(page, now)
+        ):
+            self._set(now, self.live(now) + offset)
+            known.drift = 0.0
         if ready and known.joined is None and video == self.video:
             known.joined = now - (COOLDOWN_SECONDS if known.follows else 0.0)
         self.tick(now)  # a duration learned now may be the end
         return known
+
+    def alone(self, page: str, now: float) -> bool:
+        """Whether `page` is the only page that watches now (see clients.ACTIVE_SECONDS)."""
+        return not any(
+            key != page and now - p.seen <= clients.ACTIVE_SECONDS for key, p in self.pages.items()
+        )
 
     def cooldown(self, page: str, now: float) -> float:
         """The seconds before this page's presses count. A page that has not said it is

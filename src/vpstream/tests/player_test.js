@@ -66,7 +66,8 @@ function load(over, options) {
     currentTime: 0, duration: NaN, paused: true, muted: false, readyState: 0, played: 0,
     audioTracks: null,
     play() { this.paused = false; this.played += 1; this.dispatch("play"); return Promise.resolve(); },
-    pause() { this.paused = true; this.dispatch("pause"); },
+    // A browser sends the pause event later, not from pause().
+    pause() { this.paused = true; Promise.resolve().then(() => this.dispatch("pause")); },
     canPlayType: () => (options && options.native ? "maybe" : ""),
   });
   // The video has loaded its start and plays from `at`, as a browser would say it.
@@ -225,7 +226,7 @@ async function netRun(o) {
   const clock = () => page.now();
   const live = (t) => g.paused ? g.position : g.position + (t - g.anchor) / 1000;
   const state = (t) => ({ rev: g.rev, video: 1, position: Math.round(live(t) * 1000) / 1000, paused: g.paused,
-    audio: null, sub: null, duration: g.duration, window: 0, changed_by: "", changed_ago: null, now: 5000 + t / 1000 });
+    audio: null, sub: null, duration: g.duration, window: 0, changed_by: "", changed_ago: null, now: serverNow + t / 1000 });
   const delay = (base) => Math.max(1, base + (rng() * 2 - 1) * (o.jitter || 0));
   let held = [];
   const early = [];  // sent while the page loads
@@ -290,7 +291,7 @@ async function netRun(o) {
     page.tick(100);
     await settle();
     off.push({ t: t + 100, off: pos - live(clock()), rate: v.playbackRate, paused: v.paused, locked: page.$("play").disabled,
-      sync: !page.$("sync").hidden, seeks });
+      sync: !page.$("sync").hidden, join: !page.$("join").hidden, seeks });
   }
   const open = off.find((s) => !s.locked);
   return { off, seeks, rates, unlocked: open ? open.t / 1000 : Infinity };
@@ -633,7 +634,9 @@ const { check, finish } = runner();
         ok(!at(30000).paused, `${name}, seed ${seed}: it plays on`);
         // A seek takes half to one and a half of seekMs: where it lands, its rate does the rest.
         ok(settledBy(run, 35000, 1) < 3, `${name}, seed ${seed}: Sync puts it back (${settledBy(run, 35000, 1)} s)`);
-        ok(worst(run, 45000) < 0.31 && !at(40000).sync, `${name}, seed ${seed}: and near (${worst(run, 45000)})`);
+        // Up to 0.1 s more on the uneven link: a page cannot see that its answers come faster
+        // than its reports go, and it stops its rate once it measures 0.2 s off.
+        ok(worst(run, 45000) < 0.4 && !at(40000).sync, `${name}, seed ${seed}: and near (${worst(run, 45000)})`);
       }
     }
   });
@@ -647,6 +650,9 @@ const { check, finish } = runner();
         seekMsFrom: [[45000, 200]], stalls: [[10000, 8000], [35000, 8000]], presses: [[25000, sync], [50000, sync]] });
       ok(settledBy(run, 50000, 0.3) < 6, `seed ${seed}: with the group after ${settledBy(run, 50000, 0.3)} s`);
       ok(!run.off.find((x) => x.t >= 60000).sync, `seed ${seed}: in sync`);
+      // Its wait there is its own pause: no tap is asked for (browsers send the event late).
+      ok(run.off.some((x) => x.t > 50000 && x.paused), `seed ${seed}: it waited`);
+      ok(!run.off.some((x) => x.join), `seed ${seed}: and no join button`);
     }
   });
 
@@ -711,6 +717,7 @@ const { check, finish } = runner();
     await settle();
     ok(!page.video.paused, "it plays with the group");
     page.video.pause();  // the headphones came out
+    await settle();
     for (let i = 0; i < 3; i++) { ok(!("act" in exchange(page, [], 2000)), "nothing for the group"); }
     eq(page.$("join").hidden, false, "this page waits for a tap");
     eq(page.video.played, 1, "and does not start again by itself");
