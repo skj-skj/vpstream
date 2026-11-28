@@ -173,6 +173,10 @@
   var zen = false;
   var tilePage = 0;
   var tileEls = {};  // page -> its tile element
+  var TRAY = ["hangup", "mic", "camera", "flip", "zen", "prevpage", "pageno", "nextpage"];
+  var ICON_W = 46, PAGENO_W = 40;
+  var AHEAD = 6;  // seconds of film loaded ahead, below which the call has no video  // what a button and the page number take in the row
+  var squeezed = false, trayOpen = false;  // the call's buttons in the tray; the tray open
   var ownSeekAt = -Infinity;  // when this page last seeked the video itself
 
   function $(id) { return document.getElementById(id); }
@@ -477,7 +481,7 @@
 
   function controlsShown() { return has(document.body, "controls"); }
 
-  function busy() { return !$("sheet").hidden || !$("namebox").hidden || !$("list").hidden || dragging !== null; }
+  function busy() { return trayOpen || !$("sheet").hidden || !$("namebox").hidden || !$("list").hidden || dragging !== null; }
 
   function showControls() {
     flag(document.body, "controls", true);
@@ -520,6 +524,11 @@
 
   function tap(event) {
     if (!$("join").hidden) { return; }
+    if (trayOpen) {
+      openTray(false);
+      showControls();
+      return;
+    }
     var where = zone(event);
     var now = Date.now();
     if (where !== 0 && ((where === lastZone && now - lastTap < DOUBLE_MS) ||
@@ -943,8 +952,40 @@
     $("camera").setAttribute("aria-label", call.cam() ? "Turn the camera off" : "Turn the camera on");
     flag($("zen"), "on", zen);
     $("zen").setAttribute("aria-label", zen ? "Show the tiles" : "Hide the tiles");
+    fitRow();
     drawRing();
     drawTiles();
+  }
+
+  // The call's buttons go in the row while it has room for them; on a narrower screen (a
+  // phone held upright) they go in a tray above it, behind the three dots, so Audio and
+  // subtitles, Rotate and Full screen always show.
+  function fitRow() {
+    var row = $("row"), tray = $("tray");
+    var used = $("clock").offsetWidth || 0, extra = 0;
+    for (var i = 0; i < row.childNodes.length; i++) {
+      var el = row.childNodes[i];
+      if (el.nodeName === "BUTTON" && !el.hidden && el.id !== "more" && TRAY.indexOf(el.id) < 0) { used += ICON_W; }
+    }
+    TRAY.forEach(function (id) { if (!$(id).hidden) { extra += id === "pageno" ? PAGENO_W : ICON_W; } });
+    var room = row.clientWidth || 0;  // 0: not laid out yet
+    var squeeze = call.inCall() && room > 0 && used + extra > room;
+    if (squeeze !== squeezed) {
+      squeezed = squeeze;
+      TRAY.forEach(function (id) {
+        if (squeeze) { tray.appendChild($(id)); } else { row.insertBefore($(id), $("next")); }
+      });
+    }
+    if (!squeeze) { trayOpen = false; }
+    $("more").hidden = !squeeze;
+    tray.hidden = !trayOpen;
+    flag($("more"), "on", trayOpen);
+    $("more").setAttribute("aria-expanded", trayOpen ? "true" : "false");
+  }
+
+  function openTray(on) {
+    trayOpen = on;
+    fitRow();
   }
 
   // "Asha started a call. Ravi is in it too. The video plays on."
@@ -1055,6 +1096,20 @@
     for (var page in tileEls) { if (!keep[page]) { dropTile(page); } }
     var seen = document.hidden ? [] : shown.filter(function (t) { return !t.mine; });
     call.show(seen.map(function (t) { return t.page; }));
+  }
+
+  // Whether the film plays and is short of data: it waits, or has less than AHEAD seconds
+  // loaded ahead of it, short of the end. A paused film is not (the group talks).
+  function short() {
+    if (video.paused || video.ended) { return false; }
+    if (video.readyState < 3) { return true; }
+    var at = video.currentTime, b = video.buffered;
+    for (var i = 0; b && i < b.length; i++) {
+      if (b.start(i) <= at + 0.5 && at < b.end(i)) {
+        return b.end(i) - at < AHEAD && b.end(i) < (video.duration || Infinity) - 0.5;
+      }
+    }
+    return true;
   }
 
   function turnTiles(by) {
@@ -1189,6 +1244,7 @@
   });
   if (call) {
     on("call", joinCall);
+    on("more", function () { openTray(!trayOpen); });
     on("hangup", call.end);
     on("mic", call.toggleMic);
     on("camera", call.toggleCam);
@@ -1198,9 +1254,11 @@
     on("nextpage", function () { turnTiles(1); });
     on("ringjoin", joinCall);
     on("ringlater", call.dismiss);
-    // The film comes first: while it waits for data, no video of the call goes out.
-    video.addEventListener("waiting", function () { call.film(true); });
-    video.addEventListener("playing", function () { call.film(false); });
+    // The film comes first: while it is short of data, the call has no video.
+    ["waiting", "playing", "pause", "progress"].forEach(function (kind) {
+      video.addEventListener(kind, function () { call.film(short()); });
+    });
+    window.setInterval(function () { call.film(short()); }, 1000);
     document.addEventListener("visibilitychange", drawCall);
   }
   on("full", toggleFull);

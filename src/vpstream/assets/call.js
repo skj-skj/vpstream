@@ -8,15 +8,18 @@
 // server; there is no TURN, so a pair whose networks will not meet gets "Could not connect"
 // on its tile, and the rest of the call goes on.
 //
-// The film comes first: the camera is small (CAMERA), each page gets at most MAX_BITRATE of
-// it, and only a page that shows this one's tile on screen gets the video at all (the
-// tiles it `sees`: on its page of tiles, not in Zen, the tab in front). While the film
-// waits for data, no video goes out, only sound. Nothing happens until someone presses
-// Call: no camera, no connection.
+// The film comes first. The camera is small (CAMERA: a tile is small), each page gets at
+// most MAX_BITRATE of it, and the call's packets go at the lowest priority. Only a page
+// that shows this one's tile on screen gets the video at all (the tiles it `sees`: on its
+// page of tiles, not in Zen, the tab in front). While the film is short of data (it waits,
+// or has little ahead: modern.js says which), no video goes out and none comes in, only
+// sound, until it has played a while again. Nothing happens until someone presses Call:
+// no camera, no connection.
 //
 // A page joins with its camera on and its mic off. Leaving, the camera and the mic are let
 // go. A page loaded again (another video for the group, or the other look) takes its old
-// place in the call, as it was, without a ring.
+// place in the call, as it was, without a ring. A tab that closes or loads again tells
+// the daemon it went away, so the others stop showing it at once (together.Call.away).
 //
 // The page makes one with window.VpCall(S.together.call, page, look): `look` has changed()
 // (draw the call again), name() the viewer's own name, said(text) a notice, and audioBox
@@ -24,9 +27,10 @@
 (function () {
   "use strict";
   var ICE = [{ urls: "stun:stun.cloudflare.com:3478" }, { urls: "stun:stun.l.google.com:19302" }];
-  var FPS = 15;
-  var MAX_BITRATE = 200000;  // bits a second, of video, to each page that shows this one
-  var CAMERA = { width: { ideal: 320, max: 640 }, height: { ideal: 240, max: 480 },
+  var FPS = 12;
+  var MAX_BITRATE = 100000;  // bits a second, of video, to each page that shows this one
+  var SOUND_BITRATE = 32000;  // ...and of sound, to each page
+  var CAMERA = { width: { ideal: 240, max: 320 }, height: { ideal: 180, max: 240 },
     frameRate: { ideal: FPS, max: FPS } };
   var SOUND = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   var GATHER_MS = 3000;  // an offer or answer goes with the addresses found by then
@@ -53,7 +57,8 @@
     for (var k in look) { hooks[k] = look[k]; }
     var id = "";  // the call that runs, "" for none
     var version = -1;
-    var members = [];  // as the daemon last said, in the order they joined
+    var members = [];  // as the daemon last said, in the order they joined; not those away
+    var everyone = [];  // ...and those too (see again)
     var by = "", starter = "";  // who started it: their name, and their page
     var ring = false;
     var after = 0;  // the newest message taken
@@ -72,10 +77,15 @@
 
     function media() { return window.navigator.mediaDevices; }
 
-    function member(page) {
-      for (var i = 0; i < members.length; i++) { if (members[i].page === page) { return members[i]; } }
+    function member(page, list) {
+      list = list || members;
+      for (var i = 0; i < list.length; i++) { if (list[i].page === page) { return list[i]; } }
       return null;
     }
+
+    // The tiles this page shows, as the daemon is told: none while the film is short of
+    // data, so the others send it no video.
+    function shown() { return filmWaits ? [] : sees; }
 
     // --- talking to the daemon
 
@@ -107,7 +117,7 @@
       if (stateTimer) { window.clearTimeout(stateTimer); }
       stateTimer = window.setTimeout(function () {
         stateTimer = null;
-        if (inCall) { post({ "do": "state", mic: mic, cam: cam, sees: sees }); }
+        if (inCall) { post({ "do": "state", mic: mic, cam: cam, sees: shown() }); }
       }, STATE_MS);
     }
 
@@ -181,15 +191,20 @@
       return !!(cam && video && !filmWaits && m && m.sees && m.sees.indexOf(me) >= 0);
     }
 
-    // At most MAX_BITRATE and FPS, and keep the frame rate when the link is short.
-    function cap(sender) {
+    // At most MAX_BITRATE and FPS of video, SOUND_BITRATE of sound, both after anything
+    // else of this browser (the film). A short link costs the video its sharpness first.
+    function cap(sender, isVideo) {
       if (!sender || !sender.getParameters || !sender.setParameters) { return; }
       try {
         var p = sender.getParameters();
         if (!p.encodings || !p.encodings.length) { p.encodings = [{}]; }
-        p.encodings[0].maxBitrate = MAX_BITRATE;
-        p.encodings[0].maxFramerate = FPS;
-        p.degradationPreference = "maintain-framerate";
+        var e = p.encodings[0];
+        e.maxBitrate = isVideo ? MAX_BITRATE : SOUND_BITRATE;
+        e.priority = e.networkPriority = isVideo ? "very-low" : "low";
+        if (isVideo) {
+          e.maxFramerate = FPS;
+          p.degradationPreference = "maintain-framerate";
+        }
         var done = sender.setParameters(p);
         if (done && done["catch"]) { done["catch"](nothing); }
       } catch (e) { /* not yet negotiated: done once it connects */ }
@@ -264,7 +279,8 @@
           peer.state = "connected";
           peer.tries = 0;
           if (peer.timer) { window.clearTimeout(peer.timer); peer.timer = null; }
-          cap(peer.videoSender);
+          cap(peer.audioSender, false);
+          cap(peer.videoSender, true);
         } else if (s === "failed") {
           failed(peer, pc);
         }
@@ -412,7 +428,8 @@
       }
       if (s.v >= version) {
         version = s.v;
-        members = s.members || [];
+        everyone = s.members || [];
+        members = everyone.filter(function (m) { return !m.away || m.page === me; });
         by = s.by || "";
         starter = s.starter || "";
         ring = !!s.ring;
@@ -436,7 +453,7 @@
     function again() {
       var place = kept();
       forget();
-      if (!place || place.id !== id || !member(place.page)) { return; }
+      if (!place || place.id !== id || !member(place.page, everyone)) { return; }
       mic = !!place.mic;
       cam = place.cam !== false;
       join(place.page);
@@ -447,7 +464,7 @@
       joining = true;
       hooks.changed();
       getMedia(function () {
-        post({ "do": "start", was: was || "", mic: mic, cam: cam, sees: sees }, function (a) {
+        post({ "do": "start", was: was || "", mic: mic, cam: cam, sees: shown() }, function (a) {
           joining = false;
           var ok = a && (a.outcome === "started" || a.outcome === "joined");
           if (!ok) {
@@ -462,8 +479,27 @@
       });
     }
 
+    // The tab closes or loads again: the others stop showing it now, not when it has been
+    // quiet a while. (keepalive: the post goes on after the page has gone.)
+    function goodbye() {
+      if (!window.fetch) { return; }
+      try {
+        var sent = window.fetch(url, { method: "POST", keepalive: true,
+          headers: { "X-Vpstream-Player": "1", "Content-Type": "application/json" },
+          body: JSON.stringify({ "do": "away", pg: me, cm: after }) });
+        if (sent && sent["catch"]) { sent["catch"](nothing); }
+      } catch (e) { /* it leaves when quiet */ }
+    }
+
     if (window.addEventListener) {
-      window.addEventListener("pagehide", function () { if (inCall) { remember(); } });
+      window.addEventListener("pagehide", function () {
+        if (inCall) { remember(); goodbye(); }
+      });
+      // The browser kept the page and shows it again (Back): it is back in the call, if
+      // nothing took its place.
+      window.addEventListener("pageshow", function (event) {
+        if (event && event.persisted && inCall) { forget(); tellSoon(); }
+      });
     }
 
     return {
@@ -532,16 +568,22 @@
         sees = next;
         if (inCall) { tellSoon(); }
       },
-      // The film waits for data: no video goes out until it has played a while again.
+      // The film is short of data: no video goes out or comes in until it has had enough
+      // for a while again.
       film: function (waits) {
         if (waits) {
           if (resumeTimer) { window.clearTimeout(resumeTimer); resumeTimer = null; }
-          if (!filmWaits) { filmWaits = true; steerAll(); }
+          if (!filmWaits) {
+            filmWaits = true;
+            steerAll();
+            if (inCall) { tellSoon(); }
+          }
         } else if (filmWaits && !resumeTimer) {
           resumeTimer = window.setTimeout(function () {
             resumeTimer = null;
             filmWaits = false;
             steerAll();
+            if (inCall) { tellSoon(); }
           }, RESUME_MS);
         }
       },

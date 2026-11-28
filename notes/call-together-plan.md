@@ -227,3 +227,17 @@ on first join), the mic muted by default on join, and `noiseSuppression` and
    with no switch. Nothing starts until someone presses Call.
 8. **Camera off:** the tile stays and shows the person's initial, with their name and the
    mute icon.
+
+## After the first try on the phones (2026-11-28)
+
+1. **Narrow screens:** on a phone held upright, the call's buttons pushed Audio and
+   subtitles, Rotate and Full screen off the row. When the row has no room for them, the
+   call's buttons go into a tray above it, behind a three-dots button.
+2. **Smaller, and after the film:** the camera is 240×180 at 12 fps, at most 100 kbps of
+   video and 32 kbps of sound to each page, with the lowest priority for the call's packets.
+   A page whose film is short of data (it waits, or has under 6 s loaded ahead while it
+   plays) stops sending video and asks for none, until it has had enough for 3 s.
+3. **A reload showed a ghost:** for a few seconds the call showed the old page, connecting,
+   beside the new one. A page that closes or loads again now says it went away (a keepalive
+   post); the others stop showing it at once, and it leaves after 10 s unless its next page
+   takes its place.

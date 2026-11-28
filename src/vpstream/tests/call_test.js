@@ -100,7 +100,7 @@ function daemon() {
     if (body.do === "start") {
       const was = d.members.findIndex((m) => m.page === body.was);
       if (was >= 0) {
-        d.members[was] = Object.assign({}, d.members[was], { page: body.pg });
+        d.members[was] = Object.assign({}, d.members[was], { page: body.pg, away: false });
         outcome = "joined";
       } else if (!d.id) {
         d.calls += 1; d.id = String(d.calls); d.starter = body.pg; d.left = new Set();
@@ -121,6 +121,10 @@ function daemon() {
       d.v += 1;
     } else if (body.do === "state" && at >= 0) {
       Object.assign(d.members[at], { mic: body.mic, cam: body.cam, sees: body.sees });
+      d.v += 1;
+      outcome = "applied";
+    } else if (body.do === "away" && at >= 0) {
+      d.members[at].away = true;
       d.v += 1;
       outcome = "applied";
     } else if (body.do === "send") {
@@ -144,6 +148,7 @@ function browser(name, d, options) {
   const asked = [];  // what getUserMedia was asked for
   const tracks = [];  // ...and what it gave
   const session = o.session || {};
+  const fetches = [];
   const window = {
     isSecureContext: o.secure !== false,
     RTCPeerConnection: o.noRtc ? undefined : peerClass(world),
@@ -157,6 +162,12 @@ function browser(name, d, options) {
     },
     listeners: {},
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    // A post that goes on after the page has gone (keepalive).
+    fetch: (url, init) => {
+      fetches.push(Object.assign({ url }, init));
+      d.handle(JSON.parse(init.body));
+      return Promise.resolve({});
+    },
     navigator: {
       mediaDevices: {
         getUserMedia(c) {
@@ -214,7 +225,7 @@ function browser(name, d, options) {
   const call = window.VpCall("/aaa/1/call", name, { said: (t) => said.push(t), name: () => d.names[name] || "", audioBox });
   // Whatever the daemon says of the call now, as the next wait or report would bring it.
   const poll = () => call.update(d.state(name));
-  return { call, world, asked, tracks, posts, said, tick, poll, audioBox, window, session, pc: () => world.pcs[world.pcs.length - 1] };
+  return { call, world, asked, tracks, posts, fetches, said, tick, poll, audioBox, window, session, pc: () => world.pcs[world.pcs.length - 1] };
 }
 
 const posted = (b, what) => b.posts.map((x) => x.body).filter((body) => body.do === what);
@@ -260,7 +271,7 @@ const { check, finish } = runner();
     eq(a.call.joining(), true);
     await settle();
     const ask = a.asked[0];
-    eq([ask.video.width.ideal, ask.video.height.ideal, ask.video.frameRate.max, ask.video.facingMode], [320, 240, 15, "user"]);
+    eq([ask.video.width.ideal, ask.video.height.ideal, ask.video.frameRate.max, ask.video.facingMode], [240, 180, 12, "user"]);
     ok(ask.audio.echoCancellation && ask.audio.noiseSuppression, "the film's echo is taken out");
     const mic = a.tracks.find((t) => t.kind === "audio");
     eq(mic.enabled, false, "muted");
@@ -314,10 +325,13 @@ const { check, finish } = runner();
     eq(posted(b, "send").length, 1, "the answer goes once they are found");
   });
 
-  await check("video is capped, and goes only to a page that shows this one's tile", async () => {
+  await check("video and sound are capped, at the lowest priority; video goes only to a page that shows this one's tile", async () => {
     const { d, a, b } = await pair();
-    const set = sender(a, "video").set;
-    eq([set.encodings[0].maxBitrate, set.encodings[0].maxFramerate, set.degradationPreference], [200000, 15, "maintain-framerate"]);
+    const set = sender(a, "video").set, e = set.encodings[0];
+    eq([e.maxBitrate, e.maxFramerate, set.degradationPreference], [100000, 12, "maintain-framerate"]);
+    eq([e.priority, e.networkPriority], ["very-low", "very-low"], "after the film");
+    const sound = sender(a, "audio").set.encodings[0];
+    eq([sound.maxBitrate, sound.priority, sound.maxFramerate], [32000, "low", undefined]);
     ok(sender(a, "audio").track && sender(a, "audio").track.kind === "audio", "the sound goes");
     eq(sender(a, "video").track, null, "b shows no tile of a yet");
     b.call.show(["a"]);
@@ -330,6 +344,26 @@ const { check, finish } = runner();
     a.poll();
     eq(sender(a, "video").track, null);
     eq(d.members.length, 2);
+  });
+
+  await check("while the film is short of data no video comes in, until it has had enough for 3 s", async () => {
+    const { a, b } = await pair();
+    b.call.show(["a"]); b.tick(300); await settle(); a.poll();
+    eq(sender(a, "video").track.kind, "video");
+    b.call.film(true);
+    b.tick(300); await settle();
+    eq(posted(b, "state").pop().sees, [], "b says it shows no tile");
+    a.poll();
+    eq(sender(a, "video").track, null, "so a sends b no video");
+    ok(sender(a, "audio").track, "the sound goes on");
+    b.call.show(["a"]);  // drawn again meanwhile
+    b.call.film(false);
+    b.tick(3000); await settle();
+    eq(posted(b, "state").pop().sees, [], "not yet");
+    b.tick(300); await settle();
+    eq(posted(b, "state").pop().sees, ["a"]);
+    a.poll();
+    eq(sender(a, "video").track.kind, "video");
   });
 
   await check("while the film waits for data no video goes out, until it has played 3 s", async () => {
@@ -443,8 +477,15 @@ const { check, finish } = runner();
     b.poll();
     ok(b.call.ringing(), "a new call: b is rung, though it ended the last");
     b.call.start(); await settle();
-    // b's tab loads the next video: the page that comes takes b's place.
+    // b's tab loads the next video: the page that comes takes b's place. Until then the
+    // others do not show b.
     b.window.listeners.pagehide.forEach((fn) => fn());
+    eq(b.fetches.map((f) => [f.method, f.keepalive, JSON.parse(f.body).do, f.headers["X-Vpstream-Player"]]),
+      [["POST", true, "away", "1"]]);
+    a.poll();
+    eq(a.call.tiles().map((t) => t.page), ["a"], "b is away");
+    eq(a.call.count(), 1);
+    ok(a.world.pcs.every((pc) => pc.closed), "a's connection to b closed");
     const again = browser("b2", d, { session: b.session });
     again.poll();
     ok(!again.call.ringing(), "no ring: it is coming back");
@@ -453,6 +494,8 @@ const { check, finish } = runner();
     eq([start.was, start.cam, start.mic], ["b", true, false]);
     eq(d.members.map((m) => m.page), ["a", "b2"]);
     ok(again.call.inCall());
+    a.poll();
+    eq(a.call.tiles().map((t) => [t.page, t.state]), [["b2", "connecting"], ["a", "connected"]], "never three");
     const late = browser("c", d);
     late.poll();
     ok(late.call.ringing(), "who opens the stream while it runs is rung");

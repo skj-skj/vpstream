@@ -683,11 +683,12 @@ class Stream:
 
     def _call(self, device: gate.Device | None, body: dict[str, Any], now: float) -> Answer:
         """What a page of the group did in the call (`do`): "start" (Call, or Join, with
-        its `mic` and `cam`; `was` its page before it loaded again), "end",
-        "state" (its `mic`, `cam`, and the tiles it `sees`), or "send" a message (`kind`,
-        `data`) to another page in it (`to`). Only a page the group knows, of an approved
-        browser, on a stream over HTTPS: the camera works nowhere else. The answer is the
-        call as this page sees it, with its messages newer than `cm`."""
+        its `mic` and `cam`; `was` its page before it loaded again), "end", "state" (its
+        `mic`, `cam`, and the tiles it `sees`), "away" (its tab closed or loads again: see
+        Call.away), or "send" a message (`kind`, `data`) to another page in it (`to`).
+        Only a page the group knows, of an approved browser, on a stream over HTTPS: the
+        camera works nowhere else. The answer is the call as this page sees it, with its
+        messages newer than `cm`."""
         room = self.together
         if room is None or not self.https or device is None or device.kind != gate.BROWSER:
             return MISSING
@@ -710,6 +711,8 @@ class Stream:
         elif what == "state":
             ok = call.set_state(page, body.get("mic"), body.get("cam"), body.get("sees"))
             outcome = together.APPLIED if ok else together.NOT_IN
+        elif what == "away":
+            outcome = together.APPLIED if call.away(page, now) else together.NOT_IN
         elif what == "send":
             ok = call.send(page, body.get("to"), body.get("kind"), body.get("data"), now)
             outcome = together.SENT if ok else together.REFUSED

@@ -610,3 +610,36 @@ def test_call_a_page_loaded_again_takes_its_old_place() -> None:
     joined(room, "x")
     assert room.start_call("x", T0 + 2, was="b") == together.JOINED
     assert list(room.call.members) == ["a2", "b", "c", "x"]
+
+
+def test_call_a_page_that_went_away_is_not_shown_and_soon_leaves() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    version = room.call.version
+    assert room.call.away("c", T0 + 1) and room.call.version > version
+    assert room.call.away("x", T0 + 1) is False, "not in the call"
+    members = room.call_state("a", T0 + 1)["members"]
+    assert [(m["page"], m["away"]) for m in members] == [("a", False), ("b", False), ("c", True)]
+    assert [m["page"] for m in room.describe(T0 + 1)["call"]["members"]] == ["a", "b"]
+    room.tick(T0 + 1 + together.AWAY_SECONDS)
+    assert list(room.call.members) == ["a", "b", "c"], "its next page may still come"
+    room.tick(T0 + 2 + together.AWAY_SECONDS)
+    assert list(room.call.members) == ["a", "b"]
+
+
+def test_call_a_page_kept_by_its_browser_is_back_when_it_says_so() -> None:
+    room = in_call(Room(), "a", "b")
+    room.call.away("b", T0 + 1)
+    assert room.call.set_state("b", None, None, None)  # Back: the browser showed it again
+    room.tick(T0 + 2 + together.AWAY_SECONDS)
+    assert room.call.members["b"].away is None and list(room.call.members) == ["a", "b"]
+
+
+def test_call_a_page_loaded_again_without_its_old_one_takes_the_place_of_one_away() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    room.call.away("a", T0 + 1)
+    joined(room, "a2", "x")
+    room.pages["a2"].device = room.pages["a"].device
+    assert room.start_call("x", T0 + 2) == together.JOINED, "another browser joins as itself"
+    assert room.start_call("a2", T0 + 2) == together.JOINED
+    assert list(room.call.members) == ["a2", "b", "c", "x"], "never a and a2 both"
+    assert room.call.members["a2"].away is None

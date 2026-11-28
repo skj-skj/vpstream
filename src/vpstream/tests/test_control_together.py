@@ -577,8 +577,11 @@ def test_a_call_rings_the_others_and_passes_their_messages(rig: Group) -> None:
     assert held is False
     assert post(rig, "phone", "p1", do="state", mic=True, sees=["t1"]).data["outcome"] == "applied"
     assert rig.say("tv", "t1")["call"]["members"][1] == {
-        "page": "p1", "name": "", "mic": True, "cam": True, "sees": ["t1"]
+        "page": "p1", "name": "", "mic": True, "cam": True, "sees": ["t1"], "away": False
     }  # fmt: skip
+    assert post(rig, "phone", "p1", do="away").data["outcome"] == "applied"
+    assert rig.say("tv", "t1")["call"]["members"][1]["away"] is True
+    assert post(rig, "phone", "p1", do="state").data["outcome"] == "applied", "back"
     assert post(rig, "phone", "p1", do="end").data["outcome"] == together.ENDED
     assert rig.say("tv", "t1")["call"]["id"] == "", "two in the call: it ended for both"
     assert rig.control.status()["stream"]["together"]["call"] == {"id": "", "members": []}

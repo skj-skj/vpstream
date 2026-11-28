@@ -1185,5 +1185,61 @@ const { check, finish } = runner();
     eq(me.length > 0, true);
   });
 
+  await check("in the call, upright: the call's buttons go behind the three dots; Audio and subtitles stays", async () => {
+    const { page } = await joinedCall();
+    ok(page.$("more").hidden, "room for all of them");
+    const resize = (w) => {
+      page.$("row").clientWidth = w;
+      page.window.listeners.resize.forEach((fn) => fn());
+    };
+    page.$("clock").offsetWidth = 110;
+    resize(360);  // a phone held upright
+    ok(shows(page, "more"));
+    ["hangup", "mic", "camera", "zen"].forEach((id) => eq(page.$(id).parentNode === page.$("tray"), true, id));
+    ok(page.$("tray").hidden, "the tray is closed");
+    ok(page.$("cc").parentNode === page.$("row") && shows(page, "cc"));
+    press(page, "more");
+    ok(!page.$("tray").hidden && page.$("more").classes.includes("on"));
+    eq(page.$("more").getAttribute("aria-expanded"), "true");
+    press(page, "mic");
+    ok(!page.$("tray").hidden, "open for another press");
+    ok(!page.$("mic").classes.includes("off"), "the mic is on");
+    page.$("taps").click();
+    ok(page.$("tray").hidden, "a tap elsewhere closes it");
+    resize(900);  // turned on its side
+    ok(page.$("more").hidden);
+    const row = page.$("row").childNodes;
+    ok(row.indexOf(page.$("hangup")) >= 0 && row.indexOf(page.$("hangup")) < row.indexOf(page.$("next")), "back in the row");
+    resize(360);
+    press(page, "more");
+    press(page, "hangup");
+    ok(page.$("more").hidden && page.$("tray").hidden, "out of the call: no dots, no tray");
+  });
+
+  await check("in the call: while the film plays short of data, nobody sends this page video", async () => {
+    const { page } = await joinedCall();
+    page.video.ready(600, 0);
+    let ahead = 2;
+    page.video.buffered = { length: 1, start: () => 0, end: () => page.video.currentTime + ahead };
+    open(waits(page)).pop().respond(200, { together: groupState({ rev: 2, paused: false }), waited: 1 });
+    page.tick(1000);
+    ok(!page.video.paused, "the group plays");
+    page.tick(300);
+    eq(open(posts(page)).pop().body.sees, [], "2 s ahead: short");
+    ahead = 30;
+    page.tick(1000);
+    page.tick(3300);
+    eq(open(posts(page)).pop().body.sees.sort(), ["asha", "ravi"], "enough again, for 3 s");
+    page.video.readyState = 2;
+    page.video.dispatch("waiting");
+    page.tick(300);
+    eq(open(posts(page)).pop().body.sees, [], "it waits");
+    page.video.readyState = 4;
+    page.video.pause();
+    await settle();
+    page.tick(3300);
+    eq(open(posts(page)).pop().body.sees.sort(), ["asha", "ravi"], "paused: the group talks, video again");
+  });
+
   finish();
 })();

@@ -14,6 +14,13 @@ class Node {
     this.childNodes.push(child);
     return child;
   }
+  insertBefore(child, before) {
+    if (!before) { return this.appendChild(child); }
+    if (child.parentNode) { child.parentNode.removeChild(child); }
+    child.parentNode = this;
+    this.childNodes.splice(this.childNodes.indexOf(before), 0, child);
+    return child;
+  }
   removeChild(child) {
     this.childNodes = this.childNodes.filter((c) => c !== child);
     child.parentNode = null;

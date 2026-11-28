@@ -61,6 +61,9 @@ OWNER = "owner"  # who changed it, for a change made on the dashboard or the com
 # The call (see Call).
 CALL_SIZE = 20  # people in one call at most
 CALL_QUIET_SECONDS = 30.0  # a page in the call not heard from this long has left it
+# A page that said it went away (its tab closed, or loaded again) and was not taken over by
+# its next page this soon has left the call. Until then the others do not show it.
+AWAY_SECONDS = 10.0
 MAIL_SIZE = 64  # messages that wait for one page; past it the oldest go
 MAIL_SECONDS = 30.0  # a message not taken by then is dropped
 MAX_MAIL_DATA = 12000  # characters of one message (an offer with all its addresses)
@@ -159,6 +162,7 @@ class Member:
     cam: bool = True
     # The pages whose tiles it shows now: only they get its video (see call.js).
     sees: list[str] = field(default_factory=list)
+    away: float | None = None  # when its page said it went away (see Call.away)
 
 
 @dataclass
@@ -231,6 +235,7 @@ class Call:
             return False
         self.members = {page if k == was else k: m for k, m in self.members.items()}
         self.members[page].seen = now
+        self.members[page].away = None
         for member in self.members.values():
             member.sees = [page if p == was else p for p in member.sees]
         if self.starter == was:
@@ -265,13 +270,27 @@ class Call:
         if member is not None:
             member.seen = max(member.seen, now)
 
-    def set_state(self, page: str, mic: Any, cam: Any, sees: Any) -> bool:
-        """What a page in the call has on: its mic, its camera, and the tiles it shows.
-        A value that does not read is left as it was. False for a page not in the call."""
+    def away(self, page: str, now: float) -> bool:
+        """The page went away: its tab closed, or loaded again, which takes its place back
+        (see Room.start_call). The others stop showing it at once; it leaves after
+        AWAY_SECONDS. False for a page not in the call."""
         member = self.members.get(page)
         if member is None:
             return False
-        before = (member.mic, member.cam, member.sees)
+        if member.away is None:
+            member.away = now
+            self._changed()
+        return True
+
+    def set_state(self, page: str, mic: Any, cam: Any, sees: Any) -> bool:
+        """What a page in the call has on: its mic, its camera, and the tiles it shows.
+        A value that does not read is left as it was. False for a page not in the call.
+        A page that went away and says this is back (a browser that kept it)."""
+        member = self.members.get(page)
+        if member is None:
+            return False
+        before = (member.mic, member.cam, member.sees, member.away)
+        member.away = None
         if isinstance(mic, bool):
             member.mic = mic
         if isinstance(cam, bool):
@@ -279,7 +298,7 @@ class Call:
         if isinstance(sees, list):
             shown = [p for p in sees if isinstance(p, str) and p in self.members and p != page]
             member.sees = list(dict.fromkeys(shown))[:CALL_SIZE]
-        if (member.mic, member.cam, member.sees) != before:
+        if (member.mic, member.cam, member.sees, member.away) != before:
             self._changed()
         return True
 
@@ -332,7 +351,8 @@ class Call:
         """Pages not heard from leave, and old messages go. True when the call changed."""
         version = self.version
         for page, member in list(self.members.items()):
-            if now - member.seen > CALL_QUIET_SECONDS and page in self.members:
+            gone = member.away is not None and now - member.away > AWAY_SECONDS
+            if (gone or now - member.seen > CALL_QUIET_SECONDS) and page in self.members:
                 self.leave(page)
         for page, box in list(self.mail.items()):
             self.mail[page] = [m for m in box if now - m.at <= MAIL_SECONDS]
@@ -598,14 +618,17 @@ class Room:
     def start_call(self, page: str, now: float, was: str = "") -> str:
         """Call pressed on a page of the group (see Call.start); REFUSED for a page the
         room does not know. A page loaded again takes its old place in the call (`was`),
-        when that was a page of the same browser."""
+        when that was a page of the same browser; one that does not know it (its tab kept
+        nothing) takes the place of a page of its browser that went away."""
         self.tick(now)
         if page not in self.pages:
             return REFUSED
-        old = self.pages.get(was)
-        same = old is not None and old.device == self.pages[page].device
-        if same and self.call.take_over(was, page, now):
-            return JOINED
+        device = self.pages[page].device
+        gone = [k for k, m in self.call.members.items() if m.away is not None]
+        for old in [was, *gone]:
+            known = self.pages.get(old)
+            if known is not None and known.device == device and self.call.take_over(old, page, now):
+                return JOINED
         return self.call.start(page, now)
 
     def _name(self, page: str) -> str:
@@ -614,11 +637,19 @@ class Room:
 
     def call_state(self, page: str, now: float, after: int | None = None) -> dict[str, Any]:
         """What `page` is told of the call: who is in it, in the order they joined, with
-        their names and what they have on; who started it (`starter`, by name `by`); whether
-        it is rung; and its messages newer than `after`. `id` is "" while no call runs."""
+        their names and what they have on (`away`: gone, to be taken over or leave); who
+        started it (`starter`, by name `by`); whether it is rung; and its messages newer
+        than `after`. `id` is "" while no call runs."""
         call = self.call
         members = [
-            {"page": key, "name": self._name(key), "mic": m.mic, "cam": m.cam, "sees": m.sees}
+            {
+                "page": key,
+                "name": self._name(key),
+                "mic": m.mic,
+                "cam": m.cam,
+                "sees": m.sees,
+                "away": m.away is not None,
+            }
             for key, m in call.members.items()
         ]
         return {
@@ -676,6 +707,7 @@ class Room:
                 "cam": m.cam,
             }
             for key, m in self.call.members.items()
+            if m.away is None
         ]
         call = {"id": self.call.id, "members": members}
         return {**self.state(now), "pending": sorted(self.pending), "pages": pages, "call": call}
