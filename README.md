@@ -237,6 +237,17 @@ vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, 
   nobody takes it for a fault. Full screen, rotation and the subtitle size stay each device's own.
 - The dashboard's Start form has a Watch together switch; its Viewers tab shows the group
   and changes it for everyone.
+- **Video call** (new player, streams over HTTPS only): **Call** starts one, and every other
+  viewer is asked to join. The video and sound go browser to browser, never through the
+  server; a public STUN server (Cloudflare's, then Google's) helps browsers find each other,
+  and two whose networks will not meet show "Could not connect". Each joins with the camera
+  on and the mic muted, and has End, Mic, Camera, Zen (no tiles, for you only) and, past 4
+  people, pages of tiles; at most 20 people. With 2 in the call, End ends it for both. The
+  tiles go in the black bars beside the video (above and below it on a phone held upright).
+  Browsers allow the camera only on a secure page, so on Termux, Windows, `init --local` or
+  `--http` there is no Call button. **Everyone in a call can see the IP address of everyone
+  else in it.** The Viewers tab shows who is in the call. Headphones keep the film's sound
+  out of your mic.
 
 ### Who may watch
 
