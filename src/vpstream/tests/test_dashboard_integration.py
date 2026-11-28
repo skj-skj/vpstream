@@ -187,7 +187,12 @@ def test_the_dashboard_is_https_with_a_certificate_from_its_own_authority(
     assert dash["certificate"] == fingerprint and dash["password"] is True
     assert dash["port_state"] == "open" and public.fw.calls == ["open"]
     # The authority stays out of every trust store, and nothing else listens (no port 80).
-    assert "trust store installation disabled" in public.caddy.error_log.read_text()
+    # Caddy starts its apps in no set order: the PKI app may say so a moment after the
+    # dashboard already answers.
+    deadline = time.monotonic() + 5
+    while "trust store installation disabled" not in public.caddy.error_log.read_text():
+        assert time.monotonic() < deadline, public.caddy.error_log.read_text()
+        time.sleep(0.05)
 
 
 def test_plain_http_on_the_dashboard_port_gets_no_dashboard(public: Public) -> None:

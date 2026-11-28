@@ -176,7 +176,9 @@ function browser(name, d, options) {
           asked.push(c);
           const refuse = o.refuse || [];
           if ((c.video && refuse.includes("video")) || (c.audio && refuse.includes("audio"))) {
-            return Promise.reject(new Error("NotAllowedError"));
+            const e = new Error("refused");
+            e.name = "NotAllowedError";
+            return Promise.reject(e);
           }
           const got = [];
           if (c.audio) { got.push(new Track("audio", "mic")); }
@@ -515,6 +517,55 @@ const { check, finish } = runner();
     mic.call.start(); await settle();
     eq([mic.call.cam(), posted(mic, "start")[0].cam], [false, false], "the mic alone");
     ok(mic.tracks.some((t) => t.kind === "audio"));
+  });
+
+  await check("Mic with no mic yet asks again: refused, it says why; allowed, it goes to the others", async () => {
+    const options = { refuse: ["audio"] };
+    const { d, a } = await pair(options);
+    ok(!a.tracks.some((t) => t.kind === "audio"), "joined with the camera alone");
+    const asks = a.asked.length;
+    a.call.toggleMic(); await settle();
+    eq(a.asked.length, asks + 1, "asked once more, on the tap");
+    eq(a.asked[a.asked.length - 1].video, false, "the mic alone");
+    eq(a.said.pop(), "No mic can be used here (NotAllowedError).");
+    eq(a.call.mic(), false);
+    options.refuse = [];  // allowed in the settings, or let go by the other app
+    a.call.toggleMic(); await settle();
+    const mic = a.tracks.find((t) => t.kind === "audio");
+    ok(mic && mic.enabled, "a mic, on");
+    eq(a.call.mic(), true);
+    eq(sender(a, "audio").track, mic, "sent to the other page");
+    a.tick(300); await settle();
+    eq(d.members[0].mic, true, "told the daemon");
+    a.call.toggleMic();
+    eq([a.call.mic(), mic.enabled], [false, false], "a tap now mutes it, as ever");
+    eq(a.asked.length, asks + 2);
+  });
+
+  await check("a mic taken while on: Mic mutes it first; an answer after End is let go", async () => {
+    const { d, a } = await pair();
+    a.call.toggleMic();
+    const taken = a.tracks.find((t) => t.kind === "audio");
+    taken.readyState = "ended";  // another app has it now
+    const asks = a.asked.length;
+    a.call.toggleMic(); await settle();
+    eq([a.call.mic(), a.asked.length], [false, asks], "muted, nothing asked");
+    eq(sender(a, "audio").track, null);
+    a.tick(300); await settle();
+    eq(d.members[0].mic, false, "told the daemon");
+    // Asked again, the answer comes only after End and a new Call: it is let go.
+    let answer;
+    const m = a.window.navigator.mediaDevices, real = m.getUserMedia;
+    m.getUserMedia = () => new Promise((r) => { answer = r; });
+    a.call.toggleMic();
+    m.getUserMedia = real;
+    a.call.end(); await settle();
+    a.call.start(); await settle();
+    const late = new Track("audio", "late mic");
+    answer(new MediaStream([late]));
+    await settle();
+    ok(late.stopped, "let go");
+    eq(a.call.mic(), false, "the new call's mic stays off");
   });
 
   await check("a daemon that comes back behind the page's version is followed, and never in a loop", async () => {

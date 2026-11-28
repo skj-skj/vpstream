@@ -227,6 +227,39 @@
       }, failed);
     }
 
+    // The mic asked for again, on a tap of Mic while this page has none: the one asked for
+    // on joining may have been refused then, or been taken since by another app (iOS).
+    // A refusal now says why (NotAllowedError, NotReadableError...). An answer that comes
+    // after this page has left the call it was asked in is let go.
+    var askingMic = false;
+    var stay = 0;  // one more each time this page leaves a call
+    function micAgain() {
+      if (askingMic) { return; }
+      askingMic = true;
+      var asked = stay;
+      media().getUserMedia(wants(false, true)).then(function (stream) {
+        var track = first(stream, "audio");
+        if (asked !== stay) { if (track) { track.stop(); } return; }
+        askingMic = false;
+        if (!inCall || !track) {
+          if (track) { track.stop(); }
+          if (inCall) { hooks.said("No mic can be used here."); }
+          return;
+        }
+        if (audio) { audio.stop(); }
+        audio = track;
+        mic = true;
+        steerAll();
+        tellSoon();
+        hooks.changed();
+      }, function (e) {
+        if (asked !== stay) { return; }
+        askingMic = false;
+        var why = e && e.name && e.name !== "Error" ? " (" + e.name + ")" : "";
+        if (inCall) { hooks.said("No mic can be used here" + why + "."); }
+      });
+    }
+
     function stopMedia() {
       if (audio) { audio.stop(); }
       audio = null;
@@ -440,6 +473,8 @@
 
     // Out of the call, here: every connection closed, the camera and the mic let go.
     function leaveHere() {
+      stay += 1;
+      askingMic = false;
       for (var p in peers) { drop(p); }
       stopMedia();
       inCall = false;
@@ -588,7 +623,22 @@
         hooks.changed();
       },
       toggleMic: function () {
-        if (!audio) { hooks.said("No mic can be used here."); return; }
+        if (audio && audio.readyState === "ended") {
+          // Taken by another app while on: this tap mutes it (as it shows on); the next
+          // one asks for the mic again.
+          audio = null;
+          if (mic) {
+            mic = false;
+            steerAll();
+            tellSoon();
+            hooks.changed();
+            return;
+          }
+        }
+        if (!audio) {
+          if (inCall) { micAgain(); } else { hooks.said("No mic can be used here."); }
+          return;
+        }
         mic = !mic;
         audio.enabled = mic;
         tellSoon();
