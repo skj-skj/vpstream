@@ -647,3 +647,58 @@ def test_the_call_goes_through_the_public_app(rig: Group) -> None:
     page = app.get("/aaa/1", headers={**headers, "Accept": "text/html"})
     assert page.status_code == 200
     assert page.headers["Permissions-Policy"] == "camera=(self), microphone=(self)"
+
+
+def test_only_a_pages_own_browser_acts_for_it_in_the_call(rig: Group) -> None:
+    """The others in the call see a page's key: that is not enough to end its call,
+    read its messages or take them away."""
+    calling(rig)
+    rig.join("laptop", "l1")
+    for who, pg in (("tv", "t1"), ("phone", "p1"), ("laptop", "l1")):
+        post(rig, who, pg, do="start")
+    keys = [m["page"] for m in rig.say("laptop", "l1")["call"]["members"]]
+    assert keys == ["t1", "p1", "l1"]
+    for do in ("end", "state", "away", "start"):
+        assert post(rig, "laptop", "t1", do=do).kind == "missing", do
+    assert post(rig, "laptop", "t1", do="send", to="p1", kind="offer", data="x").kind == "missing"
+    assert "t1" in rig.room().call.members and rig.room().call.seq == 0
+    post(rig, "tv", "t1", do="send", to="p1", kind="offer", data="p1's addresses")
+    room = rig.room()
+    seq = room.call.seq
+    # Not in the laptop's wait or report as the phone's page; nor does either take it.
+    stolen = rig.visit("laptop", "aaa/1/sync", html=False, pg="p1", rev=room.rev, cv=0, cm=0)
+    assert stolen.data["call"]["mail"] == []
+    assert rig.say("laptop", "p1", cm=seq)["call"]["mail"] == []
+    stream = rig.control.stream
+    assert stream is not None
+    assert not stream.call_news("p1", rig.device("laptop").id, room.call.version, 0)
+    assert stream.call_news("p1", rig.device("phone").id, room.call.version, 0)
+    got = rig.visit("phone", "aaa/1/sync", html=False, pg="p1", rev=room.rev, cv=0, cm=0)
+    assert [m["data"] for m in got.data["call"]["mail"]] == ["p1's addresses"]
+
+
+def test_join_on_a_call_that_ended_makes_no_new_one(rig: Group) -> None:
+    calling(rig)
+    first = post(rig, "tv", "t1", do="start").data["call"]["id"]
+    post(rig, "tv", "t1", do="end")
+    late = post(rig, "phone", "p1", do="start", call=first)
+    assert late.data["outcome"] == together.ENDED and not rig.room().call.running
+    assert post(rig, "phone", "p1", do="start", call="").data["outcome"] == together.STARTED
+    running = rig.room().call.id
+    assert post(rig, "tv", "t1", do="start", call=running).data["outcome"] == together.JOINED
+
+
+def test_a_call_post_names_a_video_of_the_stream(rig: Group) -> None:
+    calling(rig)
+    assert post(rig, "tv", "t1", number=2, do="start").kind == "missing"
+    assert post(rig, "tv", "t1", number=0, do="start").kind == "missing"
+    assert post(rig, "tv", "t1", number=1, do="start").data["outcome"] == together.STARTED
+
+
+def test_the_call_says_its_boot_and_a_daemon_back_has_a_new_one(rig: Group) -> None:
+    calling(rig)
+    room = rig.room()
+    boot = rig.say("tv", "t1")["call"]["boot"]
+    assert boot == room.call.boot and len(boot) == 8
+    back = together.Room.from_dict(room.to_dict(rig.clock.now), rig.clock.now)
+    assert back is not None and back.call.boot != boot

@@ -84,9 +84,9 @@ function peerClass(world) {
 // --- the daemon, much simplified (see together.Call)
 
 function daemon() {
-  const d = { id: "", calls: 0, v: 1, members: [], ring: new Set(), left: new Set(), mail: {}, seq: 0, posts: [], names: {} };
+  const d = { id: "", boot: "b1", calls: 0, v: 1, members: [], ring: new Set(), left: new Set(), mail: {}, seq: 0, posts: [], names: {} };
   d.state = (page) => ({
-    id: d.id, v: d.v, by: d.members.length ? d.names[d.starter] || "" : "", starter: d.starter || "",
+    id: d.id, boot: d.boot, v: d.v, by: d.members.length ? d.names[d.starter] || "" : "", starter: d.starter || "",
     members: d.members.map((m) => Object.assign({ name: d.names[m.page] || "" }, m)),
     ring: !!d.id && !d.members.some((m) => m.page === page) && !d.left.has(page),
     mail: (d.mail[page] || []).filter((m) => m.seq > (d.after[page] || 0)),
@@ -97,7 +97,9 @@ function daemon() {
     d.after[body.pg] = body.cm;
     let outcome = "refused";
     const at = d.members.findIndex((m) => m.page === body.pg);
-    if (body.do === "start") {
+    if (body.do === "start" && body.call && body.call !== d.id) {
+      outcome = "ended";  // the call it meant to join is over
+    } else if (body.do === "start") {
       const was = d.members.findIndex((m) => m.page === body.was);
       if (was >= 0) {
         d.members[was] = Object.assign({}, d.members[was], { page: body.pg, away: false });
@@ -209,6 +211,7 @@ function browser(name, d, options) {
       if (o.hold) { return; }  // answered by the check
       Promise.resolve().then(() => this.respond());
     }
+    fail() { this.onerror(); }  // lost on the way, or "too many": no answer
     respond(answer) {
       this.status = 200;
       this.responseText = JSON.stringify(answer || d.handle(this.body));
@@ -512,6 +515,89 @@ const { check, finish } = runner();
     mic.call.start(); await settle();
     eq([mic.call.cam(), posted(mic, "start")[0].cam], [false, false], "the mic alone");
     ok(mic.tracks.some((t) => t.kind === "audio"));
+  });
+
+  await check("a daemon that comes back behind the page's version is followed, and never in a loop", async () => {
+    const d = daemon();
+    const a = browser("a", d);
+    d.v = 10;
+    a.poll();
+    eq(a.call.query(), ["cv=10", "cm=0"]);
+    // An answer that came late (older than one already taken) is no news.
+    eq(a.call.update(Object.assign(d.state("a"), { v: 9 })), false, "late: no news, no wait at once");
+    // A crash lost the last changes: the daemon is back with fewer, and a boot of its own.
+    d.v = 6; d.boot = "b2";
+    eq(a.poll(), true, "the new daemon's call is news once");
+    eq(a.call.query(), ["cv=6", "cm=0"], "its version from now on: the waits are held again");
+    eq(a.poll(), false);
+  });
+
+  await check("Join on a call that ended while the browser asked for the camera makes no new call", async () => {
+    const d = daemon();
+    const a = browser("a", d), b = browser("b", d);
+    a.call.start(); await settle();
+    b.poll();
+    ok(b.call.ringing());
+    d.id = ""; d.members = []; d.v += 1;  // a ended it, before b's answer to the prompt came
+    b.call.start(); await settle();
+    eq(posted(b, "start")[0].call, "1", "b meant call 1");
+    eq([b.call.inCall(), b.call.running(), d.id], [false, false, ""], "no call started by a Join");
+    eq(b.said.pop(), "The call ended.");
+    ok(b.tracks.every((t) => t.stopped), "the camera let go");
+    const c = browser("c", d);
+    c.call.start(); await settle();
+    eq([posted(c, "start")[0].call, d.id], ["", "2"], "Call with none running: a new one");
+  });
+
+  await check("an offer whose post got no answer goes again, while it is still wanted", async () => {
+    const d = daemon();
+    const b = browser("b", d);
+    b.call.start(); await settle();
+    const a = browser("a", d, { hold: true });
+    a.poll();
+    a.call.start(); await settle();
+    a.posts[0].respond(); await settle();  // a is in; it offers to b
+    const sends = () => a.posts.filter((x) => x.body.do === "send");
+    eq(sends().length, 1);
+    sends()[0].fail();
+    a.tick(1000); await settle();
+    eq(sends().length, 2, "sent again");
+    eq(sends()[1].body.data, sends()[0].body.data);
+    sends()[1].fail(); a.tick(1000); await settle();
+    sends()[2].fail(); a.tick(1000); await settle();
+    eq(sends().length, 3, "three times at most");
+    sends()[2].respond(); await settle();
+  });
+
+  await check("an offer too long for the daemon leaves out host addresses, IPv6 first", async () => {
+    const d = daemon();
+    const b = browser("b", d);
+    b.call.start(); await settle();
+    const a = browser("a", d);
+    const lines = ["v=0", "a=x-pad:",
+      "a=candidate:1 1 udp 2122260223 192.168.1.5 50000 typ host",
+      "a=candidate:2 1 udp 2122262783 2001:db8::1 50001 typ host",
+      "a=candidate:3 1 udp 2122262783 2001:db8::2 50002 typ host",
+      "a=candidate:4 1 udp 1686052607 203.0.113.7 50000 typ srflx raddr 192.168.1.5 rport 50000", ""];
+    lines[1] += "p".repeat(12050 - lines.join("\r\n").length);  // 50 past the limit
+    const long = lines.join("\r\n");
+    a.world.pcs.push = function (pc) {
+      Array.prototype.push.call(this, pc);
+      pc.setLocalDescription = function (desc) {
+        this.localDescription = { type: desc.type, sdp: long };
+        this.signalingState = "have-local-offer";
+        this.iceGatheringState = "complete";
+        return Promise.resolve();
+      };
+    };
+    a.poll();
+    a.call.start(); await settle();
+    const sent = posted(a, "send")[0].data;
+    eq(long.length, 12050);
+    ok(sent.length <= 12000, "it fits: " + sent.length);
+    ok(!/2001:db8::2/.test(sent) && /2001:db8::1/.test(sent), "an IPv6 host address went, the last: one was enough");
+    ok(/192\.168\.1\.5 50000 typ host/.test(sent) && /typ srflx/.test(sent), "the rest stay");
+    eq(sent.slice(-2), "\r\n");
   });
 
   finish();

@@ -643,3 +643,31 @@ def test_call_a_page_loaded_again_without_its_old_one_takes_the_place_of_one_awa
     assert room.start_call("a2", T0 + 2) == together.JOINED
     assert list(room.call.members) == ["a2", "b", "c", "x"], "never a and a2 both"
     assert room.call.members["a2"].away is None
+
+
+def test_call_two_of_three_quiet_at_once_ends_it_as_one_of_two_would() -> None:
+    """Left alone by the quiet ones, the last page's call ends: the same as when one of
+    two goes quiet (see test_call_a_page_that_goes_quiet_leaves)."""
+    room = in_call(Room(), "a", "b", "c")
+    room.call.touch("c", T0 + 100)
+    room.tick(T0 + together.CALL_QUIET_SECONDS + 1)
+    assert not room.call.running and room.call.members == {}
+
+
+def test_call_a_page_of_another_browser_is_not_its_own() -> None:
+    room = in_call(Room(), "a", "b")
+    device = room.pages["a"].device
+    assert room.owns("a", device) and not room.owns("b", device) and not room.owns("x", device)
+    room.call.send("b", "a", together.OFFER, "sdp", T0)
+    assert room.call_state("a", T0, mail=False)["mail"] == []
+    assert [m["data"] for m in room.call_state("a", T0)["mail"]] == ["sdp"], "not taken away"
+    assert not room.call.news("a", None, 0, mail=False) and room.call.news("a", None, 0)
+
+
+def test_call_js_cuts_an_offer_to_what_the_daemon_takes() -> None:
+    import re
+    from importlib.resources import files
+
+    js = files("vpstream.assets").joinpath("call.js").read_text(encoding="utf-8")
+    found = re.search(r"var MAX_SDP = (\d+);", js)
+    assert found and int(found.group(1)) == together.MAX_MAIL_DATA

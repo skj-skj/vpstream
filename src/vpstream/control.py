@@ -620,7 +620,7 @@ class Control:
                     self.stream is stream
                     and stream.together is not None
                     and stream.together.rev == rev
-                    and not stream.call_news(page, version, after)
+                    and not stream.call_news(page, device, version, after)
                     and self._holds.get(page) == ticket
                 ):
                     left = HOLD_SECONDS - (time.monotonic() - began)
@@ -635,7 +635,7 @@ class Control:
         if not stream.devices.passes(stream.policy, ip, cookie):
             return DENIED
         waited = round(time.monotonic() - began, 3)
-        data = {**stream.group_state(page, self.clock(), after), "waited": waited}
+        data = {**stream.group_state(page, device, self.clock(), after), "waited": waited}
         return Answer(200, "client", number=answer.number, data=data)
 
     def tick_together(self) -> None:

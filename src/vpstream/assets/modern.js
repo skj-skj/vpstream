@@ -181,8 +181,8 @@
   var tilePage = 0;
   var tileEls = {};  // page -> its tile element
   var TRAY = ["hangup", "mic", "camera", "flip", "zen", "prevpage", "pageno", "nextpage"];
-  var ICON_W = 46, PAGENO_W = 40;
-  var AHEAD = 6;  // seconds of film loaded ahead, below which the call has no video  // what a button and the page number take in the row
+  var ICON_W = 46, PAGENO_W = 40;  // what a button and the page number take in the row
+  var AHEAD = 6;  // seconds of film loaded ahead, below which the call has no video
   var squeezed = false, trayOpen = false;  // the call's buttons in the tray; the tray open
   var ownSeekAt = -Infinity;  // when this page last seeked the video itself
 

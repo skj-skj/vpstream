@@ -40,6 +40,10 @@
   var RESUME_MS = 3000;  // the film plays this long again before video goes out again
   var STATE_MS = 300;  // what this page has on is told the daemon this soon after a change
   var POST_TIMEOUT_MS = 10000;
+  var SENDS = 3;  // a message whose post got no answer (or "too many") goes this many times
+  // An offer or an answer is at most this long (together.MAX_MAIL_DATA): past it, the
+  // addresses that matter least (on this machine, IPv6 first) are left out until it fits.
+  var MAX_SDP = 12000;
   var KEY = "vpstream-call";  // this tab's place in the call, for the page loaded next
   var AGAIN_MS = 60000;  // ...if it loads this soon
 
@@ -56,6 +60,7 @@
     var hooks = { changed: nothing, said: nothing, name: function () { return ""; }, audioBox: null };
     for (var k in look) { hooks[k] = look[k]; }
     var id = "";  // the call that runs, "" for none
+    var boot = "";  // the daemon's, as it last said (see together.Call)
     var version = -1;
     var members = [];  // as the daemon last said, in the order they joined; not those away
     var everyone = [];  // ...and those too (see again)
@@ -89,9 +94,14 @@
 
     // --- talking to the daemon
 
-    function post(body, done) {
+    // What a post carries: what it does, the page, and the messages it has.
+    function message(body) {
       body.pg = me;
       body.cm = after;
+      return JSON.stringify(body);
+    }
+
+    function post(body, done) {
       var x = new XMLHttpRequest();
       x.open("POST", url, true);
       x.setRequestHeader("X-Vpstream-Player", "1");  // see player.REPORT_HEADER
@@ -106,10 +116,39 @@
         if (done) { done(answer); }
       };
       x.onerror = x.ontimeout = function () { if (done) { done(null); } };
-      x.send(JSON.stringify(body));
+      x.send(message(body));
     }
 
-    function send(to, kind, data) { post({ "do": "send", to: to, kind: kind, data: data }); }
+    // A message for another page in the call. One that got no answer (lost, or "too
+    // many": the daemon took none of it) goes again, while `still()` says it is wanted.
+    function send(to, kind, data, still) {
+      var tries = 0;
+      (function go() {
+        tries += 1;
+        post({ "do": "send", to: to, kind: kind, data: data }, function (a) {
+          if (!a && tries < SENDS && inCall && (!still || still())) { window.setTimeout(go, RETRY_MS); }
+        });
+      })();
+    }
+
+    // An offer or an answer short enough to go (see MAX_SDP): its host addresses are left
+    // out, IPv6 first, then the others, from the last, until it fits. The public ones
+    // (from STUN) are what connects two homes.
+    function fit(sdp) {
+      if (sdp.length <= MAX_SDP) { return sdp; }
+      var lines = sdp.split("\r\n");
+      function host(line, v6) {
+        if (line.indexOf("a=candidate:") !== 0 || line.indexOf(" typ host") < 0) { return false; }
+        var address = line.split(" ")[4] || "";
+        return !v6 || address.indexOf(":") >= 0;
+      }
+      [true, false].forEach(function (v6) {
+        for (var i = lines.length - 1; i >= 0 && lines.join("\r\n").length > MAX_SDP; i--) {
+          if (host(lines[i], v6)) { lines.splice(i, 1); }
+        }
+      });
+      return lines.join("\r\n");
+    }
 
     // What this page has on, told the daemon a moment after it changes: the tiles shown
     // may change several times in a row (a turn of the phone).
@@ -174,6 +213,18 @@
         cameras = list.filter(function (d) { return d.kind === "videoinput"; }).length;
         hooks.changed();
       }, nothing);
+    }
+
+    // The camera (facing as `facing` says) in place of this page's video, while in the
+    // call: `then` after it is, `failed` when the browser gives none.
+    function camera(then, failed) {
+      media().getUserMedia(wants(true, false)).then(function (stream) {
+        if (!inCall) { first(stream, "video").stop(); return; }
+        setVideo(first(stream, "video"));
+        then();
+        steerAll();
+        hooks.changed();
+      }, failed);
     }
 
     function stopMedia() {
@@ -292,6 +343,9 @@
       return pc;
     }
 
+    // Whether `pc` is still the pair's connection: its offer or answer is still wanted.
+    function mine(peer, pc) { return function () { return peer.pc === pc && peers[peer.page] === peer; }; }
+
     // An offer or an answer goes when its browser has found its addresses, or after
     // GATHER_MS with those it has.
     function gathered(pc) {
@@ -311,7 +365,7 @@
       steer(peer);
       pc.createOffer().then(function (d) { return pc.setLocalDescription(d); })
         .then(function () { return gathered(pc); })
-        .then(function () { if (peer.pc === pc) { send(peer.page, "offer", pc.localDescription.sdp); } })
+        .then(function () { if (peer.pc === pc) { send(peer.page, "offer", fit(pc.localDescription.sdp), mine(peer, pc)); } })
         ["catch"](function () { failed(peer, pc); });
     }
 
@@ -328,7 +382,7 @@
         return pc.createAnswer();
       }).then(function (d) { return pc.setLocalDescription(d); })
         .then(function () { return gathered(pc); })
-        .then(function () { if (peer.pc === pc) { send(peer.page, "answer", pc.localDescription.sdp); } })
+        .then(function () { if (peer.pc === pc) { send(peer.page, "answer", fit(pc.localDescription.sdp), mine(peer, pc)); } })
         ["catch"](function () { failed(peer, pc); });
     }
 
@@ -347,7 +401,7 @@
       if (offerer(peer.page)) {
         window.setTimeout(function () { if (peers[peer.page] === peer && !peer.pc && inCall) { offer(peer); } }, RETRY_MS);
       } else {
-        send(peer.page, "bye", "");
+        send(peer.page, "bye", "", function () { return peers[peer.page] === peer && !peer.pc; });
       }
       hooks.changed();
     }
@@ -416,7 +470,12 @@
     // it had news: a change, or a message.
     function update(s) {
       if (!s || typeof s.v !== "number") { return false; }
-      var news = s.v !== version || !!(s.mail && s.mail.length);
+      // The daemon came back: its count of changes starts over (see together.Call).
+      if (s.boot !== boot) {
+        boot = s.boot;
+        version = -1;
+      }
+      var news = false;
       if (s.id !== id) {
         if (inCall) {
           leaveHere();
@@ -427,6 +486,7 @@
         version = -1;
       }
       if (s.v >= version) {
+        news = s.v !== version;
         version = s.v;
         everyone = s.members || [];
         members = everyone.filter(function (m) { return !m.away || m.page === me; });
@@ -441,6 +501,7 @@
       (s.mail || []).forEach(function (m) {
         if (m.seq > after) {
           after = m.seq;
+          news = true;
           if (inCall) { read(m); }
         }
       });
@@ -456,20 +517,24 @@
       if (!place || place.id !== id || !member(place.page, everyone)) { return; }
       mic = !!place.mic;
       cam = place.cam !== false;
-      join(place.page);
+      join(place.page, place.id);
     }
 
-    function join(was) {
+    // Into the call `expect` (the one rung, or the one this tab was in), or a new one
+    // when "". The daemon says "ended" when that call is over by the time the browser has
+    // the camera: no new call is made for a Join.
+    function join(was, expect) {
       if (joining || inCall || (was && !id)) { return; }
       joining = true;
       hooks.changed();
       getMedia(function () {
-        post({ "do": "start", was: was || "", mic: mic, cam: cam, sees: shown() }, function (a) {
+        post({ "do": "start", was: was || "", call: expect || "", mic: mic, cam: cam, sees: shown() }, function (a) {
           joining = false;
           var ok = a && (a.outcome === "started" || a.outcome === "joined");
           if (!ok) {
             if (!inCall) { stopMedia(); }
-            hooks.said(a && a.outcome === "full" ? "The call is full." : "Could not join the call.");
+            hooks.said(a && a.outcome === "full" ? "The call is full." :
+              a && a.outcome === "ended" ? "The call ended." : "Could not join the call.");
           } else {
             dismissed = id;
             steerAll();
@@ -486,7 +551,7 @@
       try {
         var sent = window.fetch(url, { method: "POST", keepalive: true,
           headers: { "X-Vpstream-Player": "1", "Content-Type": "application/json" },
-          body: JSON.stringify({ "do": "away", pg: me, cm: after }) });
+          body: message({ "do": "away" }) });
         if (sent && sent["catch"]) { sent["catch"](nothing); }
       } catch (e) { /* it leaves when quiet */ }
     }
@@ -512,7 +577,7 @@
         if (inCall || joining) { return; }
         mic = false;
         cam = true;
-        join("");
+        join("", id);
       },
       // Not now: the ring of this call goes away; Call joins it later.
       dismiss: function () { dismissed = id; hooks.changed(); },
@@ -538,25 +603,16 @@
           hooks.changed();
           return;
         }
-        media().getUserMedia(wants(true, false)).then(function (stream) {
-          if (!inCall) { first(stream, "video").stop(); return; }
-          setVideo(first(stream, "video"));
+        camera(function () {
           cam = !!video;
-          steerAll();
           tellSoon();
-          hooks.changed();
         }, function () { hooks.said("The camera cannot be used here."); });
       },
       // The front camera or the back one.
       flip: function () {
         facing = facing === "user" ? "environment" : "user";
         if (!cam || !video) { hooks.changed(); return; }
-        media().getUserMedia(wants(true, false)).then(function (stream) {
-          if (!inCall) { first(stream, "video").stop(); return; }
-          setVideo(first(stream, "video"));
-          steerAll();
-          hooks.changed();
-        }, function () {
+        camera(nothing, function () {
           facing = facing === "user" ? "environment" : "user";
           hooks.said("The other camera cannot be used.");
         });

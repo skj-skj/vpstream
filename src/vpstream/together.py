@@ -29,6 +29,7 @@ messages that set up each pair's connection; the video and sound never come here
 from __future__ import annotations
 
 import contextlib
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -191,7 +192,9 @@ class Call:
     sends POSTS in POST_SECONDS at most.
 
     Every change that the pages show (who is in, their mic and camera) bumps `version`;
-    a new message does not."""
+    a new message does not. `boot` is this Call's own: a daemon that comes back has a new
+    one, so a page drops the version it had seen (a crash may lose the last changes, and
+    the daemon's version may then be behind the page's)."""
 
     id: str = ""  # the call that runs, "" for none; every call has an id of its own
     calls: int = 0  # how many calls there were: the next one's id
@@ -202,6 +205,7 @@ class Call:
     mail: dict[str, list[Mail]] = field(default_factory=dict)  # page -> its mailbox
     seq: int = 0  # the newest message's number
     posts: dict[str, list[float]] = field(default_factory=dict)  # page -> when it sent
+    boot: str = field(default_factory=lambda: secrets.token_hex(4))
 
     @property
     def running(self) -> bool:
@@ -340,12 +344,13 @@ class Call:
             if now - m.at <= MAIL_SECONDS
         ]
 
-    def news(self, page: str, version: int | None, after: int | None) -> bool:
-        """Whether the page has not seen the call as it is, or has a message waiting. A
-        page that gives no `version` does not follow the call (the TV's look)."""
+    def news(self, page: str, version: int | None, after: int | None, mail: bool = True) -> bool:
+        """Whether the page has not seen the call as it is, or has a message waiting (only
+        with `mail`: see Room.owns). A page that gives no `version` does not follow the
+        call (the TV's look)."""
         if version is not None and version != self.version:
             return True
-        return any(m.seq > (after or 0) for m in self.mail.get(page, []))
+        return mail and any(m.seq > (after or 0) for m in self.mail.get(page, []))
 
     def tick(self, now: float) -> bool:
         """Pages not heard from leave, and old messages go. True when the call changed."""
@@ -615,14 +620,25 @@ class Room:
 
     # --- the call
 
-    def start_call(self, page: str, now: float, was: str = "") -> str:
+    def owns(self, page: str, device: str) -> bool:
+        """Whether `page` is a page of `device` (a browser's id). The pages in a call see
+        each other's keys: only the page's own browser acts for it, or gets its messages."""
+        known = self.pages.get(page)
+        return known is not None and known.device == device[:MAX_DEVICE]
+
+    def start_call(self, page: str, now: float, was: str = "", call: str = "") -> str:
         """Call pressed on a page of the group (see Call.start); REFUSED for a page the
         room does not know. A page loaded again takes its old place in the call (`was`),
         when that was a page of the same browser; one that does not know it (its tab kept
-        nothing) takes the place of a page of its browser that went away."""
+        nothing) takes the place of a page of its browser that went away. `call` is the
+        call the page meant to join (Join on a ring, or its place after a load): ENDED when
+        that is not the one that runs, as when it ended while the browser asked for the
+        camera. "": Call, a new call, or the one someone started meanwhile."""
         self.tick(now)
         if page not in self.pages:
             return REFUSED
+        if call and call != self.call.id:
+            return ENDED
         device = self.pages[page].device
         gone = [k for k, m in self.call.members.items() if m.away is not None]
         for old in [was, *gone]:
@@ -635,31 +651,32 @@ class Room:
         known = self.pages.get(page)
         return known.name if known is not None else ""
 
-    def call_state(self, page: str, now: float, after: int | None = None) -> dict[str, Any]:
+    def _member(self, page: str, member: Member) -> dict[str, Any]:
+        """One in the call, as the pages and the dashboard show it."""
+        return {"page": page, "name": self._name(page), "mic": member.mic, "cam": member.cam}
+
+    def call_state(
+        self, page: str, now: float, after: int | None = None, mail: bool = True
+    ) -> dict[str, Any]:
         """What `page` is told of the call: who is in it, in the order they joined, with
         their names and what they have on (`away`: gone, to be taken over or leave); who
         started it (`starter`, by name `by`); whether it is rung; and its messages newer
-        than `after`. `id` is "" while no call runs."""
+        than `after` (with `mail`: see Room.owns; without, none are taken). `id` is "" while
+        no call runs; `boot` changes when the daemon comes back (see Call)."""
         call = self.call
         members = [
-            {
-                "page": key,
-                "name": self._name(key),
-                "mic": m.mic,
-                "cam": m.cam,
-                "sees": m.sees,
-                "away": m.away is not None,
-            }
+            {**self._member(key, m), "sees": m.sees, "away": m.away is not None}
             for key, m in call.members.items()
         ]
         return {
             "id": call.id,
+            "boot": call.boot,
             "v": call.version,
             "by": self._name(call.starter),
             "starter": call.starter,
             "members": members,
             "ring": call.rings(page),
-            "mail": call.take(page, after, now),
+            "mail": call.take(page, after, now) if mail else [],
         }
 
     # --- as plain data
@@ -699,13 +716,7 @@ class Room:
             if now - p.seen <= clients.ACTIVE_SECONDS
         ]
         members = [
-            {
-                "page": key,
-                "device": self.pages[key].device if key in self.pages else "",
-                "name": self._name(key),
-                "mic": m.mic,
-                "cam": m.cam,
-            }
+            {**self._member(key, m), "device": self.pages[key].device if key in self.pages else ""}
             for key, m in self.call.members.items()
             if m.away is None
         ]
