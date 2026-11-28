@@ -223,6 +223,22 @@ class Call:
             self._changed()
         return JOINED
 
+    def take_over(self, was: str, page: str, now: float) -> bool:
+        """`page` takes the place of `was` in the call, as it was: the same browser loaded
+        the player again (another video for the group, or the other look). False when
+        `was` is not in the call."""
+        if was not in self.members or page in self.members:
+            return False
+        self.members = {page if k == was else k: m for k, m in self.members.items()}
+        self.members[page].seen = now
+        for member in self.members.values():
+            member.sees = [page if p == was else p for p in member.sees]
+        if self.starter == was:
+            self.starter = page
+        self.mail.pop(was, None)
+        self._changed()
+        return True
+
     def leave(self, page: str) -> str:
         """End pressed on `page`. With 2 in the call (or 1) it ends for both (ENDED);
         with more, this page leaves it (LEFT)."""
@@ -579,12 +595,17 @@ class Room:
 
     # --- the call
 
-    def start_call(self, page: str, now: float) -> str:
+    def start_call(self, page: str, now: float, was: str = "") -> str:
         """Call pressed on a page of the group (see Call.start); REFUSED for a page the
-        room does not know."""
+        room does not know. A page loaded again takes its old place in the call (`was`),
+        when that was a page of the same browser."""
         self.tick(now)
         if page not in self.pages:
             return REFUSED
+        old = self.pages.get(was)
+        same = old is not None and old.device == self.pages[page].device
+        if same and self.call.take_over(was, page, now):
+            return JOINED
         return self.call.start(page, now)
 
     def _name(self, page: str) -> str:
@@ -593,8 +614,8 @@ class Room:
 
     def call_state(self, page: str, now: float, after: int | None = None) -> dict[str, Any]:
         """What `page` is told of the call: who is in it, in the order they joined, with
-        their names and what they have on; whether it is rung; and its messages newer than
-        `after`. `id` is "" while no call runs."""
+        their names and what they have on; who started it (`starter`, by name `by`); whether
+        it is rung; and its messages newer than `after`. `id` is "" while no call runs."""
         call = self.call
         members = [
             {"page": key, "name": self._name(key), "mic": m.mic, "cam": m.cam, "sees": m.sees}
@@ -604,6 +625,7 @@ class Room:
             "id": call.id,
             "v": call.version,
             "by": self._name(call.starter),
+            "starter": call.starter,
             "members": members,
             "ring": call.rings(page),
             "mail": call.take(page, after, now),

@@ -682,7 +682,8 @@ class Stream:
         return room is not None and self.https and room.call.news(page, version, after)
 
     def _call(self, device: gate.Device | None, body: dict[str, Any], now: float) -> Answer:
-        """What a page of the group did in the call (`do`): "start" (Call, or Join), "end",
+        """What a page of the group did in the call (`do`): "start" (Call, or Join, with
+        its `mic` and `cam`; `was` its page before it loaded again), "end",
         "state" (its `mic`, `cam`, and the tiles it `sees`), or "send" a message (`kind`,
         `data`) to another page in it (`to`). Only a page the group knows, of an approved
         browser, on a stream over HTTPS: the camera works nowhere else. The answer is the
@@ -700,7 +701,10 @@ class Stream:
         call.touch(page, now)
         what = body.get("do")
         if what == "start":
-            outcome = room.start_call(page, now)
+            was = clients.page_key(body.get("was"))
+            outcome = room.start_call(page, now, was)
+            if outcome in (together.STARTED, together.JOINED):
+                call.set_state(page, body.get("mic"), body.get("cam"), body.get("sees"))
         elif what == "end":
             outcome = call.leave(page)
         elif what == "state":

@@ -32,7 +32,14 @@ CALL = "call"
 REPORT_HEADER = "X-Vpstream-Player"
 JS = "text/javascript; charset=utf-8"
 # Name under /ALIAS/assets/ -> content type. Only these are served.
-ASSETS = {"player.js": JS, "modern.js": JS, "sync.js": JS, "vtt.js": JS, "hls.min.js": JS}
+ASSETS = {
+    "player.js": JS,
+    "modern.js": JS,
+    "sync.js": JS,
+    "call.js": JS,
+    "vtt.js": JS,
+    "hls.min.js": JS,
+}
 # The player's look, the stream's choice (see Stream.ui): the touch-friendly one by default
 # (modern.html), or the one of large buttons for a TV's remote (player.html).
 NEW_UI, OLD_UI = "new", "old"

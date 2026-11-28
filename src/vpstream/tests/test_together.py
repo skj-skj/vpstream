@@ -590,3 +590,23 @@ def test_call_shows_on_the_dashboard_and_its_count_survives_a_restart() -> None:
     assert not back.call.running, "the connections went with the daemon"
     assert back.call.version > room.call.version and back.call.calls == room.call.calls
     assert Room.from_dict({"call": {"version": "x", "calls": -1}}, 1).call.version == 1
+
+
+def test_call_a_page_loaded_again_takes_its_old_place() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    room.call.set_state("a", True, False, ["b"])
+    room.call.set_state("b", None, None, ["a", "c"])
+    room.call.send("b", "a", together.OFFER, "x", T0)
+    joined(room, "a2")  # a's browser, on the next video
+    room.pages["a2"].device = room.pages["a"].device
+    version = room.call.version
+    assert room.start_call("a2", T0 + 1, was="a") == together.JOINED
+    assert list(room.call.members) == ["a2", "b", "c"], "in its place"
+    assert (room.call.members["a2"].mic, room.call.members["a2"].cam) == (True, False)
+    assert room.call.members["b"].sees == ["a2", "c"]
+    assert "a" not in room.call.mail and room.call.version > version
+    assert room.call.starter == "a2"
+    # Another browser cannot take someone's place: it joins as itself.
+    joined(room, "x")
+    assert room.start_call("x", T0 + 2, was="b") == together.JOINED
+    assert list(room.call.members) == ["a2", "b", "c", "x"]

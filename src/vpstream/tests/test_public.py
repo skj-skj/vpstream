@@ -470,6 +470,13 @@ def test_the_player_behaves() -> None:
     harness.run("player_test.js", "player.html", "vtt.js", "sync.js", "player.js", at_least=10)
 
 
+def test_the_call_behaves() -> None:
+    """The call of watching together (call.js) in node, with a stand-in RTCPeerConnection,
+    camera and daemon (call_test.js): who offers, what video goes where, Mic, Camera, End,
+    and a pair that does not connect."""
+    harness.run("call_test.js", "call.js", at_least=12)
+
+
 def test_the_new_player_behaves() -> None:
     """The new player's real page and scripts in node (modern_test.js): taps, the bar, the
     sheet, full screen and rotation, the viewer's name, and the same watching together."""

@@ -1,4 +1,5 @@
-"""Running the node harnesses that check the page scripts (dashboard_test.js, player_test.js)."""
+"""Running the node harnesses that check the page scripts (dashboard_test.js, player_test.js,
+modern_test.js, call_test.js)."""
 
 from __future__ import annotations
 
