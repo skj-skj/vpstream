@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.21.1 (2026-11-28)
+
+### Bug Fixes
+
+- Watching alone, a stall no longer brings up the controls
+  ([#38](https://github.com/skj-skj/vpstream/pull/38),
+  [`3f85767`](https://github.com/skj-skj/vpstream/commit/3f85767cc7cd065289d141f2d7ccbb30b689ca9b))
+
+
 ## v0.21.0 (2026-11-27)
 
 ### Features
