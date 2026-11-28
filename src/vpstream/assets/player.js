@@ -474,12 +474,15 @@
   ["timeupdate", "play", "pause", "seeked", "durationchange"].forEach(function (name) {
     video.addEventListener(name, update);
   });
-  video.addEventListener("pause", showControls);
   video.addEventListener("seeked", core.seekDone);
-  // A pause the browser made by itself while the group plays (the tab put away, the
-  // headphones out): this page waits for a tap, and the group goes on.
+  // A pause shows the controls, but not this page's own wait for the group. One the browser
+  // made by itself while the group plays (the tab put away, the headphones out): this page
+  // waits for a tap, and the group goes on.
   video.addEventListener("pause", function () {
-    if (core.browserPaused()) { core.hold(); }
+    var kind = core.pauseKind();
+    if (kind === "own") { return; }
+    showControls();
+    if (kind === "browser") { core.hold(); }
   });
   video.addEventListener("loadedmetadata", function () {
     applySize();  // the video's shape is known now

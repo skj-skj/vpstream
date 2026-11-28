@@ -70,7 +70,8 @@ function load(over, options) {
     currentTime: 0, duration: NaN, paused: true, muted: false, readyState: 0, played: 0,
     audioTracks: null,
     play() { this.paused = false; this.played += 1; this.dispatch("play"); return Promise.resolve(); },
-    pause() { this.paused = true; this.dispatch("pause"); },
+    // A browser sends the pause event later, not from pause().
+    pause() { this.paused = true; Promise.resolve().then(() => this.dispatch("pause")); },
     canPlayType: () => (options && options.native ? "maybe" : ""),
   });
   // The video has loaded its start and plays from `at`, as a browser would say it.
@@ -241,22 +242,27 @@ async function netRun(o) {
   const clock = () => page.now();
   const live = (t) => g.paused ? g.position : g.position + (t - g.anchor) / 1000;
   const state = (t) => ({ rev: g.rev, video: 1, position: Math.round(live(t) * 1000) / 1000, paused: g.paused,
-    audio: null, sub: null, duration: g.duration, window: 0, changed_by: "", changed_ago: null, now: 5000 + t / 1000 });
+    audio: null, sub: null, duration: g.duration, window: 0, changed_by: "", changed_ago: null, now: serverNow + t / 1000 });
   const delay = (base) => Math.max(1, base + (rng() * 2 - 1) * (o.jitter || 0));
   let held = [];
   const early = [];  // sent while the page loads
   const reply = (x, body) => page.later(() => { if (x.status === undefined) { x.respond(200, body); } }, delay(o.down));
-  const answerWait = (w) => reply(w.x, { together: state(clock()), cooldown: 0, waited: (clock() - w.began) / 1000 });
+  const alone = !!o.alone;  // the only page: the daemon takes the group where it is
+  const answerWait = (w) => reply(w.x, { together: state(clock()), cooldown: 0, alone, waited: (clock() - w.began) / 1000 });
   const arrive = (x) => {
     const q = x.query, t = clock();
     if (x.url.indexOf("/aaa/1/sync?") === 0) {
-      if (Number(q.rev) !== g.rev) { reply(x, { together: state(t), cooldown: 0, waited: 0 }); return; }
+      if (Number(q.rev) !== g.rev) { reply(x, { together: state(t), cooldown: 0, alone, waited: 0 }); return; }
       const w = { x, began: t };
       held.push(w);
       page.later(() => { if (held.indexOf(w) >= 0) { held = held.filter((h) => h !== w); answerWait(w); } }, 20000);
       return;
     }
-    reply(x, { together: state(t), cooldown: 0, outcome: null });
+    // As together.Room.report: alone, joined, of this rev, the group playing.
+    if (alone && q.o !== undefined && q.in === "1" && Number(q.rev) === g.rev && !g.paused && Math.abs(Number(q.o)) > 0.5) {
+      g.position = live(t) + Number(q.o); g.anchor = t;
+    }
+    reply(x, { together: state(t), cooldown: 0, alone, outcome: null });
   };
   const change = (fn) => {
     const t = clock();
@@ -306,7 +312,7 @@ async function netRun(o) {
     page.tick(100);
     await settle();
     off.push({ t: t + 100, off: pos - live(clock()), rate: v.playbackRate, paused: v.paused, locked: page.$("play").disabled,
-      sync: !page.$("sync").hidden, seeks });
+      sync: !page.$("sync").hidden, join: !page.$("join").hidden, controls: shown(page), seeks });
   }
   const open = off.find((s) => !s.locked);
   return { off, seeks, rates, unlocked: open ? open.t / 1000 : Infinity };
@@ -375,6 +381,7 @@ const { check, finish } = runner();
     await settle();
     ok(!page.video.paused, "it starts by itself");
     tapAt(page, 500);
+    await settle();
     ok(page.video.paused, "paused by a tap in the middle");
     ok(bodyHas(page, "controls") && !bodyHas(page, "playing"));
     page.tick(400);
@@ -392,6 +399,7 @@ const { check, finish } = runner();
     page.tick(4000);
     ok(!shown(page), "they go away by themselves while it plays");
     page.video.pause();
+    await settle();
     page.tick(5000);
     ok(shown(page), "and stay while it is paused");
   });
@@ -813,6 +821,7 @@ const { check, finish } = runner();
     page.tick(500);
     press(page, "full");
     page.video.pause();  // its own pause button
+    await settle();
     eq(answer(page).act, "pause");
     page.video.leaveFull();
     page.video.play();
@@ -863,6 +872,7 @@ const { check, finish } = runner();
     inGroup(page, { paused: false, position: 10 }, 10);
     await settle();
     page.video.pause();
+    await settle();
     for (let i = 0; i < 2; i++) { ok(!("act" in exchange(page, [], 2000))); }
     eq(page.$("join").hidden, false);
     press(page, "join");
@@ -922,9 +932,45 @@ const { check, finish } = runner();
         ok(!at(19000).sync && at(30000).sync, `${name}, seed ${seed}: Sync shows once it is out of sync`);
         eq(at(34900).seeks, at(19000).seeks, `${name}, seed ${seed}: no seek of its own`);
         ok(settledBy(run, 35000, 1) < 3, `${name}, seed ${seed}: Sync puts it back`);
-        ok(worst(run, 45000) < 0.31 && !at(40000).sync, `${name}, seed ${seed}: and near (${worst(run, 45000)})`);
+        // Up to 0.1 s more on the uneven link: a page cannot see that its answers come faster
+        // than its reports go, and it stops its rate once it measures 0.2 s off.
+        ok(worst(run, 45000) < 0.4 && !at(40000).sync, `${name}, seed ${seed}: and near (${worst(run, 45000)})`);
       }
     }
+  });
+
+  await check("together over the internet: a seek that lands early waits there for the group", async () => {
+    for (const seed of SEEDS) {
+      const sync = (page) => press(page, "sync");
+      const run = await netRun({ seconds: 70, seed, up: 100, down: 100, jitter: 20, seekMs: 4000,
+        seekMsFrom: [[45000, 200]], stalls: [[10000, 8000], [35000, 8000]], presses: [[25000, sync], [50000, sync]] });
+      ok(settledBy(run, 50000, 0.3) < 6, `seed ${seed}: with the group after ${settledBy(run, 50000, 0.3)} s`);
+      ok(!run.off.find((x) => x.t >= 60000).sync, `seed ${seed}: in sync`);
+      // Its wait there is its own pause: no tap is asked for (browsers send the event late).
+      ok(run.off.some((x) => x.t > 50000 && x.paused), `seed ${seed}: it waited`);
+      ok(!run.off.some((x) => x.join), `seed ${seed}: and no join button`);
+    }
+  });
+
+  await check("together over the internet: alone, a video that waits for data takes the group along, with no Sync", async () => {
+    for (const [name, o] of INTERNET) {
+      for (const seed of SEEDS) {
+        // The VPS hand test, 2026-11-28: one viewer, and the controls came up now and then.
+        const run = await netRun(Object.assign({ seconds: 50, seed, alone: true, stalls: [[20000, 6000]] }, o));
+        const after = run.off.filter((x) => x.t >= 20000);
+        ok(after.every((x) => !x.sync), `${name}, seed ${seed}: no Sync`);
+        ok(after.every((x) => !x.controls), `${name}, seed ${seed}: the controls stay away`);
+        eq(run.off[run.off.length - 1].seeks, run.off.find((x) => x.t >= 19000).seeks, `${name}, seed ${seed}: no seek`);
+        ok(worst(run, 32000) < 0.6, `${name}, seed ${seed}: the group is where it is (${worst(run, 32000)})`);
+      }
+    }
+  });
+
+  await check("together over the internet: out of sync, Sync shows by itself, not the controls", async () => {
+    const run = await netRun({ seconds: 40, seed: 1, up: 50, down: 50, jitter: 5, seekMs: 400, stalls: [[20000, 6000]] });
+    const at = (t) => run.off.find((x) => x.t >= t);
+    ok(at(30000).sync, "Sync shows");
+    ok(run.off.filter((x) => x.t >= 20000).every((x) => !x.controls), "and nothing else comes up");
   });
 
   finish();

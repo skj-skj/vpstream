@@ -228,8 +228,10 @@ vpstream together play            # also: pause, seek 12:30, skip -10, audio 2, 
   10 seconds after it got there (Full screen, Hide and Sync always do).
 - A device keeps close to the group by itself. One more than 2 seconds off (its video waits
   for data on a slow link) is out of sync: it plays on where it is and shows **Sync**, which
-  puts it at the group's place, behind or ahead; Sync works in the cooldown too. Any change
-  for everyone puts every device at the group's place. The group pauses at the end of a video.
+  puts it at the group's place, behind or ahead; Sync works in the cooldown too. The new
+  player shows Sync by itself, over the video, without the other controls. A device that
+  watches alone is never out of sync: the group goes where it is. Any change for everyone
+  puts every device at the group's place. The group pauses at the end of a video.
 - With the new player, each viewer can give themselves a name (the face at the top). Every
   device then says who paused, seeked or changed the audio or subtitles ("Asha paused"), so
   nobody takes it for a fault. Full screen, rotation and the subtitle size stay each device's own.

@@ -115,8 +115,10 @@
   #row .grow { flex: 1; }
   #clock { font-size: 14px; font-variant-numeric: tabular-nums; padding: 0 6px; color: #ddd; white-space: nowrap; }
   #duration:not(:empty)::before { content: " / "; color: #999; }
-  #sync { padding: 6px 14px; border-radius: 16px; background: var(--accent); color: #000; font-weight: 700;
-    font-size: 14px; margin-right: 4px; }
+  /* Out of sync: Sync shows by itself, under the top bar, with the controls or without */
+  #sync { position: absolute; top: calc(64px + var(--safe-t)); right: calc(12px + var(--safe-r)); z-index: 5;
+    padding: 6px 14px; border-radius: 16px; background: var(--accent); color: #000; font-weight: 700;
+    font-size: 14px; }
   #next.glow { color: var(--accent); }
   .i-exit { display: none !important; }
   body.full #full .i-enter { display: none !important; }
@@ -245,7 +247,6 @@
     <div id="row">
       <span id="clock"><span id="time"></span><span id="duration"></span></span>
       <span class="grow"></span>
-      <button id="sync" type="button" hidden>Sync</button>
       <button id="next" class="icon" type="button" aria-label="Next video" hidden>
         <svg class="ic solid" viewBox="0 0 24 24"><path d="M6 6l9 6-9 6zM16.5 6h2v12h-2z"></path></svg>
       </button>
@@ -263,6 +264,7 @@
   </div>
 
   <div id="message"></div>
+  <button id="sync" type="button" hidden>Sync</button>
 
   <div id="toast" hidden><span id="toastface" class="face"></span><span id="toasttext"></span></div>
 
