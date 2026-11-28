@@ -24,8 +24,9 @@ from vpstream.stream import Answer
 
 M3U_TYPE = "audio/x-mpegurl"
 COOKIE_SECONDS = 30 * 24 * 3600  # the cookie outlives a TV turned off; its stream may not
-# What is read of a report's query: a few more names than the fullest report has (16, as
-# sync.js makes it), each as long as the longest value (a viewer's name, clients.MAX_NAME).
+# What is read of a report's query: a few more names than the fullest report has (18, as
+# sync.js makes it with a call), each as long as the longest value (a viewer's name,
+# clients.MAX_NAME).
 MAX_VALUES, MAX_VALUE = 20, clients.MAX_NAME
 _HOST = re.compile(r"[A-Za-z0-9.:\[\]-]{1,255}")
 # The player page may use the camera and the mic, for a call (see player.CALL); no page

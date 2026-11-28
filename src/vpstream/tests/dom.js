@@ -181,6 +181,7 @@ function newDocument(root) {
     querySelector: (s) => root.querySelector(s),
     querySelectorAll: (s) => root.querySelectorAll(s),
     createElement: (tag) => new Element(tag),
+    createElementNS: (ns, tag) => new Element(tag),
     createTextNode: (text) => new Text(text),
     listeners: {},
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },

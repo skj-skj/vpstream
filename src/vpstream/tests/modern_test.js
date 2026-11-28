@@ -1,18 +1,20 @@
-// Runs the real page and scripts of the new player (modern.html, vtt.js, modern.js) in node,
+// Runs the real page and scripts of the new player (modern.html, vtt.js, call.js, modern.js) in node,
 // as player_test.js does the old one: the small DOM of dom.js, a stand-in hls.js, a video
 // element that does what it is told, requests that the checks answer themselves and a clock
 // they move. The harness is player_test.js's, with touches, a pointer, this browser's
-// storage, an iPhone's full screen and a screen that turns. Usage:
-// node modern_test.js PAGE VTT SYNC PLAYER
+// storage, an iPhone's full screen and a screen that turns, and for a call a secure page
+// with a camera and an RTCPeerConnection that never connects (call_test.js has the rest).
+// Usage: node modern_test.js PAGE VTT SYNC CALL PLAYER
 "use strict";
 const fs = require("fs");
 const vm = require("vm");
 const { Node, parse, newDocument, settle, runner, eq, ok, text } = require("./dom.js");
 
-const [pagePath, vttPath, syncPath, playerPath] = process.argv.slice(2);
+const [pagePath, vttPath, syncPath, callPath, playerPath] = process.argv.slice(2);
 const PAGE = fs.readFileSync(pagePath, "utf8");
 const VTT = fs.readFileSync(vttPath, "utf8");
 const SYNC = fs.readFileSync(syncPath, "utf8");
+const CALL = fs.readFileSync(callPath, "utf8");
 const PLAYER = fs.readFileSync(playerPath, "utf8");
 
 // --- what the daemon tells the page
@@ -133,12 +135,43 @@ function load(over, options) {
   if (options && options.pointer) { window.PointerEvent = function () {}; }
   if (options && options.touch) { window.ontouchstart = null; }
   if (options && options.screen) { window.screen = options.screen; }
+  // A page that can call: HTTPS, a camera and a mic, and WebRTC.
+  const media = [];
+  if (options && options.call) {
+    window.isSecureContext = options.call !== "insecure";
+    class Track { constructor(kind) { this.kind = kind; this.enabled = true; } stop() { this.stopped = true; } }
+    class MediaStream {
+      constructor(tracks) { this.tracks = tracks || []; }
+      getAudioTracks() { return this.tracks.filter((t) => t.kind === "audio"); }
+      getVideoTracks() { return this.tracks.filter((t) => t.kind === "video"); }
+    }
+    window.MediaStream = MediaStream;
+    window.RTCPeerConnection = class {
+      addTransceiver() { return { sender: { replaceTrack: () => Promise.resolve() } }; }
+      createOffer() { return new Promise(() => {}); }
+      close() {}
+    };
+    window.navigator = { mediaDevices: {
+      getUserMedia(c) {
+        media.push(c);
+        const got = [];
+        if (c.audio) { got.push(new Track("audio")); }
+        if (c.video) { got.push(new Track("video")); }
+        return Promise.resolve(new MediaStream(got));
+      },
+    } };
+  }
 
   const xhrs = [];
   class XMLHttpRequest {
     open(method, url) { this.method = method; this.url = url; this.headers = {}; }
     setRequestHeader(name, value) { this.headers[name] = value; }
-    send() { this.sent = true; xhrs.push(this); if (options && options.onSend) { options.onSend(this); } }
+    send(body) {
+      this.sent = true;
+      this.body = body === undefined ? undefined : JSON.parse(body);
+      xhrs.push(this);
+      if (options && options.onSend) { options.onSend(this); }
+    }
     // The answer arrives.
     respond(status, body) { this.status = status; this.responseText = typeof body === "string" ? body : JSON.stringify(body); this.onload(); }
     fail() { this.onerror(); }
@@ -157,10 +190,11 @@ function load(over, options) {
   vm.runInContext(VTT, context);
   context.VpVtt = window.VpVtt;
   vm.runInContext(SYNC, context);
+  vm.runInContext(CALL, context);
   vm.runInContext(PLAYER, context);
   const reports = () => xhrs.filter((x) => x.url.indexOf(S.report + "?") === 0);
   const later = (fn, ms) => addTimer(fn, ms, false);
-  return { S, root, video, hlses, xhrs, reports, tick, later, now: () => now, document, window, $: (id) => root.querySelector("#" + id),
+  return { S, root, video, hlses, xhrs, reports, tick, later, now: () => now, document, window, media, $: (id) => root.querySelector("#" + id),
     hls: () => hlses[hlses.length - 1] };
 }
 
@@ -353,6 +387,42 @@ const INTERNET = [
   ["300 ms, uneven", { up: 250, down: 50, jitter: 100, seekMs: 700 }],
 ];
 const SEEDS = [1, 2, 3];
+
+
+// --- the call
+
+function loadCall(options, over) {
+  const together = { state: groupState(), sync: "/aaa/1/sync", cooldown: 10, names: [], call: "/aaa/1/call" };
+  return load(Object.assign({ together }, over || {}), Object.assign({ call: true }, options || {}));
+}
+
+const person = (page, name, over) => Object.assign({ page, name, mic: false, cam: true, sees: [] }, over || {});
+const callState = (over) => Object.assign({ id: "", v: 1, by: "", starter: "", members: [], ring: false, mail: [] }, over || {});
+
+// The page's wait is answered with this call (and the group as it was), and it waits again.
+function hear(page, call) {
+  open(waits(page)).pop().respond(200, { together: groupState(), waited: 1, call });
+  page.tick(1);
+}
+
+const posts = (page) => page.xhrs.filter((x) => x.url === "/aaa/1/call");
+const tiles = (page) => page.$("tiles").querySelectorAll(".tile");
+const shows = (page, id) => !page.$(id).hidden;
+
+// Rung by Asha (Ravi in too), it presses Join: the post that starts it is answered with
+// the call, this page in it as `me`.
+async function joinedCall(others) {
+  const page = loadCall();
+  page.tick(1);
+  const members = others || [person("asha", "Asha"), person("ravi", "Ravi", { mic: true, cam: false })];
+  hear(page, callState({ id: "1", v: 2, by: "Asha", starter: "asha", members, ring: true }));
+  press(page, "ringjoin");
+  await settle();
+  const x = open(posts(page)).pop();
+  const me = x.body.pg;
+  x.respond(200, { outcome: "joined", call: callState({ id: "1", v: 3, by: "Asha", starter: "asha", members: members.concat([person(me, "")]) }) });
+  return { page, me, x };
+}
 
 // --- the checks
 
@@ -699,7 +769,8 @@ const { check, finish } = runner();
   });
 
   await check("the fullest report together stays within what the daemon reads (public.MAX_VALUES)", async () => {
-    const page = loadGroup({ paused: true, position: 10 }, { start_sub: 0 }, { storage: storage({ "vpstream-name": "Asha" }) });
+    const together = { state: groupState({ paused: true, position: 10 }), sync: "/aaa/1/sync", cooldown: 10, names: [], call: "/aaa/1/call" };
+    const page = load({ together, start: 10, start_sub: 0 }, { storage: storage({ "vpstream-name": "Asha" }), call: true });
     inGroup(page, { paused: true, position: 10 }, 10);
     page.tick(2000);
     answer(page, { paused: true, position: 10 });
@@ -707,7 +778,7 @@ const { check, finish } = runner();
     page.$("opt-size-l").click();  // a size press not yet told: pz=
     page.$("opt-audio-1").click();  // a press for the group: act=, id=, v=
     const keys = open(page.reports()).pop().url.split("?")[1].split("&").map((p) => p.split("=")[0]);
-    eq(keys.length, 16, keys.join(" "));
+    eq(keys.length, 18, keys.join(" "));  // with the call's cv and cm
   });
 
   await check("together: each page says who changed the group, unless it was this page", async () => {
@@ -971,6 +1042,147 @@ const { check, finish } = runner();
     const at = (t) => run.off.find((x) => x.t >= t);
     ok(at(30000).sync, "Sync shows");
     ok(run.off.filter((x) => x.t >= 20000).every((x) => !x.controls), "and nothing else comes up");
+  });
+
+
+  await check("tiles: the right bar then the left; upright, the bottom bar then the top; over the video with no bar", async () => {
+    const V = load().window.VpTiles;
+    const side = V.place({ w: 1000, h: 400, vw: 1920, vh: 1080, n: 4 });  // a phone on its side
+    eq(side.map((t) => t.bar), ["right", "right", "left", "left"]);
+    const bar = (1000 - 400 * 16 / 9) / 2;
+    ok(side[0].x >= 1000 - bar && side[0].x + side[0].w <= 1000, "tiles 1 and 2 in the right bar");
+    ok(side[2].x >= 0 && side[2].x + side[2].w <= bar, "3 and 4 in the left");
+    ok(side[1].y > side[0].y + side[0].h && side[1].x === side[0].x, "one over the other");
+    ok(side[0].y >= V.sizes.top && side[1].y + side[1].h <= 400 - V.sizes.bottom, "between the top and the bottom controls");
+    eq(Math.round(100 * side[0].h / side[0].w), 133, "3:4");
+    eq(V.place({ w: 1000, h: 400, vw: 1920, vh: 1080, n: 1 }).map((t) => t.bar), ["right"]);
+    const upright = V.place({ w: 400, h: 800, vw: 1920, vh: 1080, n: 4 });
+    eq(upright.map((t) => t.bar), ["bottom", "bottom", "top", "top"]);
+    const band = (800 - 400 * 9 / 16) / 2;
+    ok(upright[0].y >= 800 - band && upright[0].y + upright[0].h <= 800 - V.sizes.bottom, "under the video, over the controls");
+    ok(upright[1].y === upright[0].y && upright[1].x >= upright[0].x + upright[0].w, "a row of 2");
+    ok(upright[2].y >= V.sizes.top && upright[2].y + upright[2].h <= band, "then above the video");
+    const scope = V.place({ w: 1600, h: 900, vw: 2390, vh: 1000, n: 3 });  // 2.39:1 on 16:9
+    eq(scope.map((t) => t.bar), ["over", "over", "over"]);
+    ok(scope.every((t) => t.x + t.w <= 1600 && t.x >= 1600 * 0.7), "over the right of the video");
+    ok(scope.every((t, i) => !i || t.y >= scope[i - 1].y + scope[i - 1].h), "one under the other");
+    ok(Math.abs(scope[0].w - 1600 * 0.18) < 1, "18% of the stage wide");
+    eq(V.place({ w: 1000, h: 400, n: 0 }), []);
+    const eight = [1, 2, 3, 4, 5, 6, 7, 8];
+    eq(V.paged(eight, 1), { count: 2, page: 1, tiles: [5, 6, 7, 8] });
+    eq(V.paged([1, 2, 3, 4, 5], 0).tiles, [1, 2, 3, 4]);
+    eq(V.paged([1, 2, 3, 4, 5], 9), { count: 2, page: 1, tiles: [5] }, "past the last: the last");
+    eq(V.paged([], 3), { count: 1, page: 0, tiles: [] });
+  });
+
+  await check("the call: only on a secure page of a stream watched together over HTTPS", async () => {
+    const plain = loadCall({ call: "insecure" });
+    ok(plain.$("call").hidden && plain.$("hangup").hidden, "plain HTTP: no Call button");
+    plain.tick(1);
+    ok(!("cv" in open(waits(plain)).pop().query), "and the waits say nothing of a call");
+    const http = loadGroup(null, null, { call: true });
+    ok(http.$("call").hidden, "the daemon offers none (not HTTPS)");
+    ok(!http.$("call").hidden === false);
+    const page = loadCall();
+    ok(!page.$("call").hidden, "Call shows");
+    ["hangup", "mic", "camera", "zen", "flip", "prevpage", "nextpage"].forEach((id) => ok(page.$(id).hidden, id));
+    page.tick(1);
+    const q = open(waits(page)).pop().query;
+    eq([q.cv, q.cm], ["0", "0"]);
+    eq(page.media.length, 0, "no camera until Call");
+  });
+
+  await check("the call: a ring in the middle, Not now, and Join", async () => {
+    const page = loadCall();
+    page.tick(1);
+    hear(page, callState({ id: "1", v: 2, by: "Asha", starter: "asha", members: [person("asha", "Asha"), person("ravi", "Ravi")], ring: true }));
+    ok(shows(page, "ring"));
+    eq(text(page.$("ringtitle")), "Asha started a call");
+    eq(text(page.$("ringtext")), "Ravi is in it too. The video plays on.");
+    eq(text(page.$("ringface")), "A");
+    ok(page.$("call").classes.includes("live"), "Call says a call runs");
+    eq(page.$("call").getAttribute("aria-label"), "Join the call");
+    press(page, "ringlater");
+    ok(page.$("ring").hidden, "Not now");
+    ok(!page.$("call").hidden && page.$("call").classes.includes("live"), "Call stays, with its dot");
+    hear(page, callState({ id: "1", v: 3, by: "Asha", starter: "asha", members: [person("asha", "Asha")], ring: true }));
+    ok(page.$("ring").hidden, "this call does not ring again");
+    hear(page, callState({ id: "2", v: 5, by: "", starter: "x", members: [person("x", ""), person("y", ""), person("z", "Z")], ring: true }));
+    eq(text(page.$("ringtitle")), "Someone started a call", "a new call rings");
+    eq(text(page.$("ringtext")), "2 others are in it too. The video plays on.");
+    press(page, "call");
+    await settle();
+    eq(page.media.length, 1, "Call asks for the camera and the mic");
+    const start = open(posts(page)).pop();
+    eq([start.body.do, start.body.mic, start.body.cam], ["start", false, true]);
+    eq(start.headers["X-Vpstream-Player"], "1");
+  });
+
+  await check("in the call: End, Mic, Camera and Zen; the others' tiles first, then yours", async () => {
+    const { page, me } = await joinedCall();
+    ok(page.$("call").hidden && page.$("ring").hidden);
+    ["hangup", "mic", "camera", "zen"].forEach((id) => ok(shows(page, id), id));
+    ok(page.$("prevpage").hidden && page.$("pageno").hidden, "3 in the call: one page");
+    ok(page.$("mic").classes.includes("off"), "joined muted");
+    ok(!page.$("camera").classes.includes("off"), "with the camera on");
+    const t = tiles(page);
+    eq(Array.from(t, (el) => el.getAttribute("data-page")), ["asha", "ravi", me]);
+    eq(Array.from(t, (el) => el.getAttribute("data-bar")), ["right", "right", "left"]);
+    eq(Array.from(t, (el) => text(el.querySelector(".tname"))), ["Asha", "Ravi", "You"]);
+    ok(!t[0].querySelector(".tmute").hidden, "Asha is muted: the mic-off sign");
+    ok(t[1].querySelector(".tmute").hidden, "Ravi is not");
+    ok(!t[1].querySelector(".face").hidden && t[1].querySelector("video").hidden, "Ravi's camera is off: his initial");
+    eq(text(t[1].querySelector(".face")), "R");
+    eq(text(t[0].querySelector(".tstate")), "Connecting...");
+    ok(t[2].querySelector("video").srcObject, "your own camera, in your tile");
+    const spot = page.window.VpTiles.place({ w: 1000, h: 400, n: 3 })[0];
+    eq([t[0].style.left, t[0].style.width], [Math.round(spot.x) + "px", Math.round(spot.w) + "px"]);
+    // A tap on a tile is not a tap on the video: the tiles lie over the tap zones.
+    const layers = page.$("stage").childNodes.filter((n) => n.attrs);
+    ok(layers.indexOf(page.$("tiles")) > layers.indexOf(page.$("taps")), "the tiles over the tap zones");
+    page.tick(300);
+    eq(open(posts(page)).pop().body.sees.sort(), ["asha", "ravi"], "the others' tiles show here: they send video");
+    press(page, "zen");
+    eq(tiles(page).length, 0, "Zen: no tiles");
+    ok(page.$("zen").classes.includes("on"));
+    page.tick(300);
+    eq(open(posts(page)).pop().body.sees, [], "and nobody sends this page video");
+    press(page, "zen");
+    eq(tiles(page).length, 3);
+    press(page, "mic");
+    ok(!page.$("mic").classes.includes("off"));
+    page.tick(300);
+    eq(open(posts(page)).pop().body.mic, true);
+    press(page, "hangup");
+    eq(posts(page).pop().body.do, "end");
+    ok(!page.$("call").hidden && page.$("hangup").hidden && tiles(page).length === 0, "out: Call again");
+  });
+
+  await check("in the call: pages of 4, the others first and you last", async () => {
+    const others = ["a1", "a2", "a3", "a4", "a5"].map((p) => person(p, p.toUpperCase()));
+    const { page, me } = await joinedCall(others);
+    ok(shows(page, "prevpage") && shows(page, "nextpage"));
+    eq(text(page.$("pageno")), "1/2");
+    ok(page.$("prevpage").disabled);
+    eq(Array.from(tiles(page), (el) => el.getAttribute("data-page")), ["a1", "a2", "a3", "a4"]);
+    press(page, "nextpage");
+    eq(text(page.$("pageno")), "2/2");
+    eq(Array.from(tiles(page), (el) => el.getAttribute("data-page")), ["a5", me]);
+    ok(page.$("nextpage").disabled);
+    page.tick(300);
+    eq(open(posts(page)).pop().body.sees, ["a5"], "only a5's tile shows now");
+  });
+
+  await check("in the call: the camera off, and back; the call ended by the other", async () => {
+    const { page, me } = await joinedCall([person("asha", "Asha")]);
+    press(page, "camera");
+    ok(page.$("camera").classes.includes("off"));
+    const mine = tiles(page)[1];
+    ok(!mine.querySelector(".face").hidden && mine.querySelector("video").hidden, "your initial");
+    hear(page, callState({ id: "", v: 9 }));
+    ok(page.$("hangup").hidden && tiles(page).length === 0, "the call ended");
+    eq(text(page.$("note")), "The call ended.");
+    eq(me.length > 0, true);
   });
 
   finish();

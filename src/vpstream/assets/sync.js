@@ -27,6 +27,10 @@
 //
 // The subtitle size is each browser's own, also watching together: a press changes it on
 // this page only, and the owner's command for it comes with the answer to a report.
+//
+// Over HTTPS the answers also carry the group's call (see call.js), for a look that has
+// one: the reports and the waits say what of it the page has seen, and a wait is answered
+// as soon as there is news of it for the page.
 (function () {
   "use strict";
   var SOON_MS = 300;  // a change is reported this soon after it is made
@@ -66,9 +70,13 @@
   // this video has no such; seekTo(t); showControls(); update() the time and the play
   // button; render() what status() says. Optional: changed(state, first) after a new state
   // of the group, joined() once this page is at the group's place, outOfSync() when Sync
-  // comes up (by default the controls show, with it).
+  // comes up (by default the controls show, with it); call(state) takes the call's part of
+  // an answer, true when it had news, and callQuery() what a report or a wait says of it.
   window.VpSync = function (S, video, ui, look) {
-    var hooks = { changed: nothing, joined: nothing, name: function () { return ""; } };
+    var hooks = {
+      changed: nothing, joined: nothing, name: function () { return ""; },
+      call: function () { return false; }, callQuery: function () { return []; }
+    };
     for (var key in look) { hooks[key] = look[key]; }
     hooks.outOfSync = hooks.outOfSync || hooks.showControls;
     var T = S.together || null;
@@ -206,6 +214,7 @@
       var name = hooks.name();
       if (name) { q.push("n=" + encodeURIComponent(name)); }
       if (joined) { q.push("in=1"); }
+      q.push.apply(q, hooks.callQuery());
       if (acts.length) {
         q.push("act=" + acts[0].act, "id=" + acts[0].id);
         if (acts[0].v !== undefined) { q.push("v=" + encodeURIComponent(String(acts[0].v))); }
@@ -217,6 +226,7 @@
     // the owner's commands for this browser (its subtitle size).
     function answered(answer, sent, act, said, before) {
       obey(answer.commands || [], before);
+      if (answer.call) { hooks.call(answer.call); }
       if (act && acts[0] === act) {
         acts.shift();
         if (answer.outcome === "queued") { showHint(HINTS[act.act]); }
@@ -443,7 +453,7 @@
     function wait() {
       var x = new XMLHttpRequest();
       var sent = Date.now(), before = group ? group.rev : 0;
-      x.open("GET", T.sync + "?pg=" + page + "&rev=" + before, true);
+      x.open("GET", [T.sync + "?pg=" + page, "rev=" + before].concat(hooks.callQuery()).join("&"), true);
       x.setRequestHeader("X-Vpstream-Player", "1");
       x.timeout = WAIT_TIMEOUT_MS;
       x.onload = function () {
@@ -451,10 +461,11 @@
         if (x.status === 200) {
           try { answer = JSON.parse(x.responseText); } catch (e) { answer = null; }
         }
+        var news = !!(answer && answer.call && hooks.call(answer.call));
         if (answer) { adopt(answer, sent); }
-        // At once again after a real wait or a change; else (the daemon did not hold it, or
-        // it failed) a little later.
-        var again = answer && ((answer.waited || 0) >= 1 || (group && group.rev !== before));
+        // At once again after a real wait or a change, of the group or its call; else (the
+        // daemon did not hold it, or it failed) a little later.
+        var again = answer && ((answer.waited || 0) >= 1 || (group && group.rev !== before) || news);
         window.setTimeout(wait, again ? 0 : WAIT_RETRY_MS);
       };
       x.onerror = x.ontimeout = x.onabort = function () { window.setTimeout(wait, WAIT_RETRY_MS); };

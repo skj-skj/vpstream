@@ -480,4 +480,6 @@ def test_the_call_behaves() -> None:
 def test_the_new_player_behaves() -> None:
     """The new player's real page and scripts in node (modern_test.js): taps, the bar, the
     sheet, full screen and rotation, the viewer's name, and the same watching together."""
-    harness.run("modern_test.js", "modern.html", "vtt.js", "sync.js", "modern.js", at_least=20)
+    harness.run(
+        "modern_test.js", "modern.html", "vtt.js", "sync.js", "call.js", "modern.js", at_least=20
+    )
