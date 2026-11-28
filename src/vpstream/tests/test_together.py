@@ -417,3 +417,175 @@ def test_a_page_that_loads_again_with_the_other_look_does_not_wait_again() -> No
     # A browser that was not watching is a joiner all the same.
     room.report("x", "b-x", T0 + 3, 1, 0.0, 600.0, ready=True)
     assert room.cooldown("x", T0 + 3) == COOLDOWN_SECONDS
+
+
+# --- the call
+
+
+def in_call(room: Room, *pages: str, now: float = T0) -> Room:
+    """The pages are in the group, and in the call, the first one having started it."""
+    joined(room, *pages, now=now)
+    for page in pages:
+        room.start_call(page, now)
+    return room
+
+
+def test_call_rings_every_other_page_and_anyone_joins() -> None:
+    room = joined(Room(), "a", "b", "c")
+    assert not room.call_state("b", T0)["ring"], "no call, no ring"
+    assert room.start_call("a", T0) == together.STARTED
+    a, b = room.call_state("a", T0), room.call_state("b", T0)
+    assert a["id"] and a["id"] == b["id"]
+    assert [m["page"] for m in a["members"]] == ["a"]
+    assert (a["ring"], b["ring"], room.call_state("c", T0)["ring"]) == (False, True, True)
+    assert room.start_call("b", T0 + 1) == together.JOINED
+    assert [m["page"] for m in room.call_state("c", T0 + 1)["members"]] == ["a", "b"]
+    assert room.start_call("b", T0 + 2) == together.JOINED, "pressed again: still in, once"
+    assert len(room.call.members) == 2
+
+
+def test_call_a_page_that_comes_while_it_runs_is_rung_too() -> None:
+    room = in_call(Room(), "a", "b")
+    joined(room, "late")
+    assert room.call_state("late", T0)["ring"]
+
+
+def test_call_a_page_the_room_does_not_know_cannot_start_or_join() -> None:
+    room = joined(Room(), "a")
+    assert room.start_call("stranger", T0) == REFUSED
+    assert not room.call.running
+
+
+def test_call_with_two_end_ends_it_for_both() -> None:
+    room = in_call(Room(), "a", "b")
+    version = room.call.version
+    assert room.call.leave("b") == together.ENDED
+    assert not room.call.running and room.call.members == {}
+    assert room.call.version > version, "the pages see it"
+    state = room.call_state("a", T0)
+    assert (state["id"], state["members"], state["ring"]) == ("", [], False)
+
+
+def test_call_with_three_end_takes_out_only_the_one_who_pressed_it() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    assert room.call.leave("c") == together.LEFT
+    assert list(room.call.members) == ["a", "b"]
+    assert not room.call_state("c", T0)["ring"], "who left is not rung again"
+    assert room.start_call("c", T0 + 5) == together.JOINED, "but can join again"
+    assert room.call.leave("x") == together.NOT_IN
+
+
+def test_call_alone_at_its_start_end_ends_it() -> None:
+    room = in_call(Room(), "a")
+    assert room.call.leave("a") == together.ENDED and not room.call.running
+
+
+def test_call_every_new_call_rings_everyone_again() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    room.call.leave("c")
+    room.call.leave("b")  # two left: it ends for both
+    assert not room.call.running
+    first = room.call.calls
+    assert room.start_call("b", T0 + 10) == together.STARTED
+    assert room.call.calls == first + 1
+    assert room.call_state("c", T0 + 10)["ring"], "c left the last call, not this one"
+    assert room.call_state("a", T0 + 10)["ring"]
+
+
+def test_call_a_page_that_goes_quiet_leaves() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    for page in ("a", "b"):
+        room.call.touch(page, T0 + together.CALL_QUIET_SECONDS)
+    room.tick(T0 + together.CALL_QUIET_SECONDS + 1)
+    assert list(room.call.members) == ["a", "b"]
+    room.call.touch("a", T0 + 100)
+    room.tick(T0 + 100)  # b quiet too: two in the call, so it ends for a as well
+    assert not room.call.running
+
+
+def test_call_has_at_most_twenty() -> None:
+    pages = [f"p{n}" for n in range(together.CALL_SIZE + 1)]
+    room = joined(Room(), *pages)
+    outcomes = [room.start_call(page, T0) for page in pages]
+    assert outcomes[-1] == together.FULL
+    assert len(room.call.members) == together.CALL_SIZE
+    assert room.call_state(pages[-1], T0)["ring"], "still asked: someone may leave"
+
+
+def test_call_keeps_each_ones_mic_and_camera() -> None:
+    room = in_call(Room(), "a", "b", "c")
+    a = room.call_state("a", T0)["members"][0]
+    assert (a["mic"], a["cam"], a["sees"]) == (False, True, []), "in with the camera, muted"
+    version = room.call.version
+    assert room.call.set_state("a", True, False, ["b", "c", "a", "b", "nobody", 3])
+    a = room.call_state("b", T0)["members"][0]
+    assert (a["mic"], a["cam"], a["sees"]) == (True, False, ["b", "c"])
+    assert room.call.version == version + 1
+    room.call.set_state("a", "yes", None, "b")  # nothing that reads: nothing changes
+    assert room.call.version == version + 1
+    assert not room.call.set_state("x", True, True, [])
+
+
+def test_call_passes_messages_to_a_page_until_it_has_them() -> None:
+    room = in_call(Room(), "a", "b")
+    call = room.call
+    assert call.send("a", "b", together.OFFER, "sdp-1", T0)
+    assert not call.send("a", "b", "shout", "x", T0), "not a kind of message"
+    assert not call.send("a", "a", together.OFFER, "x", T0), "not to itself"
+    assert not call.send("a", "x", together.OFFER, "x", T0), "not to a page out of the call"
+    assert not call.send("a", "b", together.OFFER, "x" * (together.MAX_MAIL_DATA + 1), T0)
+    assert not call.send("a", "b", together.OFFER, {"sdp": 1}, T0)
+    assert call.news("b", call.version, 0) and not call.news("a", call.version, 0)
+    mail = room.call_state("b", T0)["mail"]
+    assert [(m["from"], m["kind"], m["data"]) for m in mail] == [("a", "offer", "sdp-1")]
+    again = room.call_state("b", T0 + 1)["mail"]
+    assert again == mail, "lost on the way: it comes again"
+    seq = mail[0]["seq"]
+    assert room.call_state("b", T0 + 1, after=seq)["mail"] == []
+    assert not call.news("b", call.version, seq)
+    assert call.news("b", call.version - 1, seq), "a change of the call is news"
+
+
+def test_call_a_mailbox_keeps_the_newest_and_not_for_long() -> None:
+    room = in_call(Room(), "a", "b")
+    for n in range(together.MAIL_SIZE + 5):
+        room.call.send("a", "b", together.OFFER, str(n), T0)
+    mail = room.call_state("b", T0)["mail"]
+    assert len(mail) == together.MAIL_SIZE and mail[0]["data"] == "5"
+    later = T0 + together.MAIL_SECONDS + 1
+    room.call.touch("a", later)
+    room.call.touch("b", later)
+    assert room.call_state("b", later)["mail"] == []
+    room.tick(later)
+    assert "b" not in room.call.mail
+
+
+def test_call_a_page_sends_only_so_often() -> None:
+    call = Room().call
+    assert all(call.allow("a", T0) for _ in range(together.POSTS))
+    assert not call.allow("a", T0 + 1)
+    assert call.allow("b", T0 + 1), "each page its own"
+    assert call.allow("a", T0 + together.POST_SECONDS + 1)
+
+
+def test_call_ending_drops_its_mail() -> None:
+    room = in_call(Room(), "a", "b")
+    room.call.send("a", "b", together.OFFER, "x", T0)
+    room.call.leave("a")
+    assert room.call.mail == {}
+
+
+def test_call_shows_on_the_dashboard_and_its_count_survives_a_restart() -> None:
+    room = in_call(Room(), "a", "b")
+    room.pages["a"].name = "Asha"
+    room.call.set_state("b", True, None, None)
+    call = room.describe(T0)["call"]
+    assert call["id"] == room.call.id
+    assert call["members"] == [
+        {"page": "a", "device": "b-a", "name": "Asha", "mic": False, "cam": True},
+        {"page": "b", "device": "b-b", "name": "", "mic": True, "cam": True},
+    ]
+    back = Room.from_dict(room.to_dict(T0), 1)
+    assert not back.call.running, "the connections went with the daemon"
+    assert back.call.version > room.call.version and back.call.calls == room.call.calls
+    assert Room.from_dict({"call": {"version": "x", "calls": -1}}, 1).call.version == 1
