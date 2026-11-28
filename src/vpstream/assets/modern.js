@@ -110,6 +110,13 @@
   var HLS_TYPE = "application/vnd.apple.mpegurl";
   var HIDE_MS = 3500;
   var STEP = 10;
+  // hls.js loads this far ahead, while the video plays and while it is paused (its own
+  // default is 30 s): a slow link builds a cushion in a pause. At most BUFFER_BYTES, under
+  // what a browser keeps for one video; and BEHIND seconds already played are kept, for a
+  // step back, the rest let go.
+  var BUFFER_SECONDS = 120;
+  var BUFFER_BYTES = 150 * 1000 * 1000;
+  var BEHIND_SECONDS = 90;
   var DOUBLE_MS = 300;  // two taps this close are a double tap
   var RUN_MS = 800;  // after a double tap, each tap on that side this soon is one step more
   var TOAST_MS = 4000;
@@ -210,7 +217,9 @@
     if (window.Hls && window.Hls.isSupported()) {
       var recovered = false;
       var retries = 0;
-      hls = new window.Hls({ enableWorker: true, startPosition: at > 0 ? at : -1 });
+      hls = new window.Hls({ enableWorker: true, startPosition: at > 0 ? at : -1,
+        maxBufferLength: BUFFER_SECONDS, maxMaxBufferLength: BUFFER_SECONDS,
+        maxBufferSize: BUFFER_BYTES, backBufferLength: BEHIND_SECONDS });
       hls.on(window.Hls.Events.FRAG_LOADED, function () { retries = 0; say(""); });
       hls.on(window.Hls.Events.MANIFEST_PARSED, function () {
         applyAudio();

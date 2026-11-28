@@ -432,6 +432,9 @@ const { check, finish } = runner();
   await check("it starts where the daemon says, with the tracks it says, and the title over the bar", async () => {
     const page = load({ start: 754.5, start_audio: 1, start_sub: 0, title: "Big Film" });
     eq(page.hls().config.startPosition, 754.5);
+    const c = page.hls().config;
+    eq([c.maxBufferLength, c.maxMaxBufferLength, c.maxBufferSize, c.backBufferLength], [120, 120, 150e6, 90],
+      "2 minutes loaded ahead");
     page.hls().emit("manifest");
     eq(page.hls().audioTrack, 1);
     ok(isOn(page, "opt-audio-1") && !isOn(page, "opt-audio-0"), "the sheet has Japanese on");
