@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.22.0 (2026-11-28)
+
+### Features
+
+- A video call while watching together, in the touch player
+  ([`3fe4db2`](https://github.com/skj-skj/vpstream/commit/3fe4db2d07dbe4af3b90d4ca8e53ee996030401a))
+
+
 ## v0.21.1 (2026-11-28)
 
 ### Bug Fixes
