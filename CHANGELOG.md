@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.22.1 (2026-11-28)
+
+### Bug Fixes
+
+- Tapping Mic with no mic asks for it again, and says why it failed
+  ([#40](https://github.com/skj-skj/vpstream/pull/40),
+  [`5725de6`](https://github.com/skj-skj/vpstream/commit/5725de6d200792accf70f657bfdb69415ba084e2))
+
+
 ## v0.22.0 (2026-11-28)
 
 ### Features
