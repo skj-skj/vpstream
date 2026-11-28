@@ -674,6 +674,28 @@ const { check, finish } = runner();
     eq(sent, null, "the video it is on already: nothing to ask");
   });
 
+  await check("viewers: who is in the group's call, read-only", async () => {
+    const devices = [viewer("b-000001", "TV"), viewer("b-000002", "Phone"), viewer("b-000003", "Laptop")];
+    const s = watched(devices);
+    s.together = { rev: 1, video: 1, position: 0, paused: true, audio: null, sub: null, duration: 0,
+      window: 0, changed_by: "", changed_ago: null, now: NOW, pending: [],
+      pages: [{ page: "a", device: "b-000001", drift: 0, cooldown: 0 }, { page: "b", device: "b-000002", drift: 0, cooldown: 0 },
+        { page: "c", device: "b-000003", drift: 0, cooldown: 0 }],
+      call: { id: "3", members: [{ page: "a", device: "b-000001", name: "Asha", mic: true, cam: true },
+        { page: "b", device: "b-000002", name: "", mic: false, cam: false }] } };
+    const page = load({ status: status({ stream: s }), together: () => status({ stream: s, outcome: "applied" }) });
+    await settle();
+    eq(text(page.$("tcall")), "In a call (2): Asha, Phone");
+    const items = page.$("clients").querySelectorAll(".item");
+    ok(text(items[0]).includes("in the call") && !text(items[0]).includes("muted"), text(items[0]));
+    ok(text(items[1]).includes("in the call, muted, camera off"), text(items[1]));
+    ok(!text(items[2]).includes("in the call"), text(items[2]));
+    ok(!page.$("togethercard").querySelector("#tcall button"), "nothing to press");
+    s.together.call = { id: "", members: [] };
+    page.$("tplay").click(); await settle();
+    eq(page.$("tcall"), null, "no call: no line");
+  });
+
   await check("viewers: watching one file together, no video to choose", async () => {
     const s = watched([viewer("b-000001", "TV")]);
     s.videos = [s.videos[0]];

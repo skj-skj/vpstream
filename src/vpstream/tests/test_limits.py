@@ -51,7 +51,7 @@ def test_caddy_asks_the_gate_at_most_so_often(tmp_path: Path) -> None:
     }
     # The waits of players watching together are held long: they never count against it,
     # and have a bound of their own, the same everywhere.
-    sync = server.config()["apps"]["http"]["servers"]["vpstream"]["routes"][1]
+    sync = server.config()["apps"]["http"]["servers"]["vpstream"]["routes"][2]
     assert sync["match"] == [{"path": ["/*/*/sync"]}]
     assert sync["handle"][0]["transport"]["max_conns_per_host"] == caddy.SYNC_CONNECTIONS
 

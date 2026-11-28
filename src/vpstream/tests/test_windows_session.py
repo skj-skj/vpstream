@@ -277,7 +277,7 @@ def test_caddy_asks_the_gate_on_loopback_with_the_secret(tmp_path: Path) -> None
     assert cfg == session.to_gate(linux, 50123, "s3cret")
     text = json.dumps(cfg)
     assert "unix/" not in text and '"dial": "127.0.0.1:50123"' in text
-    proxy = cfg["apps"]["http"]["servers"][caddy.SERVER]["routes"][1]["handle"][0]
+    proxy = cfg["apps"]["http"]["servers"][caddy.SERVER]["routes"][2]["handle"][0]
     assert proxy["headers"]["request"]["set"][session.GATE_HEADER] == ["s3cret"]
     assert proxy["headers"]["request"]["set"][caddy.HEADER_IP] == ["{http.request.remote.host}"]
     writer = cfg["logging"]["logs"]["access"]["writer"]

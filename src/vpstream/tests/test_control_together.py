@@ -518,3 +518,187 @@ def test_a_viewers_whole_name_comes_through_http(rig: Group) -> None:
     )
     assert answer.status_code == 200
     assert rig.room().pages["abc"].name == name
+
+
+# --- the call
+
+
+def post(rig: Group, who: str, pg: str, number: int = 1, **body: Any) -> Answer:
+    """What page `pg` of browser `who` posts to its call."""
+    return rig.control.visit(
+        f"aaa/{number}/call", TV_IP, who, False, rig.cookies.get(who), None, {"pg": pg, **body}
+    )
+
+
+TV_IP = "192.0.2.10"
+
+
+def calling(rig: Group) -> Group:
+    """Two browsers in the group over HTTPS: tv (page t1) and phone (page p1)."""
+    rig.start_together()
+    assert rig.control.stream is not None
+    rig.control.stream.https = True
+    rig.join("tv", "t1")
+    rig.join("phone", "p1")
+    return rig
+
+
+def test_a_call_is_only_for_a_stream_over_https(rig: Group) -> None:
+    rig.start_together()
+    rig.join("tv", "t1")
+    assert rig.page("tv")["together"]["call"] is None
+    assert "call" not in rig.say("tv", "t1")
+    assert post(rig, "tv", "t1", do="start").kind == "missing"
+    assert rig.control.stream is not None
+    rig.control.stream.https = True
+    assert rig.page("tv")["together"]["call"] == "/aaa/1/call"
+    assert rig.say("tv", "t1")["call"]["id"] == ""
+
+
+def test_a_call_rings_the_others_and_passes_their_messages(rig: Group) -> None:
+    calling(rig)
+    started = post(rig, "tv", "t1", do="start")
+    assert started.kind == "client" and started.data["outcome"] == together.STARTED
+    call = started.data["call"]
+    assert [m["page"] for m in call["members"]] == ["t1"] and not call["ring"]
+    rev, version = rig.room().rev, rig.room().call.version
+    # The phone's wait answers at once: it has not seen this call.
+    rung = rig.visit("phone", "aaa/1/sync", html=False, pg="p1", rev=rev, cv=version - 1)
+    assert rung.kind == "client" and rung.data["call"]["ring"] is True
+    assert post(rig, "phone", "p1", do="start").data["outcome"] == together.JOINED
+    sent = post(rig, "tv", "t1", do="send", to="p1", kind="offer", data="v=0 sdp")
+    assert sent.data["outcome"] == together.SENT
+    version = rig.room().call.version
+    got = rig.visit("phone", "aaa/1/sync", html=False, pg="p1", rev=rev, cv=version, cm=0)
+    (mail,) = got.data["call"]["mail"]
+    assert (mail["from"], mail["kind"], mail["data"]) == ("t1", "offer", "v=0 sdp")
+    # Taken: the next wait is held, as any.
+    held = rig.room().call.news("p1", version, mail["seq"])
+    assert held is False
+    assert post(rig, "phone", "p1", do="state", mic=True, sees=["t1"]).data["outcome"] == "applied"
+    assert rig.say("tv", "t1")["call"]["members"][1] == {
+        "page": "p1", "name": "", "mic": True, "cam": True, "sees": ["t1"], "away": False
+    }  # fmt: skip
+    assert post(rig, "phone", "p1", do="away").data["outcome"] == "applied"
+    assert rig.say("tv", "t1")["call"]["members"][1]["away"] is True
+    assert post(rig, "phone", "p1", do="state").data["outcome"] == "applied", "back"
+    assert post(rig, "phone", "p1", do="end").data["outcome"] == together.ENDED
+    assert rig.say("tv", "t1")["call"]["id"] == "", "two in the call: it ended for both"
+    assert rig.control.status()["stream"]["together"]["call"] == {"id": "", "members": []}
+
+
+def test_a_held_wait_ends_when_a_message_comes_for_its_page(
+    rig: Group, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(control, "HOLD_SECONDS", 5.0)
+    calling(rig)
+    post(rig, "tv", "t1", do="start")
+    post(rig, "phone", "p1", do="start")
+    room = rig.room()
+    got: dict[str, Answer] = {}
+    query = {"pg": "p1", "rev": room.rev, "cv": room.call.version, "cm": room.call.seq}
+    thread = threading.Thread(
+        target=lambda: got.update(p1=rig.visit("phone", "aaa/1/sync", html=False, **query))
+    )
+    thread.start()
+    time.sleep(0.2)
+    assert "p1" not in got, "nothing new: held"
+    began = time.monotonic()
+    post(rig, "tv", "t1", do="send", to="p1", kind="answer", data="x")
+    thread.join(3)
+    assert time.monotonic() - began < 2
+    assert [m["data"] for m in got["p1"].data["call"]["mail"]] == ["x"]
+
+
+def test_only_pages_of_the_group_call_and_not_too_often(rig: Group) -> None:
+    calling(rig)
+    assert post(rig, "tv", "stranger", do="start").kind == "missing"
+    assert post(rig, "tv", "Bad!", do="start").kind == "missing"
+    rig.visit("other")  # a browser that waits for the owner
+    assert post(rig, "other", "o1", do="start").kind == "denied"
+    assert post(rig, "tv", "t1", do="dance").data["outcome"] == together.REFUSED
+    assert rig.control.visit(
+        "aaa/1/client", TV_IP, "tv", False, rig.cookies["tv"], None, {}
+    ).kind == ("missing"), "only the call is posted to"
+    answers = [post(rig, "tv", "t1", do="state").kind for _ in range(together.POSTS + 1)]
+    assert answers[0] == "client" and answers[-1] == "busy"
+
+
+def test_the_call_goes_through_the_public_app(rig: Group) -> None:
+    from vpstream import caddy
+
+    calling(rig)
+    app = public.create_app(rig.control).test_client()
+    app.set_cookie(gate.cookie_name(True), rig.cookies["tv"])
+    headers = {caddy.HEADER_IP: TV_IP, caddy.HEADER_SCHEME: "https", player.REPORT_HEADER: "1"}
+    got = app.post("/aaa/1/call", json={"pg": "t1", "do": "start"}, headers=headers)
+    assert got.status_code == 200 and got.get_json()["outcome"] == together.STARTED
+    assert got.headers["Cache-Control"] == "no-store"
+    plain = {k: v for k, v in headers.items() if k != player.REPORT_HEADER}
+    assert app.post("/aaa/1/call", json={"pg": "t1"}, headers=plain).status_code == 400
+    form = app.post("/aaa/1/call", data="pg=t1", headers=headers)
+    assert form.status_code == 400, "only JSON: a page of another site must ask first"
+    big = {"pg": "t1", "do": "send", "data": "x" * caddy.CALL_BYTES}
+    assert app.post("/aaa/1/call", json=big, headers=headers).status_code == 400
+    deep = "[" * 5000 + "]" * 5000
+    sent = app.post("/aaa/1/call", data=deep, headers=headers, content_type="application/json")
+    assert sent.status_code == 400
+    assert app.get("/aaa/1/call", headers=headers).status_code == 404
+    page = app.get("/aaa/1", headers={**headers, "Accept": "text/html"})
+    assert page.status_code == 200
+    assert page.headers["Permissions-Policy"] == "camera=(self), microphone=(self)"
+
+
+def test_only_a_pages_own_browser_acts_for_it_in_the_call(rig: Group) -> None:
+    """The others in the call see a page's key: that is not enough to end its call,
+    read its messages or take them away."""
+    calling(rig)
+    rig.join("laptop", "l1")
+    for who, pg in (("tv", "t1"), ("phone", "p1"), ("laptop", "l1")):
+        post(rig, who, pg, do="start")
+    keys = [m["page"] for m in rig.say("laptop", "l1")["call"]["members"]]
+    assert keys == ["t1", "p1", "l1"]
+    for do in ("end", "state", "away", "start"):
+        assert post(rig, "laptop", "t1", do=do).kind == "missing", do
+    assert post(rig, "laptop", "t1", do="send", to="p1", kind="offer", data="x").kind == "missing"
+    assert "t1" in rig.room().call.members and rig.room().call.seq == 0
+    post(rig, "tv", "t1", do="send", to="p1", kind="offer", data="p1's addresses")
+    room = rig.room()
+    seq = room.call.seq
+    # Not in the laptop's wait or report as the phone's page; nor does either take it.
+    stolen = rig.visit("laptop", "aaa/1/sync", html=False, pg="p1", rev=room.rev, cv=0, cm=0)
+    assert stolen.data["call"]["mail"] == []
+    assert rig.say("laptop", "p1", cm=seq)["call"]["mail"] == []
+    stream = rig.control.stream
+    assert stream is not None
+    assert not stream.call_news("p1", rig.device("laptop").id, room.call.version, 0)
+    assert stream.call_news("p1", rig.device("phone").id, room.call.version, 0)
+    got = rig.visit("phone", "aaa/1/sync", html=False, pg="p1", rev=room.rev, cv=0, cm=0)
+    assert [m["data"] for m in got.data["call"]["mail"]] == ["p1's addresses"]
+
+
+def test_join_on_a_call_that_ended_makes_no_new_one(rig: Group) -> None:
+    calling(rig)
+    first = post(rig, "tv", "t1", do="start").data["call"]["id"]
+    post(rig, "tv", "t1", do="end")
+    late = post(rig, "phone", "p1", do="start", call=first)
+    assert late.data["outcome"] == together.ENDED and not rig.room().call.running
+    assert post(rig, "phone", "p1", do="start", call="").data["outcome"] == together.STARTED
+    running = rig.room().call.id
+    assert post(rig, "tv", "t1", do="start", call=running).data["outcome"] == together.JOINED
+
+
+def test_a_call_post_names_a_video_of_the_stream(rig: Group) -> None:
+    calling(rig)
+    assert post(rig, "tv", "t1", number=2, do="start").kind == "missing"
+    assert post(rig, "tv", "t1", number=0, do="start").kind == "missing"
+    assert post(rig, "tv", "t1", number=1, do="start").data["outcome"] == together.STARTED
+
+
+def test_the_call_says_its_boot_and_a_daemon_back_has_a_new_one(rig: Group) -> None:
+    calling(rig)
+    room = rig.room()
+    boot = rig.say("tv", "t1")["call"]["boot"]
+    assert boot == room.call.boot and len(boot) == 8
+    back = together.Room.from_dict(room.to_dict(rig.clock.now), rig.clock.now)
+    assert back is not None and back.call.boot != boot

@@ -20,13 +20,103 @@
 // the rest is the group's. The viewer can give themselves a name (the face at the top): it
 // goes with every report, and each page says who made a change of the group's ("Asha
 // paused"), so a pause is never taken for a fault.
+//
+// Watching together over HTTPS, the viewers can call each other (call.js): Call starts a
+// call, and every other page shows "Asha started a call" in the middle, with Join and Not
+// now. In the call: End, Mic, Camera (and the other camera, where there is one), Zen (no
+// tiles here; the others still see and hear this viewer) and, with more than 4 in the
+// call, the pages of tiles. The tiles go in the black bars around the video (VpTiles), the
+// others in the order they joined, then the viewer's own. A page that is not secure (plain
+// HTTP) has none of it: the browser gives no camera there.
 (function () {
   "use strict";
+  // Where the tiles of a call go (see `place`), in pixels of the stage.
+  var TILES = {
+    perPage: 4,
+    min: 72,  // a tile narrower than this does not fit in a bar
+    pad: 6,  // from the bar's edges
+    gap: 8,  // between two tiles
+    top: 60,  // the top of the stage, under the top bar's buttons
+    bottom: 104,  // ...and the bottom, under the bar and the buttons
+    over: 0.18  // with no bar, each tile is this share of the stage's width, over the video
+  };
+
+  // Where the `n` tiles of a page go on a stage of w × h that shows a video of vw × vh
+  // (16:9 until it is known), drawn whole (object-fit: contain): a list of {x, y, w, h,
+  // bar}. A video narrower than the stage leaves bars at the sides: the right one holds
+  // tiles 1 and 2, one over the other, between the top and the bottom controls, at 3:4;
+  // the left one 3 and 4. A video wider than the stage (a phone held upright) leaves bars
+  // above and below: the bottom one holds 1 and 2 side by side, the top one 3 and 4. When
+  // the bars do not fit them all, the tiles go over the right of the video, one under the
+  // other.
+  function place(o) {
+    var w = o.w, h = o.h, n = o.n;
+    if (!n || !w || !h) { return []; }
+    var vw = o.vw || 16, vh = o.vh || 9;
+    var scale = Math.min(w / vw, h / vh);
+    var side = (w - vw * scale) / 2, band = (h - vh * scale) / 2;
+    var slots = [];
+    var tw, th, x, y;
+    if (side >= band) {
+      var room = h - TILES.top - TILES.bottom;
+      tw = side - 2 * TILES.pad;
+      th = Math.min(tw * 4 / 3, (room - TILES.gap) / 2);
+      tw = Math.min(tw, th * 3 / 4);
+      if (tw >= TILES.min) {
+        y = TILES.top + (room - 2 * th - TILES.gap) / 2;
+        [w - side + (side - tw) / 2, (side - tw) / 2].forEach(function (left, i) {
+          var bar = i ? "left" : "right";
+          slots.push({ x: left, y: y, w: tw, h: th, bar: bar });
+          slots.push({ x: left, y: y + th + TILES.gap, w: tw, h: th, bar: bar });
+        });
+      }
+    } else {
+      // The bottom bar first: above the controls; then the top one, under its buttons.
+      [["bottom", h - band, band - TILES.bottom], ["top", TILES.top, band - TILES.top]].forEach(function (b) {
+        th = b[2] - 2 * TILES.pad;
+        tw = Math.min(th * 3 / 4, (w - 2 * TILES.pad - TILES.gap) / 2);
+        th = Math.min(th, tw * 4 / 3);
+        if (tw < TILES.min) { return; }
+        x = (w - 2 * tw - TILES.gap) / 2;
+        y = b[1] + (b[2] - th) / 2;
+        slots.push({ x: x, y: y, w: tw, h: th, bar: b[0] });
+        slots.push({ x: x + tw + TILES.gap, y: y, w: tw, h: th, bar: b[0] });
+      });
+    }
+    if (slots.length >= n) { return slots.slice(0, n); }
+    var space = h - TILES.top - TILES.bottom;
+    tw = Math.max(TILES.min, w * TILES.over);
+    th = Math.min(tw * 3 / 4, (space - (n - 1) * TILES.gap) / n);
+    tw = th * 4 / 3;
+    y = TILES.top + (space - n * th - (n - 1) * TILES.gap) / 2;
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      out.push({ x: w - TILES.pad - tw, y: y + i * (th + TILES.gap), w: tw, h: th, bar: "over" });
+    }
+    return out;
+  }
+
+  // The tiles in pages of TILES.perPage: how many pages, and those on page `at` (from 0).
+  function paged(tiles, at) {
+    var count = Math.max(1, Math.ceil(tiles.length / TILES.perPage));
+    var page = Math.max(0, Math.min(at, count - 1));
+    return { count: count, page: page, tiles: tiles.slice(page * TILES.perPage, (page + 1) * TILES.perPage) };
+  }
+
+  window.VpTiles = { place: place, paged: paged, sizes: TILES };
+
   var S = JSON.parse(document.getElementById("settings").textContent);
   var UI = "new";
   var HLS_TYPE = "application/vnd.apple.mpegurl";
   var HIDE_MS = 3500;
   var STEP = 10;
+  // hls.js loads this far ahead, while the video plays and while it is paused (its own
+  // default is 30 s): a slow link builds a cushion in a pause. At most BUFFER_BYTES, under
+  // what a browser keeps for one video; and BEHIND seconds already played are kept, for a
+  // step back, the rest let go.
+  var BUFFER_SECONDS = 120;
+  var BUFFER_BYTES = 150 * 1000 * 1000;
+  var BEHIND_SECONDS = 90;
   var DOUBLE_MS = 300;  // two taps this close are a double tap
   var RUN_MS = 800;  // after a double tap, each tap on that side this soon is one step more
   var TOAST_MS = 4000;
@@ -75,8 +165,25 @@
     changed: announce,
     joined: function () {
       if (!name && !asked()) { toast("Tap the face at the top to tell the others your name.", ""); }
-    }
+    },
+    call: function (state) { return call ? call.update(state) : false; },
+    callQuery: function () { return call ? call.query() : []; }
   });
+  // The call of watching together, where this page can have one (see call.js).
+  var call = T && T.call && window.VpCall ? window.VpCall(T.call, core.page, {
+    changed: drawCall,
+    said: function (text) { if (text) { hintHere(text); } },
+    name: function () { return name; },
+    audioBox: $("callsound")
+  }) : null;
+  if (call && !call.possible) { call = null; }
+  var zen = false;
+  var tilePage = 0;
+  var tileEls = {};  // page -> its tile element
+  var TRAY = ["hangup", "mic", "camera", "flip", "zen", "prevpage", "pageno", "nextpage"];
+  var ICON_W = 46, PAGENO_W = 40;  // what a button and the page number take in the row
+  var AHEAD = 6;  // seconds of film loaded ahead, below which the call has no video
+  var squeezed = false, trayOpen = false;  // the call's buttons in the tray; the tray open
   var ownSeekAt = -Infinity;  // when this page last seeked the video itself
 
   function $(id) { return document.getElementById(id); }
@@ -110,7 +217,9 @@
     if (window.Hls && window.Hls.isSupported()) {
       var recovered = false;
       var retries = 0;
-      hls = new window.Hls({ enableWorker: true, startPosition: at > 0 ? at : -1 });
+      hls = new window.Hls({ enableWorker: true, startPosition: at > 0 ? at : -1,
+        maxBufferLength: BUFFER_SECONDS, maxMaxBufferLength: BUFFER_SECONDS,
+        maxBufferSize: BUFFER_BYTES, backBufferLength: BEHIND_SECONDS });
       hls.on(window.Hls.Events.FRAG_LOADED, function () { retries = 0; say(""); });
       hls.on(window.Hls.Events.MANIFEST_PARSED, function () {
         applyAudio();
@@ -252,6 +361,7 @@
     var height = sizeHeight();
     if (height) { $("overlay").style.fontSize = Math.round(SIZES[size].share * height) + "px"; }
     renderSheet();
+    drawCall();  // the tiles go where the bars are now
   }
 
   // A size by its id. False for one that this page does not know.
@@ -380,7 +490,7 @@
 
   function controlsShown() { return has(document.body, "controls"); }
 
-  function busy() { return !$("sheet").hidden || !$("namebox").hidden || !$("list").hidden || dragging !== null; }
+  function busy() { return trayOpen || !$("sheet").hidden || !$("namebox").hidden || !$("list").hidden || dragging !== null; }
 
   function showControls() {
     flag(document.body, "controls", true);
@@ -423,6 +533,11 @@
 
   function tap(event) {
     if (!$("join").hidden) { return; }
+    if (trayOpen) {
+      openTray(false);
+      showControls();
+      return;
+    }
     var where = zone(event);
     var now = Date.now();
     if (where !== 0 && ((where === lastZone && now - lastTap < DOUBLE_MS) ||
@@ -804,6 +919,213 @@
     toastTimer = window.setTimeout(function () { $("toast").hidden = true; }, TOAST_MS);
   }
 
+  // --- the call (call.js): its buttons, the ring, and the tiles
+
+  var HEADPHONES_KEY = "vpstream-call-hint";
+  var SVG = "http://www.w3.org/2000/svg";
+
+  // The stage's size: turned (see rotate), its width is the window's height.
+  function stageSize() {
+    var w = window.innerWidth || 0, h = window.innerHeight || 0;
+    return turned ? { w: h, h: w } : { w: w, h: h };
+  }
+
+  // Once in this browser: the film's sound through the speakers reaches the mic.
+  function headphones() {
+    try {
+      if (!window.localStorage || window.localStorage.getItem(HEADPHONES_KEY)) { return; }
+      window.localStorage.setItem(HEADPHONES_KEY, "1");
+    } catch (e) { /* a private window: said each time */ }
+    toast("Use headphones: through the speakers, the film's sound reaches the others by your mic.", "");
+  }
+
+  // Call, or Join: the browser asks for the camera and the mic first.
+  function joinCall() {
+    call.start();
+    headphones();
+  }
+
+  function drawCall() {
+    if (!call) { return; }
+    var inside = call.inCall();
+    var live = call.running() && !inside;
+    $("call").hidden = inside;
+    $("call").disabled = call.joining();
+    flag($("call"), "live", live);
+    $("call").setAttribute("aria-label", live ? "Join the call" : "Call");
+    ["hangup", "mic", "camera", "zen"].forEach(function (id) { $(id).hidden = !inside; });
+    $("flip").hidden = !inside || !call.cam() || !call.canFlip();
+    flag($("mic"), "off", !call.mic());
+    $("mic").setAttribute("aria-label", call.mic() ? "Mute" : "Unmute");
+    flag($("camera"), "off", !call.cam());
+    $("camera").setAttribute("aria-label", call.cam() ? "Turn the camera off" : "Turn the camera on");
+    flag($("zen"), "on", zen);
+    $("zen").setAttribute("aria-label", zen ? "Show the tiles" : "Hide the tiles");
+    fitRow();
+    drawRing();
+    drawTiles();
+  }
+
+  // The call's buttons go in the row while it has room for them; on a narrower screen (a
+  // phone held upright) they go in a tray above it, behind the three dots, so Audio and
+  // subtitles, Rotate and Full screen always show.
+  function fitRow() {
+    var row = $("row"), tray = $("tray");
+    var used = $("clock").offsetWidth || 0, extra = 0;
+    for (var i = 0; i < row.childNodes.length; i++) {
+      var el = row.childNodes[i];
+      if (el.nodeName === "BUTTON" && !el.hidden && el.id !== "more" && TRAY.indexOf(el.id) < 0) { used += ICON_W; }
+    }
+    TRAY.forEach(function (id) { if (!$(id).hidden) { extra += id === "pageno" ? PAGENO_W : ICON_W; } });
+    var room = row.clientWidth || 0;  // 0: not laid out yet
+    var squeeze = call.inCall() && room > 0 && used + extra > room;
+    if (squeeze !== squeezed) {
+      squeezed = squeeze;
+      TRAY.forEach(function (id) {
+        if (squeeze) { tray.appendChild($(id)); } else { row.insertBefore($(id), $("next")); }
+      });
+    }
+    if (!squeeze) { trayOpen = false; }
+    $("more").hidden = !squeeze;
+    tray.hidden = !trayOpen;
+    flag($("more"), "on", trayOpen);
+    $("more").setAttribute("aria-expanded", trayOpen ? "true" : "false");
+  }
+
+  function openTray(on) {
+    trayOpen = on;
+    fitRow();
+  }
+
+  // "Asha started a call. Ravi is in it too. The video plays on."
+  function drawRing() {
+    var on = call.ringing();
+    if ($("ring").hidden === on) { $("ring").hidden = !on; }
+    if (!on) { return; }
+    var by = call.by();
+    face($("ringface"), by);
+    $("ringtitle").textContent = (by || "Someone") + " started a call";
+    var others = call.others();
+    var named = others.filter(function (n) { return n; });
+    var also = "";
+    if (others.length && named.length === others.length && others.length <= 2) {
+      also = named.join(" and ") + (others.length === 1 ? " is" : " are") + " in it too. ";
+    } else if (others.length) {
+      also = others.length + (others.length === 1 ? " other is" : " others are") + " in it too. ";
+    }
+    $("ringtext").textContent = also + "The video plays on.";
+  }
+
+  function makeTile(page) {
+    var el = document.createElement("div");
+    el.className = "tile";
+    el.setAttribute("data-page", page);
+    var v = document.createElement("video");
+    v.setAttribute("autoplay", "");
+    v.setAttribute("playsinline", "");
+    v.muted = true;  // the sound plays apart, in call.js's own audio
+    var initial = document.createElement("span");
+    initial.className = "face";
+    var label = document.createElement("span");
+    label.className = "tname";
+    var state = document.createElement("span");
+    state.className = "tstate";
+    // The mic-off sign, at the bottom right of a muted tile.
+    var mute = document.createElement("span");
+    mute.className = "tmute";
+    var svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("class", "ic");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    ["M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21", "M4 4l16 16"].forEach(function (d) {
+      var path = document.createElementNS(SVG, "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    });
+    mute.appendChild(svg);
+    [v, initial, label, state, mute].forEach(function (child) { el.appendChild(child); });
+    // A tap on a tile is not a tap on the video: it neither plays, pauses nor steps.
+    el.addEventListener("click", function (event) { event.stopPropagation(); showControls(); });
+    tileEls[page] = el;
+    return el;
+  }
+
+  function fillTile(el, t) {
+    var v = el.childNodes[0], initial = el.childNodes[1], label = el.childNodes[2];
+    var state = el.childNodes[3], mute = el.childNodes[4];
+    var stream = t.cam && t.stream ? t.stream : null;
+    if (v.srcObject !== stream) {
+      v.srcObject = stream;
+      var playing = stream && v.play && v.play();
+      if (playing && playing["catch"]) { playing["catch"](function () {}); }
+    }
+    v.hidden = !stream;
+    initial.hidden = !!stream;  // the camera is off, or its video has not come yet
+    face(initial, t.name);
+    label.textContent = t.mine ? (t.name ? t.name + " (you)" : "You") : (t.name || "Someone");
+    state.textContent = t.mine ? "" : t.state === "failed" ? "Could not connect" :
+      t.state === "connecting" ? "Connecting..." : "";
+    mute.hidden = t.mic;
+    flag(el, "mirror", !!(t.mine && t.front));
+  }
+
+  function dropTile(page) {
+    var el = tileEls[page];
+    delete tileEls[page];
+    el.childNodes[0].srcObject = null;
+    if (el.parentNode) { el.parentNode.removeChild(el); }
+  }
+
+  // The tiles of the page of tiles shown, where they go; the others are told which of
+  // them show here (only those send their video). In Zen, in an iPhone's own full screen
+  // or with the tab put away, none.
+  function drawTiles() {
+    var all = call.inCall() ? call.tiles() : [];
+    var at = paged(all, tilePage);
+    tilePage = at.page;
+    var many = all.length > TILES.perPage;
+    ["prevpage", "pageno", "nextpage"].forEach(function (id) { $(id).hidden = !many; });
+    $("prevpage").disabled = at.page === 0;
+    $("nextpage").disabled = at.page >= at.count - 1;
+    $("pageno").textContent = (at.page + 1) + "/" + at.count;
+    var shown = zen || nativeFull() || !all.length ? [] : at.tiles;
+    var size = stageSize();
+    var spots = place({ w: size.w, h: size.h, vw: video.videoWidth, vh: video.videoHeight, n: shown.length });
+    var keep = {};
+    shown.forEach(function (t, i) {
+      var el = tileEls[t.page] || makeTile(t.page);
+      keep[t.page] = true;
+      fillTile(el, t);
+      el.style.left = Math.round(spots[i].x) + "px";
+      el.style.top = Math.round(spots[i].y) + "px";
+      el.style.width = Math.round(spots[i].w) + "px";
+      el.style.height = Math.round(spots[i].h) + "px";
+      el.setAttribute("data-bar", spots[i].bar);
+      if (el.parentNode !== $("tiles")) { $("tiles").appendChild(el); }
+    });
+    for (var page in tileEls) { if (!keep[page]) { dropTile(page); } }
+    var seen = document.hidden ? [] : shown.filter(function (t) { return !t.mine; });
+    call.show(seen.map(function (t) { return t.page; }));
+  }
+
+  // Whether the film plays and is short of data: it waits, or has less than AHEAD seconds
+  // loaded ahead of it, short of the end. A paused film is not (the group talks).
+  function short() {
+    if (video.paused || video.ended) { return false; }
+    if (video.readyState < 3) { return true; }
+    var at = video.currentTime, b = video.buffered;
+    for (var i = 0; b && i < b.length; i++) {
+      if (b.start(i) <= at + 0.5 && at < b.end(i)) {
+        return b.end(i) - at < AHEAD && b.end(i) < (video.duration || Infinity) - 0.5;
+      }
+    }
+    return true;
+  }
+
+  function turnTiles(by) {
+    tilePage += by;
+    drawCall();
+  }
+
   // What the controls say while this page waits, and which of them work.
   function note() {
     if (!T) { return; }
@@ -909,7 +1231,7 @@
   }
 
   // Taps on the bars themselves do not reach the video: they only keep the controls up.
-  ["top", "bottom", "sheet", "namebox", "list", "toast"].forEach(function (id) {
+  ["top", "bottom", "sheet", "namebox", "list", "toast", "ring"].forEach(function (id) {
     $(id).addEventListener("click", function (event) { event.stopPropagation(); showControls(); });
   });
 
@@ -929,6 +1251,25 @@
     if (T) { return S.next && core.propose("video", S.number + 1); }
     if (S.next) { window.location.href = S.next; }
   });
+  if (call) {
+    on("call", joinCall);
+    on("more", function () { openTray(!trayOpen); });
+    on("hangup", call.end);
+    on("mic", call.toggleMic);
+    on("camera", call.toggleCam);
+    on("flip", call.flip);
+    on("zen", function () { zen = !zen; drawCall(); });
+    on("prevpage", function () { turnTiles(-1); });
+    on("nextpage", function () { turnTiles(1); });
+    on("ringjoin", joinCall);
+    on("ringlater", call.dismiss);
+    // The film comes first: while it is short of data, the call has no video.
+    ["waiting", "playing", "pause", "progress"].forEach(function (kind) {
+      video.addEventListener(kind, function () { call.film(short()); });
+    });
+    window.setInterval(function () { call.film(short()); }, 1000);
+    document.addEventListener("visibilitychange", drawCall);
+  }
   on("full", toggleFull);
   on("rotate", rotate);
   on("sync", core.syncHere);
@@ -1039,8 +1380,8 @@
       core.propose("seek", Math.max(0, video.currentTime).toFixed(1));
     }
   });
-  video.addEventListener("webkitbeginfullscreen", function () { nativeSubs(true); });
-  video.addEventListener("webkitendfullscreen", function () { nativeSubs(false); showControls(); });
+  video.addEventListener("webkitbeginfullscreen", function () { nativeSubs(true); drawCall(); });
+  video.addEventListener("webkitendfullscreen", function () { nativeSubs(false); showControls(); drawCall(); });
   video.addEventListener("loadedmetadata", function () {
     applySize();
     $("full").hidden = !canFull();  // an iPhone's video full screen is known by now
@@ -1070,6 +1411,7 @@
   $("rotate").hidden = !touch;
   renderSheet();
   var first = sub >= 0 && S.subs[sub].kind === "burn" ? S.subs[sub].url : S.master;
+  drawCall();
   if (T) {
     core.begin();
   }

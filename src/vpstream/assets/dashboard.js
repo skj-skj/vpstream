@@ -391,7 +391,24 @@
     }
     if (p.cooldown > 0) { chips.push(pill("just joined: " + Math.ceil(p.cooldown) + " s", "warn")); }
     if (p.name) { chips.push(pill("name: " + p.name, "")); }
+    var calling = ((g.call && g.call.members) || []).filter(function (m) { return m.device === d.id; });
+    if (calling.length) {
+      var m = calling[calling.length - 1];
+      chips.push(pill("in the call" + (m.mic ? "" : ", muted") + (m.cam ? "" : ", camera off"), "accent"));
+    }
     return chips;
+  }
+
+  // Who is in the group's call, by the name each gave, else by their device's. Only shown:
+  // the owner neither starts nor ends a call.
+  function callText(stream, g) {
+    var c = g.call;
+    if (!c || !c.id || !c.members.length) { return ""; }
+    var names = c.members.map(function (m) {
+      var d = stream.devices.filter(function (x) { return x.id === m.device; })[0];
+      return m.name || (d ? deviceName(d) : "someone");
+    });
+    return "In a call (" + names.length + "): " + names.join(", ");
   }
 
   function renderViewer(stream, now, d) {
@@ -531,7 +548,8 @@
         h("span", {}, "Audio: " + (g.audio === null ? "as the video starts" : trackLabel(menu.audio, g.audio))),
         h("span", {}, "Subtitles: " + (g.sub === null ? "as the video starts" : trackLabel(menu.subs, g.sub)))
       ]),
-      changedText(stream, g) ? h("div", { className: "muted small" }, changedText(stream, g)) : null
+      changedText(stream, g) ? h("div", { className: "muted small" }, changedText(stream, g)) : null,
+      callText(stream, g) ? h("div", { className: "small", id: "tcall" }, callText(stream, g)) : null
     ]);
     $("tplay").textContent = g.paused ? "Play" : "Pause";
     var key = JSON.stringify(menu);

@@ -119,6 +119,8 @@ jobs:
           grep -q "vpstream/assets/player.html" files.txt
           grep -q "vpstream/assets/player.js" files.txt
           grep -q "vpstream/assets/vtt.js" files.txt
+          grep -q "vpstream/assets/call.js" files.txt
+          grep -q "vpstream/tests/call_test.js" files.txt
           grep -q "vpstream/tests/dashboard_test.js" files.txt
       - name: Install the wheel and run selftest
         run: |

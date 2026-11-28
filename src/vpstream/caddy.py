@@ -93,6 +93,10 @@ _NO_ADMIN = {"disabled": True, "config": {"persist": False}}
 # at once never waits behind the held ones. The gate's socket takes these and
 # `gate_connections` together (see daemon.gate_backlog).
 SYNC_CONNECTIONS = 32
+# A page in a call posts the messages that set up its connections to /ALIAS/N/call (see
+# player.CALL): small, and only so many at once; a larger body is refused here.
+CALL_CONNECTIONS = 8
+CALL_BYTES = 16 * 1024
 
 
 def _proxy_to(socket_path: Path, connections: int = 0) -> dict[str, Any]:
@@ -163,6 +167,15 @@ def config(
         "handle": [_proxy_to(gate_socket, SYNC_CONNECTIONS)],
         "terminal": True,
     }
+    # The one request that is not a GET: a page's message for the call, never a file.
+    call = {
+        "match": [{"method": ["POST"], "path": ["/*/*/call"]}],
+        "handle": [
+            {"handler": "request_body", "max_size": CALL_BYTES},
+            _proxy_to(gate_socket, CALL_CONNECTIONS),
+        ],
+        "terminal": True,
+    }
     refuse_method = {
         "match": [{"not": [{"method": ["GET", "HEAD"]}]}],
         "handle": [{"handler": "static_response", "status_code": 405}],
@@ -175,7 +188,7 @@ def config(
         "read_header_timeout": 10 * _SECOND,
         "idle_timeout": 120 * _SECOND,
         "logs": {"default_logger_name": SERVER},
-        "routes": [refuse_method, sync, {"handle": [ask_gate]}],
+        "routes": [call, refuse_method, sync, {"handle": [ask_gate]}],
     }
     apps: dict[str, Any] = {"http": {"servers": {SERVER: server}}}
     if certificate is not None:

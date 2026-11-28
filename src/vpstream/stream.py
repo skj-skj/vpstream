@@ -180,6 +180,11 @@ def _viewer_name(value: Any) -> str:
     return clients.name_value(value) if isinstance(value, str) else ""
 
 
+def _call_id(value: Any) -> str:
+    """The call a page meant to join (`call` of its start), or "" for any."""
+    return value if isinstance(value, str) and len(value) <= 20 else ""
+
+
 def _always(video: str) -> bool:
     return True
 
@@ -255,7 +260,7 @@ class Answer:
     status: int
     # "video" or "file" (Caddy sends it), "index", "playlist", "player", "asset", "redirect",
     # "client" (the answer to a player's report), "preparing", "notready", "waiting",
-    # "denied" or "missing"
+    # "busy" (a page sent too much), "denied" or "missing"
     kind: str
     file: str = ""  # a video or a prepared file: the full path of the file to send
     number: int = 0  # the video's number
@@ -431,17 +436,19 @@ class Stream:
         now: float,
         cookie: str | None = None,
         query: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
     ) -> Answer:
         """Answer one request for `path` (decoded, as the viewer asked for it), with the
         approval cookie the browser sent and the query of a player's report (None for a
-        request that is not one; see player.REPORT_HEADER).
+        request that is not one; see player.REPORT_HEADER). `body` is what a page posted to
+        its call (see player.CALL), None for any other request.
 
         Only a request under the alias counts as a device; anything else on the port, such
         as a scanner trying `/`, is simply not found.
         """
         if self.devices.guesser(ip):
             return MISSING
-        answer = self._route(path, ip, user_agent, wants_html, now, cookie, query)
+        answer = self._route(path, ip, user_agent, wants_html, now, cookie, query, body)
         # A device that gets in may ask for what is not there (a browser's favicon); from
         # anyone else it is a guess at the alias.
         if answer.kind == "missing" and not self.devices.passes(self.policy, ip, cookie):
@@ -457,6 +464,7 @@ class Stream:
         now: float,
         cookie: str | None,
         query: dict[str, str] | None,
+        body: dict[str, Any] | None = None,
     ) -> Answer:
         parts = [part for part in path.split("/") if part]
         if not parts or parts[0].lower() != self.alias:
@@ -465,7 +473,7 @@ class Stream:
         # Only browser mode has pages a browser stays on, so only there is a cookie given.
         seen = self.devices.admit(self.policy, ip, user_agent, now, cookie, browser and wants_html)
         if seen.ok:
-            answer = self._admitted(parts, seen.device, wants_html, query, now)
+            answer = self._admitted(parts, seen.device, wants_html, query, now, body)
         else:
             answer = self._refused(seen.device, wants_html)
         if seen.cookie:
@@ -480,6 +488,11 @@ class Stream:
             return Answer(403, "waiting", data={"code": device.code})
         return DENIED
 
+    def _number(self, text: str) -> int:
+        """The video that `text` names, from 1; 0 for none of this stream's."""
+        ok = NUMBER.fullmatch(text) and 1 <= int(text) <= len(self.videos)
+        return int(text) if ok else 0
+
     def _admitted(
         self,
         parts: list[str],
@@ -487,8 +500,12 @@ class Stream:
         wants_html: bool,
         query: dict[str, str] | None,
         now: float,
+        body: dict[str, Any] | None = None,
     ) -> Answer:
         browser = self.mode == BROWSER
+        if body is not None:  # only a page's call is posted to
+            good = len(parts) == 3 and parts[2] == player.CALL and self._number(parts[1])
+            return self._call(device, body, now) if browser and good else MISSING
         if len(parts) == 1:
             if self.kind == "file":
                 return self._play(1, wants_html, device, now) if browser else self._video(1)
@@ -500,9 +517,9 @@ class Stream:
             return self._listing("playlist")
         if browser and len(parts) == 3 and head == ASSETS:
             return Answer(200, "asset", asset=parts[2]) if parts[2] in player.ASSETS else MISSING
-        if not NUMBER.fullmatch(parts[1]) or not 1 <= int(parts[1]) <= len(self.videos):
+        number = self._number(parts[1])
+        if not number:
             return MISSING
-        number = int(parts[1])
         if len(parts) == 2:
             if not browser:
                 return self._video(number)
@@ -566,6 +583,7 @@ class Stream:
             group=None if room is None else room.state(now),
             own=own,
             ui=self.ui,
+            call=self.https,
         )
         used = client is not None and client.start_at is not None and client.start_at[0] == number
         if client is not None:
@@ -605,9 +623,11 @@ class Stream:
             name=_viewer_name(query.get("n")),
             rev=clients.read_int(query.get("rev")),
         )
+        if room.owns(page, device.id):
+            room.call.touch(page, now)
         outcome = self._act(page, device.id, query, now) if query.get("act") else None
         data = {
-            **self.group_state(page, now),
+            **self.group_state(page, device.id, now, clients.read_int(query.get("cm"))),
             "outcome": outcome,
             "commands": mine,
             "ui": self.ui,
@@ -643,7 +663,8 @@ class Stream:
         self, number: int, device: gate.Device | None, query: dict[str, str] | None, now: float
     ) -> Answer:
         """A page waits for the group to change: the answer comes at once when the group's
-        rev is not the one the page has (`rev`), else `control` holds it ("hold")."""
+        rev is not the one the page has (`rev`), or the call has news for it (its version is
+        not `cv`, or a message newer than `cm` waits), else `control` holds it ("hold")."""
         room = self.together
         if room is None or device is None or device.kind != gate.BROWSER or query is None:
             return MISSING
@@ -651,22 +672,92 @@ class Stream:
         if not page:
             return MISSING
         room.tick(now)
+        if room.owns(page, device.id):
+            room.call.touch(page, now)
         rev = clients.read_int(query.get("rev"))
-        if rev is None or rev != room.rev or number != room.video:
-            return Answer(200, "client", number=number, data=self.group_state(page, now))
-        data = {"page": page, "rev": rev, "device": device.id}
+        version, after = clients.read_int(query.get("cv")), clients.read_int(query.get("cm"))
+        if (
+            rev is None
+            or rev != room.rev
+            or number != room.video
+            or self.call_news(page, device.id, version, after)
+        ):
+            data = self.group_state(page, device.id, now, after)
+            return Answer(200, "client", number=number, data=data)
+        data = {"page": page, "rev": rev, "device": device.id, "cv": version, "cm": after}
         return Answer(200, "hold", number=number, data=data)
 
-    def group_state(self, page: str, now: float) -> dict[str, Any]:
+    def call_news(self, page: str, device: str, version: int | None, after: int | None) -> bool:
+        """Whether the call has news for a page that has seen it at `version`, and its
+        messages up to `after` (see together.Call.news); messages only for a page of
+        `device`'s own. Never on plain HTTP: no calls."""
+        room = self.together
+        if room is None or not self.https:
+            return False
+        return room.call.news(page, version, after, mail=room.owns(page, device))
+
+    def _call(self, device: gate.Device | None, body: dict[str, Any], now: float) -> Answer:
+        """What a page of the group did in the call (`do`): "start" (Call, or Join, with
+        its `mic` and `cam`; `was` its page before it loaded again; `call` the call it meant
+        to join, "" for any), "end", "state" (its
+        `mic`, `cam`, and the tiles it `sees`), "away" (its tab closed or loads again: see
+        Call.away), or "send" a message (`kind`, `data`) to another page in it (`to`).
+        Only a page the group knows as this browser's, of an approved browser, on a stream
+        over HTTPS: the camera works nowhere else. The answer is the call as this page sees
+        it, with its messages newer than `cm`."""
+        room = self.together
+        if room is None or not self.https or device is None or device.kind != gate.BROWSER:
+            return MISSING
+        # The page must be this browser's own: the others in the call see its key.
+        page = clients.page_key(body.get("pg"))
+        if not page or not room.owns(page, device.id):
+            return MISSING
+        call = room.call
+        if not call.allow(page, now):
+            return Answer(429, "busy")
+        room.tick(now)
+        call.touch(page, now)
+        what = body.get("do")
+        if what == "start":
+            was = clients.page_key(body.get("was"))
+            outcome = room.start_call(page, now, was, _call_id(body.get("call")))
+            if outcome in (together.STARTED, together.JOINED):
+                call.set_state(page, body.get("mic"), body.get("cam"), body.get("sees"))
+        elif what == "end":
+            outcome = call.leave(page)
+        elif what == "state":
+            ok = call.set_state(page, body.get("mic"), body.get("cam"), body.get("sees"))
+            outcome = together.APPLIED if ok else together.NOT_IN
+        elif what == "away":
+            outcome = together.APPLIED if call.away(page, now) else together.NOT_IN
+        elif what == "send":
+            ok = call.send(page, body.get("to"), body.get("kind"), body.get("data"), now)
+            outcome = together.SENT if ok else together.REFUSED
+        else:
+            outcome = together.REFUSED
+        data = {
+            "call": room.call_state(page, now, clients.read_int(body.get("cm"))),
+            "outcome": outcome,
+        }
+        return Answer(200, "client", data=data)
+
+    def group_state(
+        self, page: str, device: str, now: float, after: int | None = None
+    ) -> dict[str, Any]:
         """What a page of the group is told: the group's state, its own cooldown, and
-        whether it watches alone (the group then goes where it is)."""
+        whether it watches alone (the group then goes where it is). Over HTTPS, the call
+        too, with the page's messages newer than `after`: only to a page of `device`'s own
+        (another browser that knows its key gets none, and takes none away)."""
         room = self.together
         assert room is not None
-        return {
+        state = {
             "together": room.state(now),
             "cooldown": round(room.cooldown(page, now), 2),
             "alone": room.alone(page, now),
         }
+        if self.https:
+            state["call"] = room.call_state(page, now, after, mail=room.owns(page, device))
+        return state
 
     def _prepared_file(self, number: int, rel: str) -> Answer:
         found = prepared.served_file(Path(self.entries[number - 1]), rel)

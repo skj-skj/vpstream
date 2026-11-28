@@ -20,11 +20,16 @@ gave themselves on the player, so the other players can say who paused (`changes
 
 The position is the room's at `anchor` (a time of the clock); while it plays, it moves on
 with the clock. Every change bumps `rev`, which the players wait on (see `control`).
+
+The viewers can also call each other, with video and sound, browser to browser (`Call`,
+and call.js on the page). The daemon only keeps who is in the call and passes the few
+messages that set up each pair's connection; the video and sound never come here.
 """
 
 from __future__ import annotations
 
 import contextlib
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,6 +58,22 @@ MAX_STEP = 3600.0
 MAX_DEVICE = 40
 APPLIED, QUEUED, COOLDOWN, REFUSED = "applied", "queued", "cooldown", "refused"
 OWNER = "owner"  # who changed it, for a change made on the dashboard or the command line
+
+# The call (see Call).
+CALL_SIZE = 20  # people in one call at most
+CALL_QUIET_SECONDS = 30.0  # a page in the call not heard from this long has left it
+# A page that said it went away (its tab closed, or loaded again) and was not taken over by
+# its next page this soon has left the call. Until then the others do not show it.
+AWAY_SECONDS = 10.0
+MAIL_SIZE = 64  # messages that wait for one page; past it the oldest go
+MAIL_SECONDS = 30.0  # a message not taken by then is dropped
+MAX_MAIL_DATA = 12000  # characters of one message (an offer with all its addresses)
+OFFER, ANSWER, BYE = "offer", "answer", "bye"
+MAIL_KINDS = (OFFER, ANSWER, BYE)
+POSTS, POST_SECONDS = 40, 10.0  # what a page may send to the call in that many seconds
+STARTED, JOINED, FULL, ENDED, LEFT, NOT_IN, SENT = (
+    "started", "joined", "full", "ended", "left", "not in the call", "sent"
+)  # fmt: skip
 
 
 class TogetherError(ValueError):
@@ -133,6 +154,224 @@ class Page:
 
 
 @dataclass
+class Member:
+    """One page in the call, and what its viewer has turned on."""
+
+    joined: float
+    seen: float
+    mic: bool = False  # a page joins with its mic off and its camera on
+    cam: bool = True
+    # The pages whose tiles it shows now: only they get its video (see call.js).
+    sees: list[str] = field(default_factory=list)
+    away: float | None = None  # when its page said it went away (see Call.away)
+
+
+@dataclass
+class Mail:
+    """One message that sets up the connection of two pages; what it holds is the
+    browsers' own, and is never read here."""
+
+    seq: int
+    sender: str
+    kind: str
+    data: str
+    at: float
+
+
+@dataclass
+class Call:
+    """The call of the group's viewers. Someone presses Call: a call starts, and every
+    other page of the group is rung. Anyone joins and leaves when they like, also one who
+    left before. With 2 in the call, End ends it for both; with more, only for the one who
+    pressed it. A page not heard from for CALL_QUIET_SECONDS leaves the same way.
+
+    Each pair of pages in the call connects browser to browser; the messages that set that
+    up go through here, into the other page's mailbox, and come out with the page's next
+    answer. A page says which messages it has (`after`), so one lost on the way comes
+    again. A mailbox keeps MAIL_SIZE messages, each for MAIL_SECONDS at most, and a page
+    sends POSTS in POST_SECONDS at most.
+
+    Every change that the pages show (who is in, their mic and camera) bumps `version`;
+    a new message does not. `boot` is this Call's own: a daemon that comes back has a new
+    one, so a page drops the version it had seen (a crash may lose the last changes, and
+    the daemon's version may then be behind the page's)."""
+
+    id: str = ""  # the call that runs, "" for none; every call has an id of its own
+    calls: int = 0  # how many calls there were: the next one's id
+    version: int = 1
+    starter: str = ""  # the page that started it
+    members: dict[str, Member] = field(default_factory=dict)  # in the order they joined
+    left: set[str] = field(default_factory=set)  # pages that left this call: not rung again
+    mail: dict[str, list[Mail]] = field(default_factory=dict)  # page -> its mailbox
+    seq: int = 0  # the newest message's number
+    posts: dict[str, list[float]] = field(default_factory=dict)  # page -> when it sent
+    boot: str = field(default_factory=lambda: secrets.token_hex(4))
+
+    @property
+    def running(self) -> bool:
+        return bool(self.id)
+
+    def _changed(self) -> None:
+        self.version += 1
+
+    def start(self, page: str, now: float) -> str:
+        """Call pressed on `page`: a new call, which rings everyone else, or the one that
+        runs, joined. STARTED, JOINED or FULL."""
+        if not self.running:
+            self.calls += 1
+            self.id, self.starter = str(self.calls), page
+            self.members, self.left, self.mail = {page: Member(now, now)}, set(), {}
+            self._changed()
+            return STARTED
+        if page not in self.members:
+            if len(self.members) >= CALL_SIZE:
+                return FULL
+            self.members[page] = Member(now, now)
+            self.left.discard(page)
+            self._changed()
+        return JOINED
+
+    def take_over(self, was: str, page: str, now: float) -> bool:
+        """`page` takes the place of `was` in the call, as it was: the same browser loaded
+        the player again (another video for the group, or the other look). False when
+        `was` is not in the call."""
+        if was not in self.members or page in self.members:
+            return False
+        self.members = {page if k == was else k: m for k, m in self.members.items()}
+        self.members[page].seen = now
+        self.members[page].away = None
+        for member in self.members.values():
+            member.sees = [page if p == was else p for p in member.sees]
+        if self.starter == was:
+            self.starter = page
+        self.mail.pop(was, None)
+        self._changed()
+        return True
+
+    def leave(self, page: str) -> str:
+        """End pressed on `page`. With 2 in the call (or 1) it ends for both (ENDED);
+        with more, this page leaves it (LEFT)."""
+        if page not in self.members:
+            return NOT_IN
+        if len(self.members) <= 2:
+            self.end()
+            return ENDED
+        del self.members[page]
+        self.mail.pop(page, None)
+        self.left.add(page)
+        self._changed()
+        return LEFT
+
+    def end(self) -> None:
+        if self.running:
+            self.id, self.starter = "", ""
+            self.members, self.left, self.mail = {}, set(), {}
+            self._changed()
+
+    def touch(self, page: str, now: float) -> None:
+        """The page was heard from."""
+        member = self.members.get(page)
+        if member is not None:
+            member.seen = max(member.seen, now)
+
+    def away(self, page: str, now: float) -> bool:
+        """The page went away: its tab closed, or loaded again, which takes its place back
+        (see Room.start_call). The others stop showing it at once; it leaves after
+        AWAY_SECONDS. False for a page not in the call."""
+        member = self.members.get(page)
+        if member is None:
+            return False
+        if member.away is None:
+            member.away = now
+            self._changed()
+        return True
+
+    def set_state(self, page: str, mic: Any, cam: Any, sees: Any) -> bool:
+        """What a page in the call has on: its mic, its camera, and the tiles it shows.
+        A value that does not read is left as it was. False for a page not in the call.
+        A page that went away and says this is back (a browser that kept it)."""
+        member = self.members.get(page)
+        if member is None:
+            return False
+        before = (member.mic, member.cam, member.sees, member.away)
+        member.away = None
+        if isinstance(mic, bool):
+            member.mic = mic
+        if isinstance(cam, bool):
+            member.cam = cam
+        if isinstance(sees, list):
+            shown = [p for p in sees if isinstance(p, str) and p in self.members and p != page]
+            member.sees = list(dict.fromkeys(shown))[:CALL_SIZE]
+        if (member.mic, member.cam, member.sees, member.away) != before:
+            self._changed()
+        return True
+
+    def allow(self, page: str, now: float) -> bool:
+        """Whether `page` may send once more now (POSTS in POST_SECONDS); counts it."""
+        sent = [at for at in self.posts.get(page, []) if now - at < POST_SECONDS]
+        allowed = len(sent) < POSTS
+        if allowed:
+            sent.append(now)
+        self.posts[page] = sent
+        if len(self.posts) > MAX_PAGES:  # pages that went
+            for key in [k for k, v in self.posts.items() if not v or now - v[-1] >= POST_SECONDS]:
+                del self.posts[key]
+        return allowed
+
+    def send(self, page: str, to: Any, kind: Any, data: Any, now: float) -> bool:
+        """A message from `page` to `to`, both in the call. False for one that does not
+        read."""
+        ok = isinstance(to, str) and page in self.members and to in self.members and to != page
+        if not ok or kind not in MAIL_KINDS:
+            return False
+        if not isinstance(data, str) or len(data) > MAX_MAIL_DATA:
+            return False
+        self.seq += 1
+        box = self.mail.setdefault(to, [])
+        box.append(Mail(self.seq, page, kind, data, now))
+        del box[:-MAIL_SIZE]
+        return True
+
+    def take(self, page: str, after: int | None, now: float) -> list[dict[str, Any]]:
+        """The messages for `page` newer than `after`, the newest it has; those up to it
+        are gone from its mailbox."""
+        box = [m for m in self.mail.get(page, []) if m.seq > (after or 0)]
+        if page in self.mail:
+            self.mail[page] = box
+        return [
+            {"seq": m.seq, "from": m.sender, "kind": m.kind, "data": m.data}
+            for m in box
+            if now - m.at <= MAIL_SECONDS
+        ]
+
+    def news(self, page: str, version: int | None, after: int | None, mail: bool = True) -> bool:
+        """Whether the page has not seen the call as it is, or has a message waiting (only
+        with `mail`: see Room.owns). A page that gives no `version` does not follow the
+        call (the TV's look)."""
+        if version is not None and version != self.version:
+            return True
+        return mail and any(m.seq > (after or 0) for m in self.mail.get(page, []))
+
+    def tick(self, now: float) -> bool:
+        """Pages not heard from leave, and old messages go. True when the call changed."""
+        version = self.version
+        for page, member in list(self.members.items()):
+            gone = member.away is not None and now - member.away > AWAY_SECONDS
+            if (gone or now - member.seen > CALL_QUIET_SECONDS) and page in self.members:
+                self.leave(page)
+        for page, box in list(self.mail.items()):
+            self.mail[page] = [m for m in box if now - m.at <= MAIL_SECONDS]
+            if not self.mail[page]:
+                del self.mail[page]
+        return self.version != version
+
+    def rings(self, page: str) -> bool:
+        """Whether `page` is asked to join: every page that is not in the call and has not
+        left it, also one that came after it started."""
+        return self.running and page not in self.members and page not in self.left
+
+
+@dataclass
 class Room:
     videos: int = 1  # how many the stream has, for a change of video
     video: int = 1
@@ -153,6 +392,7 @@ class Room:
     pages: dict[str, Page] = field(default_factory=dict)
     durations: dict[int, float] = field(default_factory=dict)  # as the players report them
     actions: dict[str, tuple[float, str]] = field(default_factory=dict)  # id -> (when, outcome)
+    call: Call = field(default_factory=Call)
 
     # --- where the group is
 
@@ -328,7 +568,8 @@ class Room:
 
     def tick(self, now: float) -> bool:
         """Close a window that is due, and pause a group that reached the end of its video.
-        True when that changed the room."""
+        True when that changed the room. Pages gone quiet leave the call (see Call.tick)."""
+        self.call.tick(now)
         rev = self.rev
         if self.window_until is not None and now >= self.window_until:
             pending, self.pending, self.window_until = self.pending, {}, None
@@ -377,6 +618,67 @@ class Room:
         while len(self.actions) >= MAX_ACTIONS:
             del self.actions[next(iter(self.actions))]
 
+    # --- the call
+
+    def owns(self, page: str, device: str) -> bool:
+        """Whether `page` is a page of `device` (a browser's id). The pages in a call see
+        each other's keys: only the page's own browser acts for it, or gets its messages."""
+        known = self.pages.get(page)
+        return known is not None and known.device == device[:MAX_DEVICE]
+
+    def start_call(self, page: str, now: float, was: str = "", call: str = "") -> str:
+        """Call pressed on a page of the group (see Call.start); REFUSED for a page the
+        room does not know. A page loaded again takes its old place in the call (`was`),
+        when that was a page of the same browser; one that does not know it (its tab kept
+        nothing) takes the place of a page of its browser that went away. `call` is the
+        call the page meant to join (Join on a ring, or its place after a load): ENDED when
+        that is not the one that runs, as when it ended while the browser asked for the
+        camera. "": Call, a new call, or the one someone started meanwhile."""
+        self.tick(now)
+        if page not in self.pages:
+            return REFUSED
+        if call and call != self.call.id:
+            return ENDED
+        device = self.pages[page].device
+        gone = [k for k, m in self.call.members.items() if m.away is not None]
+        for old in [was, *gone]:
+            known = self.pages.get(old)
+            if known is not None and known.device == device and self.call.take_over(old, page, now):
+                return JOINED
+        return self.call.start(page, now)
+
+    def _name(self, page: str) -> str:
+        known = self.pages.get(page)
+        return known.name if known is not None else ""
+
+    def _member(self, page: str, member: Member) -> dict[str, Any]:
+        """One in the call, as the pages and the dashboard show it."""
+        return {"page": page, "name": self._name(page), "mic": member.mic, "cam": member.cam}
+
+    def call_state(
+        self, page: str, now: float, after: int | None = None, mail: bool = True
+    ) -> dict[str, Any]:
+        """What `page` is told of the call: who is in it, in the order they joined, with
+        their names and what they have on (`away`: gone, to be taken over or leave); who
+        started it (`starter`, by name `by`); whether it is rung; and its messages newer
+        than `after` (with `mail`: see Room.owns; without, none are taken). `id` is "" while
+        no call runs; `boot` changes when the daemon comes back (see Call)."""
+        call = self.call
+        members = [
+            {**self._member(key, m), "sees": m.sees, "away": m.away is not None}
+            for key, m in call.members.items()
+        ]
+        return {
+            "id": call.id,
+            "boot": call.boot,
+            "v": call.version,
+            "by": self._name(call.starter),
+            "starter": call.starter,
+            "members": members,
+            "ring": call.rings(page),
+            "mail": call.take(page, after, now) if mail else [],
+        }
+
     # --- as plain data
 
     def state(self, now: float) -> dict[str, Any]:
@@ -413,7 +715,13 @@ class Room:
             for key, p in sorted(self.pages.items(), key=lambda item: item[1].seen)
             if now - p.seen <= clients.ACTIVE_SECONDS
         ]
-        return {**self.state(now), "pending": sorted(self.pending), "pages": pages}
+        members = [
+            {**self._member(key, m), "device": self.pages[key].device if key in self.pages else ""}
+            for key, m in self.call.members.items()
+            if m.away is None
+        ]
+        call = {"id": self.call.id, "members": members}
+        return {**self.state(now), "pending": sorted(self.pending), "pages": pages, "call": call}
 
     def to_dict(self, now: float | None = None) -> dict[str, Any]:
         """For the state file. A room read back is paused where it was at `now` (by default,
@@ -433,6 +741,9 @@ class Room:
                 key: {"device": p.device, "seen": p.seen, "video": p.video, "joined": p.joined}
                 for key, p in self.pages.items()
             },
+            # Not who is in the call: their connections go with the daemon. Its count goes
+            # on, so the pages see the change.
+            "call": {"version": self.call.version, "calls": self.call.calls},
         }
 
     @classmethod
@@ -464,6 +775,12 @@ class Room:
             good = isinstance(key, str) and key.isdecimal() and is_finite(value) and value > 0
             if good and 0 < int(key) <= videos:
                 room.durations[int(key)] = float(value)
+        call = data.get("call")
+        call = call if isinstance(call, dict) else {}
+        for name in ("version", "calls"):
+            value = call.get(name)
+            if is_whole(value) and 0 <= value < 10**12:
+                setattr(room.call, name, value + (name == "version"))
         pages = data.get("pages")
         for key, raw in list(pages.items())[:MAX_PAGES] if isinstance(pages, dict) else []:
             page = _page(raw)
