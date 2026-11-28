@@ -542,6 +542,32 @@ const { check, finish } = runner();
     eq(a.asked.length, asks + 2);
   });
 
+  await check("a mic taken while on: Mic mutes it first; an answer after End is let go", async () => {
+    const { d, a } = await pair();
+    a.call.toggleMic();
+    const taken = a.tracks.find((t) => t.kind === "audio");
+    taken.readyState = "ended";  // another app has it now
+    const asks = a.asked.length;
+    a.call.toggleMic(); await settle();
+    eq([a.call.mic(), a.asked.length], [false, asks], "muted, nothing asked");
+    eq(sender(a, "audio").track, null);
+    a.tick(300); await settle();
+    eq(d.members[0].mic, false, "told the daemon");
+    // Asked again, the answer comes only after End and a new Call: it is let go.
+    let answer;
+    const m = a.window.navigator.mediaDevices, real = m.getUserMedia;
+    m.getUserMedia = () => new Promise((r) => { answer = r; });
+    a.call.toggleMic();
+    m.getUserMedia = real;
+    a.call.end(); await settle();
+    a.call.start(); await settle();
+    const late = new Track("audio", "late mic");
+    answer(new MediaStream([late]));
+    await settle();
+    ok(late.stopped, "let go");
+    eq(a.call.mic(), false, "the new call's mic stays off");
+  });
+
   await check("a daemon that comes back behind the page's version is followed, and never in a loop", async () => {
     const d = daemon();
     const a = browser("a", d);
