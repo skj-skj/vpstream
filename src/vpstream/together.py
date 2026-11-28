@@ -279,10 +279,10 @@ class Call:
                 del self.posts[key]
         return allowed
 
-    def send(self, page: str, to: str, kind: Any, data: Any, now: float) -> bool:
-        """A message from `page` to `to`, both in the call: SENT, or False for one that
-        does not read."""
-        ok = page in self.members and to in self.members and to != page
+    def send(self, page: str, to: Any, kind: Any, data: Any, now: float) -> bool:
+        """A message from `page` to `to`, both in the call. False for one that does not
+        read."""
+        ok = isinstance(to, str) and page in self.members and to in self.members and to != page
         if not ok or kind not in MAIL_KINDS:
             return False
         if not isinstance(data, str) or len(data) > MAX_MAIL_DATA:
@@ -306,8 +306,9 @@ class Call:
         ]
 
     def news(self, page: str, version: int | None, after: int | None) -> bool:
-        """Whether the page has not seen the call as it is, or has a message waiting."""
-        if version != self.version:
+        """Whether the page has not seen the call as it is, or has a message waiting. A
+        page that gives no `version` does not follow the call (the TV's look)."""
+        if version is not None and version != self.version:
             return True
         return any(m.seq > (after or 0) for m in self.mail.get(page, []))
 

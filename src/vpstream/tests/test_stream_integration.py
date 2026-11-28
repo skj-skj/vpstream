@@ -58,6 +58,7 @@ class Live:
         method: str = "GET",
         headers: dict[str, str] | None = None,
         timeout: float = 10,
+        body: bytes | None = None,
     ) -> tuple[int, dict[str, str], bytes]:
         conn: http.client.HTTPConnection
         if self.tls is None:
@@ -67,7 +68,7 @@ class Live:
                 "127.0.0.1", self.cfg.stream_port, timeout=timeout, context=self.tls
             )
         try:
-            conn.request(method, target, headers=headers or {})
+            conn.request(method, target, body=body, headers=headers or {})
             answer = conn.getresponse()
             return answer.status, {k.lower(): v for k, v in answer.getheaders()}, answer.read()
         finally:

@@ -113,7 +113,11 @@ class Control:
     # a number of its own), and the condition they wait on, of `_lock`.
     _holds: dict[str, tuple[str, int]] = field(default_factory=dict)
     _held: int = 0
-    _group_rev: int = 0
+    _group_rev: tuple[int, int, int] = (
+        0,
+        0,
+        0,
+    )  # the group's rev, and its call's (see _group_moved)
     _changed: threading.Condition = field(init=False)
 
     def __post_init__(self) -> None:
@@ -563,12 +567,15 @@ class Control:
         wants_html: bool,
         cookie: str | None = None,
         query: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
     ) -> Answer:
         with self._lock:
             stream = self.stream
             if stream is None:
                 return MISSING
-            answer = stream.visit(path, ip, user_agent, wants_html, self.clock(), cookie, query)
+            answer = stream.visit(
+                path, ip, user_agent, wants_html, self.clock(), cookie, query, body
+            )
             if answer.saves:
                 self._save_due(answer.saves)
             self._group_moved()
@@ -583,19 +590,23 @@ class Control:
     # --- watching together
 
     def _group_moved(self) -> None:
-        """Wake the pages that wait, when the group changed. Called with `_lock` held."""
+        """Wake the pages that wait, when the group changed, or its call: who is in it, or a
+        new message for one of them. Called with `_lock` held."""
         stream = self.stream
-        rev = stream.together.rev if stream is not None and stream.together is not None else 0
+        room = stream.together if stream is not None else None
+        rev = (room.rev, room.call.version, room.call.seq) if room is not None else (0, 0, 0)
         if rev != self._group_rev:
             self._group_rev = rev
             self._changed.notify_all()
 
     def _hold(self, stream: Stream, answer: Answer, ip: str, cookie: str | None) -> Answer:
-        """Hold a page's wait until the group changes, HOLD_SECONDS at most, then answer
+        """Hold a page's wait until the group changes, or its call has news for the page
+        (see Stream.call_news), HOLD_SECONDS at most, then answer
         with the group's state, and how long it was held (`waited`), so the page can tell
         the trip there and back from the wait. Called with `_lock` held; the wait lets go
         of it. Approval is looked at again before the answer."""
         page, rev, device = answer.data["page"], answer.data["rev"], answer.data["device"]
+        version, after = answer.data.get("cv"), answer.data.get("cm")
         mine = sum(1 for d, _ in self._holds.values() if d == device)
         full = len(self._holds) >= MAX_HOLDS or mine >= HOLDS_PER_DEVICE
         began = time.monotonic()
@@ -609,6 +620,7 @@ class Control:
                     self.stream is stream
                     and stream.together is not None
                     and stream.together.rev == rev
+                    and not stream.call_news(page, version, after)
                     and self._holds.get(page) == ticket
                 ):
                     left = HOLD_SECONDS - (time.monotonic() - began)
@@ -623,7 +635,7 @@ class Control:
         if not stream.devices.passes(stream.policy, ip, cookie):
             return DENIED
         waited = round(time.monotonic() - began, 3)
-        data = {**stream.group_state(page, self.clock()), "waited": waited}
+        data = {**stream.group_state(page, self.clock(), after), "waited": waited}
         return Answer(200, "client", number=answer.number, data=data)
 
     def tick_together(self) -> None:

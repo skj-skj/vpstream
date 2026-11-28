@@ -1,12 +1,14 @@
 """What viewers get on the stream port. Caddy passes every request here, over a unix socket.
 
 This app is all a viewer can reach of the daemon. The one thing a viewer changes is its own
-client record, by the reports of its player (see `clients`); nothing else here changes
-anything. For a video it answers with the name of the file, and Caddy sends the file itself.
+client record, by the reports of its player (see `clients`), and, watching together, the
+group's state and its call; nothing else here changes anything. For a video it answers with
+the name of the file, and Caddy sends the file itself.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from html import escape
@@ -26,6 +28,9 @@ COOKIE_SECONDS = 30 * 24 * 3600  # the cookie outlives a TV turned off; its stre
 # sync.js makes it), each as long as the longest value (a viewer's name, clients.MAX_NAME).
 MAX_VALUES, MAX_VALUE = 20, clients.MAX_NAME
 _HOST = re.compile(r"[A-Za-z0-9.:\[\]-]{1,255}")
+# The player page may use the camera and the mic, for a call (see player.CALL); no page
+# of another site that it might hold may.
+PERMISSIONS = "camera=(self), microphone=(self)"
 
 _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -130,7 +135,9 @@ def respond(answer: Answer, host: str, wants_html: bool = False, scheme: str = "
     if answer.kind == "playlist":
         return Response(playlist(answer.alias, answer.names, host, scheme), mimetype=M3U_TYPE)
     if answer.kind == "player":
-        return _html(200, player.page(answer.data))
+        page = _html(200, player.page(answer.data))
+        page.headers["Permissions-Policy"] = PERMISSIONS
+        return page
     if answer.kind == "asset":
         return Response(player.asset(answer.asset), content_type=player.ASSETS[answer.asset])
     if answer.kind == "client":
@@ -150,11 +157,30 @@ def respond(answer: Answer, host: str, wants_html: bool = False, scheme: str = "
         )
         response.headers["Retry-After"] = "30"
         return response
+    if answer.kind == "busy":
+        return _text(answer.status, "Too many messages. Wait a moment.")
     if answer.kind == "denied":
         return _text(
             answer.status, "This device is not allowed to watch. Ask the person who sent the link."
         )
     return _text(answer.status, "Nothing here.")
+
+
+def call_body() -> dict[str, Any] | None:
+    """What a page posted to its call: a JSON object of caddy.CALL_BYTES at most, sent by
+    the player (its header, as a report's). None for anything else. JSON and the header
+    make a browser ask first before it sends this from a page of another site, which Caddy
+    refuses."""
+    length = request.content_length
+    if request.headers.get(player.REPORT_HEADER) != "1" or request.mimetype != "application/json":
+        return None
+    if length is None or length > caddy.CALL_BYTES:
+        return None
+    try:
+        data = json.loads(request.get_data(cache=False))
+    except (ValueError, RecursionError):  # not JSON, or nested past what Python reads
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def create_app(control: Control) -> Flask:
@@ -165,10 +191,19 @@ def create_app(control: Control) -> Flask:
 
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
-    def visit(path: str) -> Response:
+    # The one thing posted: a page's message for its call (see player.CALL).
+    @app.route(f"/<alias>/<number>/{player.CALL}", methods=["POST"], endpoint="call")
+    def visit(path: str = "", alias: str = "", number: str = "") -> Response:
+        if request.method == "POST":
+            path = f"{alias}/{number}/{player.CALL}"
         ip = normal_ip(request.headers.get(caddy.HEADER_IP))
         if ip is None:  # not through Caddy
             return _text(400, "Bad request.")
+        body = None
+        if request.method == "POST":
+            body = call_body()
+            if body is None:
+                return _text(400, "Bad request.")
         wants_html = "text/html" in request.headers.get("Accept", "").lower()
         # What Caddy says the viewer came over; a viewer cannot set it (see `caddy`).
         https = request.headers.get(caddy.HEADER_SCHEME) == "https"
@@ -183,6 +218,7 @@ def create_app(control: Control) -> Flask:
             {k: v[:MAX_VALUE] for k, v in list(request.args.items())[:MAX_VALUES]}
             if request.headers.get(player.REPORT_HEADER) == "1"
             else None,
+            body,
         )
         response = respond(answer, request.host, wants_html, "https" if https else "http")
         response.headers["Cache-Control"] = "no-store"

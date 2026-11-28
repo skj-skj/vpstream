@@ -155,7 +155,8 @@ def test_the_gates_socket_takes_every_dial_caddy_may_make_at_once(
     short_tmp: Path, tailnet: FakeRunner, bound: int
 ) -> None:
     """Caddy dials the gate for videos (gate_connections) and, watching together, for the
-    players' waits (caddy.SYNC_CONNECTIONS), each bounded on its own. When every held wait
+    players' waits (caddy.SYNC_CONNECTIONS) and calls (caddy.CALL_CONNECTIONS), each bounded on
+    its own. When every held wait
     is answered at once and every page waits again, the dials come together: past the
     socket's backlog one was refused and its viewer got a 502."""
     cfg = config.Config(dashboard_port=free_port(), gate_connections=bound)
@@ -164,7 +165,7 @@ def test_the_gates_socket_takes_every_dial_caddy_may_make_at_once(
     run = daemon.Daemon(cfg, paths, tailnet, None, FakeServer(), log=lambda m: None)
     listener, _ = run._unix_server(paths.gate_socket, lambda env, start: [])
     try:
-        need = (bound or daemon.BACKLOG) + caddy.SYNC_CONNECTIONS
+        need = (bound or daemon.BACKLOG) + caddy.SYNC_CONNECTIONS + caddy.CALL_CONNECTIONS
         assert _waiting_dials(paths.gate_socket, need + 8) >= need
         assert control.MAX_HOLDS < caddy.SYNC_CONNECTIONS
     finally:

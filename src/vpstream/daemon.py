@@ -28,6 +28,7 @@ from typing import Any, Protocol
 from vpstream import __version__, api, ffargs, local, net, platform, prepare, public
 from vpstream import login as auth
 from vpstream.caddy import (
+    CALL_CONNECTIONS,
     SYNC_CONNECTIONS,
     CaddyError,
     CaddyServer,
@@ -95,8 +96,9 @@ def socket_in_use(path: Path) -> bool:
 def gate_backlog(config: Config) -> int:
     """How many connections the gate's socket lets wait to be taken: as many as Caddy may
     dial at once, for videos (`gate_connections`) and for the waits of players watching
-    together (caddy.SYNC_CONNECTIONS). Past it a dial is refused and the viewer gets a 502."""
-    return (config.gate_connections or BACKLOG) + SYNC_CONNECTIONS
+    together (caddy.SYNC_CONNECTIONS) and for their calls (caddy.CALL_CONNECTIONS). Past it a
+    dial is refused and the viewer gets a 502."""
+    return (config.gate_connections or BACKLOG) + SYNC_CONNECTIONS + CALL_CONNECTIONS
 
 
 def bind_unix(path: Path, mode: int = SOCKET_MODE, backlog: int = BACKLOG) -> socket.socket:

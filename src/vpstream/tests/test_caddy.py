@@ -90,7 +90,7 @@ def test_config_is_json_plain_http_and_never_opens_an_admin_port() -> None:
 
 def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
     cfg = caddy.config(1337, Path("/run/vpstream/gate.sock"), Path("/x/access.log"), Path("/v"))
-    refuse, sync, ask = cfg["apps"]["http"]["servers"]["vpstream"]["routes"]
+    call, refuse, sync, ask = cfg["apps"]["http"]["servers"]["vpstream"]["routes"]
     assert refuse["match"] == [{"not": [{"method": ["GET", "HEAD"]}]}] and refuse["terminal"]
     assert refuse["handle"][0]["status_code"] == 405
     assert "match" not in ask  # no path is served without asking
@@ -110,6 +110,13 @@ def test_every_request_goes_to_the_gate_with_the_real_address() -> None:
     # Bounded on its own, apart from the videos' bound: the gate's socket takes both at once.
     assert wait["transport"]["max_conns_per_host"] == caddy.SYNC_CONNECTIONS
     assert wait["transport"]["keep_alive"]["max_idle_conns_per_host"] == caddy.SYNC_CONNECTIONS
+    # The one POST: a page's message for the call, small, bounded on its own, never a file.
+    assert call["match"] == [{"method": ["POST"], "path": ["/*/*/call"]}] and call["terminal"]
+    body, post = call["handle"]
+    assert body == {"handler": "request_body", "max_size": caddy.CALL_BYTES}
+    assert post["upstreams"] == proxy["upstreams"] and post["headers"] == proxy["headers"]
+    assert "handle_response" not in post
+    assert post["transport"]["max_conns_per_host"] == caddy.CALL_CONNECTIONS
 
 
 def test_a_file_is_sent_only_when_the_gate_names_one() -> None:
@@ -353,7 +360,7 @@ def test_the_dashboard_config_is_https_for_the_address_and_never_touches_trust_s
 
 def test_both_caddies_hand_on_the_address_the_same_way(tmp_path: Path) -> None:
     stream = caddy.config(1337, tmp_path / "g.sock", tmp_path / "a.log", tmp_path / "v")
-    gate = stream["apps"]["http"]["servers"]["vpstream"]["routes"][1]["handle"][0]
+    gate = stream["apps"]["http"]["servers"]["vpstream"]["routes"][2]["handle"][0]
     dash = _dashboard_config(tmp_path, ["h"], tmp_path / "g.sock")
     proxy = dash["apps"]["http"]["servers"][caddy.DASHBOARD_SERVER]["routes"][0]["handle"][0]
     assert proxy["headers"] == gate["headers"] and proxy["upstreams"] == gate["upstreams"]

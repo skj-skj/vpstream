@@ -544,6 +544,7 @@ def test_call_passes_messages_to_a_page_until_it_has_them() -> None:
     assert room.call_state("b", T0 + 1, after=seq)["mail"] == []
     assert not call.news("b", call.version, seq)
     assert call.news("b", call.version - 1, seq), "a change of the call is news"
+    assert not call.news("b", None, seq), "to a page that follows it"
 
 
 def test_call_a_mailbox_keeps_the_newest_and_not_for_long() -> None:

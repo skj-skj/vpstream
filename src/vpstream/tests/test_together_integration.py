@@ -255,3 +255,39 @@ def test_two_pages_watch_together_over_https_with_a_certificate_from_pebble(
     monkeypatch.setattr(together, "COOLDOWN_SECONDS", 1.0)
     _together_run(issued, sample)
     assert issued.api("status")["https"]["certificate"], "served with Pebble's"
+
+
+def _post(run: Live, browser: dict[str, str], body: Any, raw: bytes = b"") -> tuple[int, Any]:
+    headers = {**browser, **PLAYER, "Content-Type": "application/json"}
+    data = raw or json.dumps(body).encode()
+    status, _, answer = run.get("/aaa/1/call", "POST", headers, body=data)
+    return status, json.loads(answer) if status == 200 else answer
+
+
+def test_a_call_is_set_up_through_caddy_over_https(
+    kept: Live,  # noqa: F811
+    sample: Path,
+) -> None:
+    """Two pages, as call.js has them: one starts a call, the other is rung and joins, and
+    a message from one comes to the other with its next wait. Caddy takes only a small
+    body, and no other POST."""
+    from vpstream import caddy
+
+    _start(kept, sample)
+    tv, phone = _let_in(kept), _let_in(kept)
+    assert _page(kept, tv)["together"]["call"] == "/aaa/1/call"
+    for browser, pg in ((tv, "tv000001"), (phone, "ph000001")):
+        _ask(kept, browser, f"/aaa/1/client?pg={pg}&t=0&d=12&p=1&in=1")
+    status, started = _post(kept, tv, {"pg": "tv000001", "do": "start"})
+    assert status == 200 and started["outcome"] == together.STARTED
+    rung = _ask(kept, phone, "/aaa/1/sync?pg=ph000001&rev=0&cv=0")
+    assert rung["call"]["ring"] is True
+    assert _post(kept, phone, {"pg": "ph000001", "do": "start"})[1]["outcome"] == "joined"
+    offer = {"pg": "tv000001", "do": "send", "to": "ph000001", "kind": "offer", "data": "v=0"}
+    assert _post(kept, tv, offer)[1]["outcome"] == together.SENT
+    answer = _ask(kept, phone, "/aaa/1/client?pg=ph000001&t=0&d=12&p=1&in=1&cm=0")
+    assert [m["data"] for m in answer["call"]["mail"]] == ["v=0"]
+    big = json.dumps({"pg": "tv000001", "data": "x" * caddy.CALL_BYTES}).encode()
+    assert _post(kept, tv, None, raw=big)[0] == 413
+    status, _, _ = kept.get("/aaa/1/client", "POST", {**tv, **PLAYER}, body=b"{}")
+    assert status == 405, "nothing else is posted"

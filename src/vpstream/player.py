@@ -22,6 +22,10 @@ REPORT = "client"  # /ALIAS/N/client?t=... is where the player reports and gets 
 # has a route of its own in Caddy (see caddy.config): a request held there must not take
 # one of the gate's connections, which the video's pieces need.
 SYNC = "sync"
+# POST /ALIAS/N/call is where a page watching together over HTTPS sends what it does in the
+# call, and the messages that set up its connections to the others (see together.Call). It
+# too has a route of its own in Caddy, the one way in that is not a GET.
+CALL = "call"
 # Sent with every report. A page on another site cannot add a header to a request without
 # asking first (a preflight), which Caddy refuses: so a report is the player's, even in a
 # browser that sends the cookie along with requests from other sites.
@@ -121,12 +125,14 @@ def settings(
     group: dict[str, Any] | None = None,
     own: clients.Client | None = None,
     ui: str = NEW_UI,
+    call: bool = False,
 ) -> dict[str, Any]:
     """What the player page is told about video `number` (1-based) of a stream: its audio
     tracks, the subtitles that are prepared, which of them it starts with, where it starts
     and where it reports (see `clients`). Watching together, `group` is the group's state
     (see `together`): the page starts with it, and follows it. `own` is this browser's
-    record even then: the subtitle size is its own (by default `client`)."""
+    record even then: the subtitle size is its own (by default `client`). `call`: the
+    viewers of the group can call each other (the stream is on HTTPS)."""
     own = own or client
     hls = f"/{alias}/{number}/hls/"
     audio_tracks, options = choices(entry, hls)
@@ -161,6 +167,7 @@ def settings(
             "sync": f"/{alias}/{number}/{SYNC}",
             "tolerance": together.SYNC_SECONDS,
             "names": names if folder else [],
+            "call": f"/{alias}/{number}/{CALL}" if call else None,
         }
     return data
 
