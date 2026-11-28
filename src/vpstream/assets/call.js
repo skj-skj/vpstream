@@ -227,6 +227,34 @@
       }, failed);
     }
 
+    // The mic asked for again, on a tap of Mic while this page has none: the one asked for
+    // on joining may have been refused then, or been taken since by another app (iOS).
+    // A refusal now says why (NotAllowedError, NotReadableError...).
+    var askingMic = false;
+    function micAgain() {
+      if (askingMic) { return; }
+      askingMic = true;
+      media().getUserMedia(wants(false, true)).then(function (stream) {
+        askingMic = false;
+        var track = first(stream, "audio");
+        if (!inCall || !track) {
+          if (track) { track.stop(); }
+          if (inCall) { hooks.said("No mic can be used here."); }
+          return;
+        }
+        if (audio) { audio.stop(); }
+        audio = track;
+        mic = true;
+        steerAll();
+        tellSoon();
+        hooks.changed();
+      }, function (e) {
+        askingMic = false;
+        var why = e && e.name && e.name !== "Error" ? " (" + e.name + ")" : "";
+        hooks.said("No mic can be used here" + why + ".");
+      });
+    }
+
     function stopMedia() {
       if (audio) { audio.stop(); }
       audio = null;
@@ -588,7 +616,10 @@
         hooks.changed();
       },
       toggleMic: function () {
-        if (!audio) { hooks.said("No mic can be used here."); return; }
+        if (!audio || audio.readyState === "ended") {
+          if (inCall) { micAgain(); } else { hooks.said("No mic can be used here."); }
+          return;
+        }
         mic = !mic;
         audio.enabled = mic;
         tellSoon();
